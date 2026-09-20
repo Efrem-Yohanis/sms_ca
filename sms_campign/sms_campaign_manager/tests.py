@@ -1,11 +1,14 @@
 import json
 import sqlite3
 import tempfile
+from io import StringIO
+from unittest.mock import patch
 
 import yaml
 
 from django.test import TestCase
 from django.conf import settings
+from django.core.management import call_command
 from django.urls import resolve
 from rest_framework.test import APIRequestFactory
 
@@ -18,6 +21,7 @@ from .models import (
     Language,
     CustomerProfileConfig,
     DeliveryRecord,
+    DeliveryReportInbox,
     SentRecord,
 )
 from .serializers import CampaignCreateUpdateSerializer, MessageContentCreateUpdateSerializer
@@ -215,7 +219,7 @@ class DeliveryReportCallbackTests(TestCase):
             'provider_message_id': 'smsc-provider-1',
             'receiver': '+251700000001',
             'status': 'DELIVRD',
-            'delivered_at': '2026-09-16T10:15:32.123456+00:00',
+            'delivered_at': '2026-09-16T10:15:32Z',
         }
 
         first = self.client.post('/api/v1/delivery-reports/callback/', payload, format='json')
@@ -227,6 +231,48 @@ class DeliveryReportCallbackTests(TestCase):
         record = DeliveryRecord.objects.get(sent_record=sent_record)
         self.assertEqual(record.delivery_status, 'DELIVERED')
         self.assertIsNotNone(record.delivered_at)
+
+    def test_async_delivery_report_is_queued_and_processed(self):
+        channel = Channel.objects.create(code='sms', name='SMS')
+        SenderID.objects.create(sender_id='SMSINFO', name='SMS Info', is_active=True, is_default=True)
+        campaign = Campaign.objects.create(
+            name='Async delivery callback campaign',
+            sender_id='SMSINFO',
+            channels_id=[channel.id],
+            status='active',
+            is_ready_to_execute=True,
+        )
+        sent_record = SentRecord.objects.create(
+            campaign=campaign,
+            channel=channel,
+            msisdn='+251700000001',
+            batch_id='batch-async',
+            sent_status='ACCEPTED',
+            provider_message_id='smsc-provider-async',
+        )
+
+        payload = {
+            'provider_message_id': sent_record.provider_message_id,
+            'receiver': sent_record.msisdn,
+            'status': 'DELIVRD',
+        }
+        with patch.dict('os.environ', {'DLR_ASYNC_PROCESSING': 'true'}):
+            response = self.client.post(
+                '/api/v1/delivery-reports/callback/',
+                payload,
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, 202)
+        inbox = DeliveryReportInbox.objects.get()
+        self.assertEqual(inbox.status, 'pending')
+
+        output = StringIO()
+        call_command('process_delivery_reports', '--once', stdout=output)
+        inbox.refresh_from_db()
+        self.assertEqual(inbox.status, 'processed', inbox.last_error)
+        record = DeliveryRecord.objects.get(sent_record=sent_record)
+        self.assertEqual(record.delivery_status, 'DELIVERED')
 
 
 

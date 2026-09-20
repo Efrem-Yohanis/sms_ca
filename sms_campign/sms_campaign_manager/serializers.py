@@ -24,6 +24,9 @@ from .models import (
     SentRecord,
     SenderID,
     SMSCConfig,
+    EmailServerConfig,
+    EmailCampaignReport,
+    EmailCampaignReportRecipient,
 )
 
 
@@ -822,3 +825,77 @@ class ScheduleCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'time_windows': 'At least one time window is required.'})
         return attrs
 
+
+class EmailServerConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailServerConfig
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'password': {'write_only': True, 'required': False, 'allow_blank': True},
+        }
+
+    def validate(self, attrs):
+        use_tls = attrs.get('use_tls', getattr(self.instance, 'use_tls', True))
+        use_ssl = attrs.get('use_ssl', getattr(self.instance, 'use_ssl', False))
+        if use_tls and use_ssl:
+            raise serializers.ValidationError({
+                'use_ssl': 'TLS and SSL cannot both be enabled.',
+            })
+        return attrs
+
+
+class EmailCampaignReportRecipientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailCampaignReportRecipient
+        fields = ['id', 'email', 'name']
+        read_only_fields = ['id']
+
+
+class EmailCampaignReportSerializer(serializers.ModelSerializer):
+    recipients = EmailCampaignReportRecipientSerializer(many=True, required=False)
+    campaign_ids = serializers.PrimaryKeyRelatedField(
+        source='campaigns', many=True, queryset=Campaign.objects.filter(is_deleted=False),
+        required=False,
+    )
+
+    class Meta:
+        model = EmailCampaignReport
+        fields = [
+            'id', 'name', 'owner', 'email_server', 'campaign_ids', 'frequency',
+            'include_owner', 'is_active', 'last_sent_at', 'recipients',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'owner', 'last_sent_at', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            raise serializers.ValidationError({
+                'owner': 'An authenticated user is required to create a report.',
+            })
+        recipients = validated_data.pop('recipients', [])
+        campaigns = validated_data.pop('campaigns', [])
+        report = EmailCampaignReport.objects.create(
+            owner=self.context['request'].user, **validated_data,
+        )
+        report.campaigns.set(campaigns)
+        EmailCampaignReportRecipient.objects.bulk_create(
+            [EmailCampaignReportRecipient(report=report, **item) for item in recipients],
+        )
+        return report
+
+    def update(self, instance, validated_data):
+        recipients = validated_data.pop('recipients', None)
+        campaigns = validated_data.pop('campaigns', None)
+        for key, value in validated_data.items():
+            setattr(instance, key, value)
+        instance.save()
+        if campaigns is not None:
+            instance.campaigns.set(campaigns)
+        if recipients is not None:
+            instance.recipients.all().delete()
+            EmailCampaignReportRecipient.objects.bulk_create(
+                [EmailCampaignReportRecipient(report=instance, **item) for item in recipients],
+            )
+        return instance

@@ -84,13 +84,28 @@ WSGI_APPLICATION = 'sms_campign.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+#
+# Set POSTGRES_PASSWORD to use the local PostgreSQL instance for scale tests.
+# SQLite remains the default for lightweight local development and Django tests.
+if os.environ.get('POSTGRES_PASSWORD'):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('POSTGRES_DB', 'postgres'),
+            'USER': os.environ.get('POSTGRES_USER', 'postgres'),
+            'PASSWORD': os.environ['POSTGRES_PASSWORD'],
+            'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
+            'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+            'CONN_MAX_AGE': int(os.environ.get('POSTGRES_CONN_MAX_AGE', '60')),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -142,6 +157,19 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
+# Kafka is disabled by default so local development and tests do not require a broker.
+KAFKA_ENABLED = os.environ.get('KAFKA_ENABLED', 'false').lower() in ('1', 'true', 'yes')
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+KAFKA_DLR_TOPIC = os.environ.get('KAFKA_DLR_TOPIC', 'delivery.report.received')
+KAFKA_MESSAGE_CREATED_TOPIC = os.environ.get('KAFKA_MESSAGE_CREATED_TOPIC', 'message.created')
+KAFKA_SENT_TOPIC = os.environ.get('KAFKA_SENT_TOPIC', 'sent.report.received')
+KAFKA_DLQ_TOPIC = os.environ.get('KAFKA_DLQ_TOPIC', 'sms.dlq')
+KAFKA_DLR_GROUP_ID = os.environ.get('KAFKA_DLR_GROUP_ID', 'sms-campaign-manager-dlr')
+KAFKA_SENT_GROUP_ID = os.environ.get('KAFKA_SENT_GROUP_ID', 'sms-campaign-manager-sent')
+KAFKA_MAX_RETRIES = int(os.environ.get('KAFKA_MAX_RETRIES', '5'))
+KAFKA_PUBLISH_BATCH_SIZE = max(1, min(int(os.environ.get('KAFKA_PUBLISH_BATCH_SIZE', '100')), 10000))
+KAFKA_CONSUMER_POLL_TIMEOUT = float(os.environ.get('KAFKA_CONSUMER_POLL_TIMEOUT', '1.0'))
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'SMS Campaign Manager API',
     'VERSION': '1.0.0',
@@ -158,6 +186,8 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Databases', 'description': 'Database configuration, schema exploration, and customer profile mapping'},
         {'name': 'Channel Manager', 'description': 'Campaign channel management'},
         {'name': 'Language Manager', 'description': 'Language CRUD operations'},
+        {'name': 'Email Server Config', 'description': 'SMTP server configuration for campaign reports'},
+        {'name': 'Email Campaign Reports', 'description': 'Scheduled campaign progress reports'},
     ],
     'ENUM_NAME_OVERRIDES': {
         'DefaultLanguageE1dEnum': 'DefaultLanguageEnum',

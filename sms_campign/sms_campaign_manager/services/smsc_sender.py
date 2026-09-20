@@ -11,6 +11,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import MessageObject, SMSCConfig, SentRecord
+from ..kafka import enqueue_event, TOPIC_SENT
+from django.conf import settings
 
 
 DLR_CALLBACK_URL = os.getenv(
@@ -53,25 +55,15 @@ class SmsSenderService:
             }
 
         outcomes = self._submit(messages)
-        report = {
+        report = self._record_outcomes(outcomes, messages)
+        report.update({
             'success': True,
-            'sent': 0,
-            'failed': 0,
-            'retried': 0,
-            'removed': 0,
             'campaigns': len(campaign_rows),
             'allocated': {
                 str(campaign_id): len(rows)
                 for campaign_id, rows in campaign_rows.items()
             },
-            'errors': [],
-        }
-        for outcome in outcomes:
-            result = self._record_outcome(outcome)
-            for key in ('sent', 'failed', 'retried', 'removed'):
-                report[key] += result[key]
-            if result.get('error'):
-                report['errors'].append(result['error'])
+        })
         return report
 
     def run_forever(self, *, sleep_when_empty: float = 0.25) -> None:
@@ -94,21 +86,22 @@ class SmsSenderService:
             .select_related('campaign', 'channel')
             .order_by('campaign_id', 'id')
         )
-        grouped: dict[int, list[MessageObject]] = {}
-        for message in pending:
-            grouped.setdefault(message.campaign_id, []).append(message)
-
-        campaign_ids = sorted(grouped)
+        campaign_ids = list(
+            pending.order_by().values_list('campaign_id', flat=True).distinct()
+        )
         if not campaign_ids:
             return {}
 
         capacity = self.smsc_config.rate_limit_per_second
         base, remainder = divmod(capacity, len(campaign_ids))
-        return {
-            campaign_id: grouped[campaign_id][:base + (index < remainder)]
-            for index, campaign_id in enumerate(campaign_ids)
-            if base + (index < remainder) > 0
-        }
+        grouped: dict[int, list[MessageObject]] = {}
+        for index, campaign_id in enumerate(campaign_ids):
+            allocation = base + (index < remainder)
+            if allocation:
+                grouped[campaign_id] = list(
+                    pending.filter(campaign_id=campaign_id)[:allocation]
+                )
+        return grouped
 
     def _submit(self, messages: list[MessageObject]) -> list[SendOutcome]:
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
@@ -149,54 +142,102 @@ class SmsSenderService:
         except requests.RequestException as exc:
             return SendOutcome(message.id, False, {}, str(exc))
 
-    def _record_outcome(self, outcome: SendOutcome) -> dict[str, Any]:
-        message = MessageObject.objects.filter(pk=outcome.message_id).select_related('campaign', 'channel').first()
-        if message is None:
-            return {'sent': 0, 'failed': 0, 'retried': 0, 'removed': 0}
-
-        attempt_number = message.send_attempts + 1
-        provider_id = str(outcome.response.get('provider_message_id', ''))
-        provider_status = str(outcome.response.get('status', 'FAILED'))
-        sent_status = 'ACCEPTED' if outcome.accepted else 'FAILED'
-
-        if outcome.accepted:
-            with transaction.atomic():
-                SentRecord.objects.create(
-                    campaign=message.campaign,
-                    channel=message.channel,
-                    message_object=message,
-                    msisdn=message.recipient,
-                    batch_id=message.batch_id,
-                    submitted_at=timezone.now(),
-                    sent_status=sent_status,
-                    provider_message_id=provider_id,
-                    provider_status=provider_status,
-                    provider_response=outcome.response,
-                )
-                message.delete()
-            return {'sent': 1, 'failed': 0, 'retried': 0, 'removed': 1}
-
+    def _record_outcomes(
+        self,
+        outcomes: list[SendOutcome],
+        messages: list[MessageObject],
+    ) -> dict[str, Any]:
+        """Persist one sender window with bounded bulk database operations."""
+        messages_by_id = {message.id: message for message in messages}
+        sent_records = []
+        messages_to_update = []
+        message_ids_to_remove = []
+        sent = failed = retried = removed = 0
+        errors = []
+        submitted_at = timezone.now()
         max_retries = self.smsc_config.max_retries
-        message.send_attempts = attempt_number
-        message.last_error = outcome.error
-        message.sent_status = 'FAILED'
-        message.failed_at = timezone.now()
-        message.save(update_fields=[
-            'send_attempts', 'last_error', 'sent_status', 'failed_at', 'updated_at',
-        ])
-        SentRecord.objects.create(
-            campaign=message.campaign,
-            channel=message.channel,
-            message_object=message,
-            msisdn=message.recipient,
-            batch_id=message.batch_id,
-            sent_status='FAILED',
-            provider_message_id=provider_id,
-            provider_status=provider_status,
-            provider_response=outcome.response,
-            error_message=outcome.error,
-        )
-        if attempt_number >= max_retries:
-            message.delete()
-            return {'sent': 0, 'failed': 1, 'retried': 0, 'removed': 1}
-        return {'sent': 0, 'failed': 1, 'retried': 1, 'removed': 0}
+
+        for outcome in outcomes:
+            message = messages_by_id.get(outcome.message_id)
+            if message is None:
+                errors.append(
+                    f'Send outcome referenced unknown message id {outcome.message_id}.'
+                )
+                continue
+
+            provider_id = str(outcome.response.get('provider_message_id', ''))
+            provider_status = str(outcome.response.get('status', 'FAILED'))
+            sent_records.append(SentRecord(
+                campaign=message.campaign,
+                channel=message.channel,
+                message_object=message,
+                msisdn=message.recipient,
+                batch_id=message.batch_id,
+                submitted_at=submitted_at if outcome.accepted else None,
+                sent_status='ACCEPTED' if outcome.accepted else 'FAILED',
+                provider_message_id=provider_id,
+                provider_status=provider_status,
+                provider_response=outcome.response,
+                error_message='' if outcome.accepted else outcome.error,
+            ))
+
+            if outcome.accepted:
+                sent += 1
+                removed += 1
+                message_ids_to_remove.append(message.id)
+                continue
+
+            failed += 1
+            attempt_number = message.send_attempts + 1
+            message.send_attempts = attempt_number
+            message.last_error = outcome.error
+            message.sent_status = 'FAILED'
+            message.failed_at = submitted_at
+            message.updated_at = submitted_at
+            if attempt_number < max_retries:
+                retried += 1
+                messages_to_update.append(message)
+            else:
+                removed += 1
+                message_ids_to_remove.append(message.id)
+
+        with transaction.atomic():
+            if sent_records:
+                SentRecord.objects.bulk_create(
+                    sent_records,
+                    batch_size=5000,
+                )
+                if settings.KAFKA_ENABLED:
+                    for record, outcome in zip(sent_records, outcomes):
+                        enqueue_event('sent.report.received', {
+                            'message_id': record.message_object.message_id,
+                            'provider_message_id': record.provider_message_id,
+                            'status': record.provider_status,
+                            'accepted': outcome.accepted,
+                            'provider_response': record.provider_response,
+                        }, key=record.provider_message_id or record.message_object.message_id,
+                           topic=TOPIC_SENT)
+            if messages_to_update:
+                MessageObject.objects.bulk_update(
+                    messages_to_update,
+                    [
+                        'send_attempts',
+                        'last_error',
+                        'sent_status',
+                        'failed_at',
+                        'updated_at',
+                    ],
+                    batch_size=5000,
+                )
+            if message_ids_to_remove:
+                MessageObject.objects.filter(
+                    id__in=message_ids_to_remove,
+                ).delete()
+
+        return {
+            'sent': sent,
+            'failed': failed,
+            'retried': retried,
+            'removed': removed,
+            'errors': errors,
+        }

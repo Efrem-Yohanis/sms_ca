@@ -1,6 +1,7 @@
 """API views for Campaign Manager."""
 
 import logging
+import os
 
 from django.db.models import Count, Q, OuterRef, Subquery
 from django.shortcuts import get_object_or_404
@@ -30,6 +31,8 @@ from .models import (
 	SentRecord,
 	SenderID,
 	SMSCConfig,
+	EmailServerConfig,
+	EmailCampaignReport,
 )
 from .pagination import StandardPagination
 from .serializers import (
@@ -70,6 +73,8 @@ from .serializers import (
 	SenderIDCreateUpdateSerializer,
 	SMSCConfigSerializer,
 	SMSCConfigCreateUpdateSerializer,
+	EmailServerConfigSerializer,
+	EmailCampaignReportSerializer,
 )
 from .services.database_connector import DatabaseConnector
 from .services.language_mapper import LanguageMapper
@@ -79,6 +84,8 @@ from .services.campaign_readiness import CampaignReadinessService
 from .services.audience_service import AudienceService, AudienceBuildService
 from .services.sent_tracker_service import SentTrackerService
 from .services.message_builder import MessageBuilder
+from .kafka import enqueue_event, TOPIC_DLR
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +170,104 @@ class SMSCConfigDetailView(RetrieveUpdateDestroyAPIView):
 	@extend_schema(tags=['SMSC Config'], summary='Delete SMSC configuration', responses={200: OpenApiResponse(description='Deleted.')})
 	def delete(self, request, *args, **kwargs):
 		return super().delete(request, *args, **kwargs)
+
+
+@extend_schema_view(
+	get=extend_schema(
+		tags=['Email Server Config'],
+		summary='List email servers',
+		responses={200: EmailServerConfigSerializer(many=True)},
+	),
+	post=extend_schema(
+		tags=['Email Server Config'],
+		summary='Create email server',
+		request=EmailServerConfigSerializer,
+		responses={201: EmailServerConfigSerializer},
+	),
+)
+class EmailServerConfigListCreateView(ListCreateAPIView):
+	queryset = EmailServerConfig.objects.all()
+	serializer_class = EmailServerConfigSerializer
+
+
+@extend_schema_view(
+	get=extend_schema(
+		tags=['Email Server Config'],
+		summary='Get email server',
+		responses={200: EmailServerConfigSerializer},
+	),
+	put=extend_schema(
+		tags=['Email Server Config'],
+		summary='Replace email server',
+		request=EmailServerConfigSerializer,
+		responses={200: EmailServerConfigSerializer},
+	),
+	patch=extend_schema(
+		tags=['Email Server Config'],
+		summary='Update email server',
+		request=EmailServerConfigSerializer,
+		responses={200: EmailServerConfigSerializer},
+	),
+	delete=extend_schema(
+		tags=['Email Server Config'],
+		summary='Delete email server',
+		responses={204: OpenApiResponse(description='Email server deleted.')},
+	),
+)
+class EmailServerConfigDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = EmailServerConfig.objects.all()
+	serializer_class = EmailServerConfigSerializer
+
+
+@extend_schema_view(
+	get=extend_schema(
+		tags=['Email Campaign Reports'],
+		summary='List campaign reports',
+		responses={200: EmailCampaignReportSerializer(many=True)},
+	),
+	post=extend_schema(
+		tags=['Email Campaign Reports'],
+		summary='Create campaign report',
+		request=EmailCampaignReportSerializer,
+		responses={201: EmailCampaignReportSerializer},
+	),
+)
+class EmailCampaignReportListCreateView(ListCreateAPIView):
+	serializer_class = EmailCampaignReportSerializer
+
+	def get_queryset(self):
+		return EmailCampaignReport.objects.filter(owner=self.request.user).prefetch_related('recipients', 'campaigns')
+
+
+@extend_schema_view(
+	get=extend_schema(
+		tags=['Email Campaign Reports'],
+		summary='Get campaign report',
+		responses={200: EmailCampaignReportSerializer},
+	),
+	put=extend_schema(
+		tags=['Email Campaign Reports'],
+		summary='Replace campaign report',
+		request=EmailCampaignReportSerializer,
+		responses={200: EmailCampaignReportSerializer},
+	),
+	patch=extend_schema(
+		tags=['Email Campaign Reports'],
+		summary='Update campaign report',
+		request=EmailCampaignReportSerializer,
+		responses={200: EmailCampaignReportSerializer},
+	),
+	delete=extend_schema(
+		tags=['Email Campaign Reports'],
+		summary='Delete campaign report',
+		responses={204: OpenApiResponse(description='Campaign report deleted.')},
+	),
+)
+class EmailCampaignReportDetailView(RetrieveUpdateDestroyAPIView):
+	serializer_class = EmailCampaignReportSerializer
+
+	def get_queryset(self):
+		return EmailCampaignReport.objects.filter(owner=self.request.user).prefetch_related('recipients', 'campaigns')
 
 
 class SentRecordListCreateView(APIView):
@@ -583,6 +688,29 @@ class DeliveryReportCallbackView(APIView):
 				{'success': False, 'message': 'provider_message_id and status are required.'},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
+
+		if settings.KAFKA_ENABLED:
+			payload = {key: value[0] if isinstance(value, list) and len(value) == 1 else value
+				for key, value in request.data.items()}
+			event = enqueue_event('delivery.report.received', payload,
+				key=provider_message_id, topic=TOPIC_DLR)
+			return Response({'success': True, 'queued': True, 'event_id': event.id},
+				status=status.HTTP_202_ACCEPTED)
+		if os.getenv('DLR_ASYNC_PROCESSING', '').lower() in ('1', 'true', 'yes'):
+			from .models import DeliveryReportInbox
+			payload = {
+				key: value[0] if isinstance(value, list) and len(value) == 1 else value
+				for key, value in request.data.items()
+			}
+			inbox = DeliveryReportInbox.objects.create(
+				provider_message_id=provider_message_id,
+				payload=payload,
+			)
+			return Response({
+				'success': True,
+				'queued': True,
+				'inbox_id': inbox.id,
+			}, status=status.HTTP_202_ACCEPTED)
 
 		status_map = {
 			'DELIVRD': 'DELIVERED',

@@ -2,6 +2,7 @@ import logging
 import uuid
 
 from django.db import transaction
+from django.conf import settings
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 
@@ -12,6 +13,7 @@ from ..models import (
     Channel,
     Language,
 )
+from ..kafka import enqueue_event, TOPIC_MESSAGE_CREATED
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +41,14 @@ class MessageBuilder:
 
         self._validate_prerequisites()
 
+        with transaction.atomic():
+            return self._build_transaction(started)
+
+    def _build_transaction(self, started):
         # Clear any existing queue rows for this campaign.
         cleared = MessageObject.objects.filter(campaign=self.campaign).delete()[0]
 
-        audience_rows = list(
+        audience_query = (
             Audience.objects.filter(
                 campaign=self.campaign,
                 is_valid=True,
@@ -50,12 +56,13 @@ class MessageBuilder:
                 'id', 'msisdn', 'language__code', 'custom_fields',
             )
         )
+        total_audience = audience_query.count()
 
         content = self.campaign.message_content
         channel = self._get_channel()
 
         stats = self._build_and_insert(
-            audience_rows=audience_rows,
+            audience_rows=audience_query.iterator(chunk_size=5000),
             content=content,
             channel=channel,
         )
@@ -65,7 +72,7 @@ class MessageBuilder:
             'round_number': self.round_number,
             'batch_id': self.batch_id,
             'cleared': cleared,
-            'total_audience': len(audience_rows),
+            'total_audience': total_audience,
             **stats,
             'duration_seconds': (timezone.now() - started).total_seconds(),
         }
@@ -100,8 +107,15 @@ class MessageBuilder:
         built = 0
         skipped = 0
         errors = []
+        failed = 0
         rows = []
         chunk_size = 5000
+        languages = {
+            language.code: language
+            for language in Language.objects.filter(
+                code__in=['en', 'am', 'ti', 'om', 'so']
+            )
+        }
 
         for member in audience_rows:
             try:
@@ -117,9 +131,7 @@ class MessageBuilder:
                 personalized = self._personalize(template, member.get('custom_fields') or {})
                 parts = self._calculate_parts(personalized)
 
-                language = Language.objects.filter(code=lang_code).first()
-                if not language:
-                    language = content.default_language
+                language = languages.get(lang_code) or content.default_language
 
                 rows.append(MessageObject(
                     message_id=f'msg_{self.campaign.id}_{uuid.uuid4().hex}',
@@ -139,23 +151,37 @@ class MessageBuilder:
 
                 if len(rows) >= chunk_size:
                     MessageObject.objects.bulk_create(rows, batch_size=chunk_size)
+                    self._enqueue_messages(rows)
                     rows = []
 
             except Exception as exc:
-                errors.append({
-                    'msisdn': member.get('msisdn'),
-                    'error': str(exc),
-                })
+                failed += 1
+                if len(errors) < 20:
+                    errors.append({
+                        'msisdn': member.get('msisdn'),
+                        'error': str(exc),
+                    })
 
         if rows:
             MessageObject.objects.bulk_create(rows, batch_size=chunk_size)
+            self._enqueue_messages(rows)
 
         return {
             'built': built,
             'skipped': skipped,
-            'failed': len(errors),
-            'errors': errors[:20],
+            'failed': failed,
+            'errors': errors,
         }
+
+    def _enqueue_messages(self, rows):
+        if not settings.KAFKA_ENABLED:
+            return
+        for message in rows:
+            enqueue_event('message.created', {
+                'message_id': message.message_id, 'campaign_id': message.campaign_id,
+                'recipient': message.recipient, 'sender_id': message.sender_id,
+                'message_content': message.message_content, 'batch_id': message.batch_id,
+            }, key=message.message_id, topic=TOPIC_MESSAGE_CREATED)
 
     @staticmethod
     def _personalize(template, fields):

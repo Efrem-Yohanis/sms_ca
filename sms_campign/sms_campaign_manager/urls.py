@@ -58,6 +58,10 @@ from .views import (
 	SenderIDDetailView,
 	SMSCConfigListCreateView,
 	SMSCConfigDetailView,
+	EmailServerConfigListCreateView,
+	EmailServerConfigDetailView,
+	EmailCampaignReportListCreateView,
+	EmailCampaignReportDetailView,
 )
 
 
@@ -78,6 +82,10 @@ urlpatterns = [
 	path('sender-ids/<int:pk>/', SenderIDDetailView.as_view(), name='sender-id-detail'),
 	path('smsc-configs/', SMSCConfigListCreateView.as_view(), name='smsc-config-list-create'),
 	path('smsc-configs/<int:pk>/', SMSCConfigDetailView.as_view(), name='smsc-config-detail'),
+	path('email-servers/', EmailServerConfigListCreateView.as_view(), name='email-server-list-create'),
+	path('email-servers/<int:pk>/', EmailServerConfigDetailView.as_view(), name='email-server-detail'),
+	path('email-reports/', EmailCampaignReportListCreateView.as_view(), name='email-report-list-create'),
+	path('email-reports/<int:pk>/', EmailCampaignReportDetailView.as_view(), name='email-report-detail'),
 	path('campaigns/', CampaignListCreateView.as_view(), name='campaign-list-create'),
 	path(
 		'campaigns/<int:campaign_id>/',

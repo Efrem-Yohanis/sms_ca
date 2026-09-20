@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sms
+      POSTGRES_USER: sms
+      POSTGRES_PASSWORD: sms
+    volumes: [postgres-data:/var/lib/postgresql/data]
+  redpanda:
+    image: redpandadata/redpanda:v24.2.9
+    command: ["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "1G", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "redpanda:9092"]
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    working_dir: /app/sms_campign
+    ports: ["8000:8000"]
+    environment:
+      POSTGRES_PASSWORD: sms
+      POSTGRES_DB: sms
+      POSTGRES_USER: sms
+      POSTGRES_HOST: postgres
+      KAFKA_ENABLED: "true"
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on: [postgres, redpanda]
+  outbox-publisher:
+    build: .
+    command: python manage.py publish_outbox
+    working_dir: /app/sms_campign
+    environment:
+      POSTGRES_PASSWORD: sms
+      POSTGRES_DB: sms
+      POSTGRES_USER: sms
+      POSTGRES_HOST: postgres
+      KAFKA_ENABLED: "true"
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on: [web, redpanda]
+  dlr-consumer:
+    build: .
+    command: python manage.py consume_dlr_events
+    working_dir: /app/sms_campign
+    environment:
+      POSTGRES_PASSWORD: sms
+      POSTGRES_DB: sms
+      POSTGRES_USER: sms
+      POSTGRES_HOST: postgres
+      KAFKA_ENABLED: "true"
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on: [web, redpanda]
+  sender:
+    build: .
+    command: python manage.py run_smsc_sender
+    working_dir: /app/sms_campign
+    environment:
+      POSTGRES_PASSWORD: sms
+      POSTGRES_DB: sms
+      POSTGRES_USER: sms
+      POSTGRES_HOST: postgres
+    depends_on: [web]
+volumes:
+  postgres-data:

@@ -711,6 +711,10 @@ class MessageContent(models.Model):
     def has_any_content(self) -> bool:
         return any((c or '').strip() for c in self.get_content_dict().values())
 
+    def has_language(self, language) -> bool:
+        code = getattr(language, 'code', language)
+        return bool((self.get_content_dict().get(code) or '').strip())
+
     def languages_with_content(self) -> list:
         return [
             code for code, text in self.get_content_dict().items()
@@ -1238,6 +1242,64 @@ class DeliveryRecord(models.Model):
             )
 
 
+class DeliveryReportInbox(models.Model):
+    """Durable inbox for asynchronous provider delivery reports."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('processed', 'Processed'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    provider_message_id = models.CharField(max_length=100, db_index=True)
+    payload = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    last_error = models.TextField(blank=True, default='')
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['status', 'available_at']),
+            models.Index(fields=['provider_message_id', 'status']),
+        ]
+
+
+class KafkaOutboxEvent(models.Model):
+    """Transactional outbox row; created in the same transaction as its source event."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('published', 'Published'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    event_type = models.CharField(max_length=150, db_index=True)
+    topic = models.CharField(max_length=250)
+    key = models.CharField(max_length=250, blank=True, default='')
+    payload = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True, default='')
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['status', 'available_at']),
+            models.Index(fields=['event_type', 'status']),
+        ]
+
+
 # ============================================================================
 # CUSTOMER PROFILE CONFIG (language mapping)
 # ============================================================================
@@ -1472,3 +1534,72 @@ def _message_content_saved_refresh_campaign_readiness(sender, instance, **kwargs
 @receiver(post_save, sender=Audience)
 def _audience_saved_refresh_campaign_readiness(sender, instance, **kwargs):
     instance.campaign.refresh_readiness_flag()
+
+
+class EmailServerConfig(models.Model):
+    """SMTP server used to deliver scheduled campaign reports."""
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150, unique=True)
+    host = models.CharField(max_length=255)
+    port = models.PositiveIntegerField(default=587)
+    username = models.CharField(max_length=255, blank=True, default='')
+    password = EncryptedCharField(max_length=500, blank=True, default='')
+    use_tls = models.BooleanField(default=True)
+    use_ssl = models.BooleanField(default=False)
+    from_email = models.EmailField()
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def clean(self):
+        if self.use_tls and self.use_ssl:
+            raise ValidationError({'use_ssl': 'TLS and SSL cannot both be enabled.'})
+
+    def __str__(self):
+        return self.name
+
+
+class EmailCampaignReport(models.Model):
+    """Definition of a recurring email campaign performance report."""
+
+    FREQUENCY_CHOICES = [('10m', 'Every 10 minutes'), ('1h', 'Every hour'), ('daily', 'Daily')]
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=200)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_campaign_reports')
+    email_server = models.ForeignKey(EmailServerConfig, on_delete=models.PROTECT, related_name='reports')
+    campaigns = models.ManyToManyField(Campaign, related_name='email_reports', blank=True)
+    frequency = models.CharField(max_length=10, choices=FREQUENCY_CHOICES, default='daily')
+    include_owner = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class EmailCampaignReportRecipient(models.Model):
+    report = models.ForeignKey(EmailCampaignReport, on_delete=models.CASCADE, related_name='recipients')
+    email = models.EmailField()
+    name = models.CharField(max_length=150, blank=True, default='')
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['report', 'email'], name='unique_report_recipient')]
+
+    def __str__(self):
+        return self.email
+
+
+# Backwards-compatible domain names for integrations.
+EmailServer = EmailServerConfig
+EmailReport = EmailCampaignReport
+ReportRecipient = EmailCampaignReportRecipient

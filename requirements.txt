@@ -41,6 +41,7 @@ pytest-django==4.5.2
 
 # Utilities
 requests==2.31.0
+confluent-kafka==2.5.3
 
 # Local SMSC test service
 fastapi==0.115.6
