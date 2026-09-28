@@ -5,7 +5,8 @@ Simulates a real SMPP-style SMSC, not just a "always succeeds" stub:
 1. Client calls `/api/send` (or `/api/send/batch`).
 2. The mock first checks a **TPS (throughput) limiter** — real SMSCs enforce a negotiated max submit rate per bind/system_id, and reject bursts over it with `ESME_RTHROTTLED`. Exceeding `SMSC_MAX_TPS` here returns `429`.
 3. If accepted, it returns `200 ACCEPTED` immediately with a `provider_message_id` and `segment_count` (long messages get split into concatenated-SMS segments, same as a real SMSC would).
-4. A background task waits a **randomized transit delay** (`SMSC_MIN_DELIVERY_DELAY_SECONDS`–`SMSC_MAX_DELIVERY_DELAY_SECONDS`, slightly longer for multi-segment messages), then resolves to one of four **final statuses**, weighted like real network traffic:
+4. When Kafka is enabled, the mock publishes a `SEND_RESPONSE` event to `smsc-send-response` after acceptance.
+5. A background task waits a **randomized transit delay** (`SMSC_MIN_DELIVERY_DELAY_SECONDS`–`SMSC_MAX_DELIVERY_DELAY_SECONDS`, slightly longer for multi-segment messages), then resolves to one of four **final statuses**, weighted like real network traffic:
 
 | Status | Default weight | Meaning |
 |---|---|---|
@@ -16,9 +17,17 @@ Simulates a real SMPP-style SMSC, not just a "always succeeds" stub:
 
 Each status carries an SMPP-style `err_code` and human-readable reason (see `REASON_CODES` in `app.py`).
 
-5. If the request included a `callback_url`, the mock POSTs a delivery report (DLR) to it — with retries on failure/timeout — including both structured JSON fields and a standard SMPP `deliver_sm` DLR text string (`id:... stat:DELIVRD err:000 ...`).
+6. The final status is published to `smsc-delivery-report`. If the request included a `callback_url`, the mock also POSTs a delivery report (DLR) to it — with retries on failure/timeout — including both structured JSON fields and a standard SMPP `deliver_sm` DLR text string (`id:... stat:DELIVRD err:000 ...`).
 
 All writes still go through one queue drained by a single SQLite writer task, so there's no lock contention regardless of throughput.
+
+## Kafka and Compose
+
+The root Compose stack starts a single-node Kafka broker, creates both topics with 20 partitions, starts the mock at `http://localhost:8090`, and runs a Django status-updater consumer. The Kafka broker is available to host tools at `localhost:9094`; application containers use `kafka:9092`.
+
+The send-response event includes the message and provider IDs, campaign, recipient, sender, acceptance status, segment count, and timestamp. The delivery-report event includes the final status, error code/reason, segment count, and delivery timestamp. Both topics use `message_id` as the key. The status-updater writes through `SentRecord` and `DeliveryRecord`, updates linked `MessageObject` statuses, and commits offsets only after the database transaction succeeds.
+
+The status-updater group IDs are `status-updater-send` and `status-updater-delivery`. If an event cannot yet be matched to a send record, it is retried without committing its Kafka offset.
 
 ## Install
 
@@ -26,13 +35,15 @@ All writes still go through one queue drained by a single SQLite writer task, so
 pip install fastapi uvicorn httpx
 ```
 
-## Start
+## Start standalone
 
 ```powershell
 python -m uvicorn sms_smsc_mock.app:app --host 127.0.0.1 --port 8090 --workers 1
 ```
 
-One worker only — the TPS bucket, queue, and SQLite writer all live in-process.
+One worker only — the TPS bucket, queue, SQLite writer, and Kafka producer lifecycle are process-local. Do not add Uvicorn workers unless those components are moved to shared services.
+
+The mock's standalone default is 5,000 TPS. The Compose stack sets `SMSC_KAFKA_ENABLED=true`; standalone runs leave Kafka disabled unless `SMSC_KAFKA_ENABLED=true` is set.
 
 ## Send one message
 
@@ -104,8 +115,12 @@ Same fields as the DLR payload, plus `received_at`, `dlr_sent`, `dlr_attempts`, 
 | `SMSC_UNDELIV_WEIGHT` | `0.04` | Relative weight for undelivered |
 | `SMSC_EXPIRED_WEIGHT` | `0.02` | Relative weight for expired |
 | `SMSC_REJECTD_WEIGHT` | `0.02` | Relative weight for rejected |
-| `SMSC_MAX_TPS` | `200` | Sustained submit rate before `429 ESME_RTHROTTLED` |
+| `SMSC_MAX_TPS` | `5000` | Sustained submit rate before `429 ESME_RTHROTTLED` |
 | `SMSC_TPS_BURST_CAPACITY` | same as `SMSC_MAX_TPS` | Token-bucket burst size above the sustained rate |
+| `SMSC_KAFKA_ENABLED` | `false` | Publish send and delivery events to Kafka |
+| `KAFKA_BOOTSTRAP` | `localhost:9092` | Kafka bootstrap address |
+| `KAFKA_SEND_RESPONSE_TOPIC` | `smsc-send-response` | Accepted-send event topic |
+| `KAFKA_DELIVERY_TOPIC` | `smsc-delivery-report` | Final delivery event topic |
 | `SMSC_DLR_TIMEOUT_SECONDS` | `5.0` | Timeout per webhook POST attempt |
 | `SMSC_DLR_MAX_ATTEMPTS` | `3` | Retries on webhook failure |
 | `SMSC_DLR_RETRY_BACKOFF_SECONDS` | `2.0` | Backoff multiplier between retries |

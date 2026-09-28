@@ -127,7 +127,7 @@ SOURCE_TYPE_CHOICES = [
 ]
 LANGUAGE_SOURCE_CHOICES = [
     ('source', 'From Source'),
-    ('reference', 'From Customer Profile'),
+    ('mapper', 'From Mapper'),
     ('default', 'Default Language'),
 ]
 AUDIENCE_BULK_CHUNK_SIZE = 10000

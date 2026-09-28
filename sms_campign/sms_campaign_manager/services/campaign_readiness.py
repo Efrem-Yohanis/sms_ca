@@ -1,5 +1,7 @@
 """Readiness checks for Campaign lifecycle actions."""
 
+from django.core.exceptions import ValidationError
+
 
 class CampaignReadinessService:
     def __init__(self, campaign):
@@ -42,9 +44,23 @@ class CampaignReadinessService:
         else:
             stats['has_audience'] = True
 
-        warnings.append('No schedule configured. Campaign will not run automatically.')
-        stats['has_schedule'] = hasattr(campaign, 'schedule')
-        if stats['has_schedule']:
-            stats['schedule_type'] = campaign.schedule.schedule_type
+        try:
+            schedule = campaign.schedule
+        except AttributeError:
+            schedule = None
+        stats['has_schedule'] = schedule is not None
+        if schedule is None:
+            errors.append('Schedule is missing.')
+        else:
+            stats['schedule_type'] = schedule.schedule_type
+            try:
+                schedule.full_clean()
+            except ValidationError as exc:
+                messages = exc.message_dict.values() if hasattr(exc, 'message_dict') else [exc.messages]
+                errors.extend(
+                    f'Schedule configuration is invalid: {message}'
+                    for field_messages in messages
+                    for message in (field_messages if isinstance(field_messages, list) else [field_messages])
+                )
 
         return {'is_ready': not errors, 'errors': errors, 'warnings': warnings, 'stats': stats}

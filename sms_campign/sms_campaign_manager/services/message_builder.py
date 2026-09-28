@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404
 
 from ..models import (
     Campaign,
+    MessageBuildJob,
     MessageObject,
     Audience,
     Channel,
@@ -36,39 +37,81 @@ class MessageBuilder:
     def build(self):
         """Build all MessageObject rows for this campaign's audience."""
         started = timezone.now()
+        job = MessageBuildJob.objects.create(
+            campaign=self.campaign,
+            batch_id=self.batch_id,
+            round_number=self.round_number,
+            phase='validating',
+        )
+        try:
+            self._validate_prerequisites()
+            job.phase = 'clearing'
+            job.save(update_fields=['phase', 'updated_at'])
 
-        self._validate_prerequisites()
-
-        # Clear any existing queue rows for this campaign.
-        cleared = MessageObject.objects.filter(campaign=self.campaign).delete()[0]
-
-        audience_rows = list(
-            Audience.objects.filter(
+            cleared = MessageObject.objects.filter(campaign=self.campaign).delete()[0]
+            audience_queryset = Audience.objects.filter(
                 campaign=self.campaign,
+                round_number=self.round_number,
                 is_valid=True,
             ).select_related('language').values(
                 'id', 'msisdn', 'language__code', 'custom_fields',
             )
-        )
+            total_audience = audience_queryset.count()
+            job.phase = 'building'
+            job.total_rows = total_audience
+            job.save(update_fields=['phase', 'total_rows', 'updated_at'])
 
-        content = self.campaign.message_content
-        channel = self._get_channel()
+            content = self.campaign.message_content
+            channel = self._get_channel()
+            languages_by_code = Language.objects.in_bulk(field_name='code')
+            stats = self._build_and_insert(
+                audience_rows=audience_queryset.iterator(chunk_size=5000),
+                content=content,
+                channel=channel,
+                job=job,
+                languages_by_code=languages_by_code,
+            )
+            inserted_rows = MessageObject.objects.filter(
+                campaign=self.campaign,
+                batch_id=self.batch_id,
+            ).count()
+            job.status = 'SUCCEEDED'
+            job.phase = 'complete'
+            job.processed_rows = total_audience
+            job.built_rows = inserted_rows
+            job.skipped_rows = stats['skipped']
+            job.failed_rows = stats['failed']
+            job.percent = 100
+            job.completed_at = timezone.now()
+            job.save(update_fields=[
+                'status', 'phase', 'processed_rows', 'built_rows', 'skipped_rows',
+                'failed_rows', 'percent',
+                'completed_at', 'updated_at',
+            ])
 
-        stats = self._build_and_insert(
-            audience_rows=audience_rows,
-            content=content,
-            channel=channel,
-        )
-
-        return {
-            'campaign_id': self.campaign.id,
-            'round_number': self.round_number,
-            'batch_id': self.batch_id,
-            'cleared': cleared,
-            'total_audience': len(audience_rows),
-            **stats,
-            'duration_seconds': (timezone.now() - started).total_seconds(),
-        }
+            return {
+                'campaign_id': self.campaign.id,
+                'round_number': self.round_number,
+                'batch_id': self.batch_id,
+                'build_job_id': job.pk,
+                'cleared': cleared,
+                'total_audience': total_audience,
+                **stats,
+                'built': inserted_rows,
+                'duration_seconds': (timezone.now() - started).total_seconds(),
+            }
+        except Exception as exc:
+            MessageObject.objects.filter(campaign=self.campaign, batch_id=self.batch_id).delete()
+            job.status = 'FAILED'
+            job.phase = 'failed'
+            job.error_message = str(exc)
+            job.completed_at = timezone.now()
+            job.save(update_fields=['status', 'phase', 'error_message', 'completed_at', 'updated_at'])
+            logger.exception(
+                'Message build failed campaign_id=%s job_id=%s batch_id=%s',
+                self.campaign.pk, job.pk, self.batch_id,
+            )
+            raise
 
     def _validate_prerequisites(self):
         errors = []
@@ -80,8 +123,12 @@ class MessageBuilder:
         if not hasattr(self.campaign, 'message_content'):
             errors.append('Campaign has no message content.')
 
-        if not Audience.objects.filter(campaign=self.campaign, is_valid=True).exists():
-            errors.append('Campaign has no valid audience.')
+        if not Audience.objects.filter(
+            campaign=self.campaign,
+            round_number=self.round_number,
+            is_valid=True,
+        ).exists():
+            errors.append(f'Campaign has no valid audience for round {self.round_number}.')
 
         if not self.campaign.channels_id:
             errors.append('Campaign has no channels.')
@@ -96,14 +143,16 @@ class MessageBuilder:
             raise ValueError('No active channel found for campaign.')
         return channel
 
-    def _build_and_insert(self, audience_rows, content, channel):
+    def _build_and_insert(self, audience_rows, content, channel, job, languages_by_code):
         built = 0
         skipped = 0
         errors = []
         rows = []
         chunk_size = 5000
+        processed = 0
 
         for member in audience_rows:
+            processed += 1
             try:
                 lang_code = (member.get('language__code') or '').strip().lower() or content.default_language.code
                 template = content.get_message(lang_code)
@@ -117,7 +166,7 @@ class MessageBuilder:
                 personalized = self._personalize(template, member.get('custom_fields') or {})
                 parts = self._calculate_parts(personalized)
 
-                language = Language.objects.filter(code=lang_code).first()
+                language = languages_by_code.get(lang_code)
                 if not language:
                     language = content.default_language
 
@@ -135,20 +184,28 @@ class MessageBuilder:
                     batch_id=self.batch_id,
                     personalized_fields=member.get('custom_fields') or {},
                 ))
-                built += 1
-
-                if len(rows) >= chunk_size:
-                    MessageObject.objects.bulk_create(rows, batch_size=chunk_size)
-                    rows = []
-
+                if processed % chunk_size == 0:
+                    if rows:
+                        MessageObject.objects.bulk_create(rows, batch_size=chunk_size)
+                        built += len(rows)
+                        rows = []
+                    self._update_job_progress(job, processed, built, skipped, len(errors))
             except Exception as exc:
                 errors.append({
                     'msisdn': member.get('msisdn'),
                     'error': str(exc),
                 })
+                if processed % chunk_size == 0:
+                    if rows:
+                        MessageObject.objects.bulk_create(rows, batch_size=chunk_size)
+                        built += len(rows)
+                        rows = []
+                    self._update_job_progress(job, processed, built, skipped, len(errors))
 
         if rows:
             MessageObject.objects.bulk_create(rows, batch_size=chunk_size)
+            built += len(rows)
+        self._update_job_progress(job, processed, built, skipped, len(errors))
 
         return {
             'built': built,
@@ -156,6 +213,25 @@ class MessageBuilder:
             'failed': len(errors),
             'errors': errors[:20],
         }
+
+    @staticmethod
+    def _update_job_progress(job, processed, built, skipped, failed):
+        total = job.total_rows
+        percent = round(processed / total * 100, 2) if total else 100
+        MessageBuildJob.objects.filter(pk=job.pk, status='RUNNING').update(
+            phase='inserting',
+            processed_rows=processed,
+            built_rows=built,
+            skipped_rows=skipped,
+            failed_rows=failed,
+            percent=percent,
+            updated_at=timezone.now(),
+        )
+        logger.info(
+            'Message build progress campaign_id=%s job_id=%s batch_id=%s phase=inserting processed=%s total=%s committed=%s skipped=%s failed=%s percent=%s',
+            job.campaign_id, job.pk, job.batch_id, processed, total,
+            built, skipped, failed, percent,
+        )
 
     @staticmethod
     def _personalize(template, fields):

@@ -1,6 +1,7 @@
 """Connect to configured external databases and inspect their schema/data."""
 
 import importlib
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -198,12 +199,16 @@ class DatabaseConnector:
 
         try:
             if db_type == 'postgresql':
+                timeout = int(os.getenv('AUDIENCE_DATABASE_CONNECT_TIMEOUT_SECONDS', '10'))
+                statement_timeout = int(os.getenv('AUDIENCE_DATABASE_STATEMENT_TIMEOUT_SECONDS', '300'))
                 connection = module.connect(
                     host=self.config.host,
                     port=self.config.port,
                     dbname=self.config.database_name,
                     user=self.config.username,
                     password=self.config.password,
+                    connect_timeout=timeout,
+                    options=f'-c statement_timeout={statement_timeout * 1000}',
                 )
             elif db_type == 'mysql':
                 connection = module.connect(

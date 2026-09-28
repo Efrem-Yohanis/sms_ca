@@ -1,0 +1,205 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-campaign_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-campaign_manager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.7.2
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:3.7.2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-ec"]
+    command: |
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic smsc-send-response --partitions 20 --replication-factor 1
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic smsc-delivery-report --partitions 20 --replication-factor 1
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    restart: "no"
+
+  pgadmin:
+    image: dpage/pgadmin4:9
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-pgadmin_dev_password}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  django:
+    build:
+      context: .
+      dockerfile: sms_campign/Dockerfile
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    environment:
+      DB_ENGINE: postgresql
+      DB_NAME: ${POSTGRES_DB:-campaign_manager}
+      DB_USER: ${POSTGRES_USER:-campaign_manager}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
+      DB_HOST: db
+      DB_PORT: 5432
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  audience-worker:
+    build:
+      context: .
+      dockerfile: sms_campign/Dockerfile
+    command: sh -c "python manage.py migrate && python manage.py run_audience_build_jobs"
+    environment:
+      DB_ENGINE: postgresql
+      DB_NAME: ${POSTGRES_DB:-campaign_manager}
+      DB_USER: ${POSTGRES_USER:-campaign_manager}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
+      DB_HOST: db
+      DB_PORT: 5432
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  status-updater:
+    build:
+      context: .
+      dockerfile: sms_campign/Dockerfile
+    command: sh -c "until python manage.py migrate --check >/dev/null 2>&1; do sleep 2; done; python manage.py run_smsc_kafka_status_updater"
+    environment:
+      DB_ENGINE: postgresql
+      DB_NAME: ${POSTGRES_DB:-campaign_manager}
+      DB_USER: ${POSTGRES_USER:-campaign_manager}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
+      DB_HOST: db
+      DB_PORT: 5432
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_SEND_RESPONSE_TOPIC: smsc-send-response
+      KAFKA_DELIVERY_TOPIC: smsc-delivery-report
+      KAFKA_MAX_POLL_RECORDS: ${KAFKA_MAX_POLL_RECORDS:-1000}
+      KAFKA_CONSUMER_GROUP_PREFIX: status-updater
+    depends_on:
+      db:
+        condition: service_healthy
+      django:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  smsc-mock:
+    build:
+      context: .
+      dockerfile: sms_smsc_mock/Dockerfile
+    environment:
+      SMSC_MOCK_DATABASE: /data/smsc_mock.sqlite3
+      SMSC_MAX_TPS: ${SMSC_MAX_TPS:-5000}
+      SMSC_TPS_BURST_CAPACITY: ${SMSC_TPS_BURST_CAPACITY:-5000}
+      SMSC_QUEUE_MAX_SIZE: ${SMSC_QUEUE_MAX_SIZE:-50000}
+      SMSC_BATCH_SIZE: ${SMSC_BATCH_SIZE:-1000}
+      SMSC_FLUSH_INTERVAL_SECONDS: ${SMSC_FLUSH_INTERVAL_SECONDS:-0.01}
+      SMSC_KAFKA_ENABLED: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_SEND_RESPONSE_TOPIC: smsc-send-response
+      KAFKA_DELIVERY_TOPIC: smsc-delivery-report
+      SMSC_MIN_DELIVERY_DELAY_SECONDS: ${SMSC_MIN_DELIVERY_DELAY_SECONDS:-1.0}
+      SMSC_MAX_DELIVERY_DELAY_SECONDS: ${SMSC_MAX_DELIVERY_DELAY_SECONDS:-5.0}
+    ports:
+      - "8090:8090"
+    volumes:
+      - smsc_mock_data:/data
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: sms_campign/Dockerfile
+    command: python -m uvicorn sms_campaign_scheduler.app:app --host 0.0.0.0 --port 8093
+    environment:
+      SMSC_SCHEDULER_DJANGO_API: http://django:8000/api/v1
+      SMSC_SCHEDULER_INTERVAL: ${SMSC_SCHEDULER_INTERVAL:-60}
+      SMSC_SCHEDULER_RUN_WORKER: "true"
+    depends_on:
+      django:
+        condition: service_started
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ./sms_ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - django
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+  kafka_data:
+  smsc_mock_data:

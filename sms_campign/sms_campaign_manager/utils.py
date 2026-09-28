@@ -1,19 +1,29 @@
 """Audience validation and language mapping helpers."""
 
 import re
+from decimal import Decimal, InvalidOperation
 
 
 def normalize_msisdn(msisdn):
     if not msisdn:
         return None
+    if not isinstance(msisdn, str):
+        try:
+            numeric_value = Decimal(str(msisdn))
+            if numeric_value.is_finite() and numeric_value == numeric_value.to_integral_value():
+                msisdn = format(numeric_value, 'f').split('.')[0]
+        except (InvalidOperation, ValueError):
+            pass
     value = re.sub(r'[\s\-\(\)]', '', str(msisdn).strip())
-    if re.match(r'^\+2517\d{8}$', value):
+    if re.match(r'^25170\d{8}$', value):
+        return '+2517' + value[5:]
+    if re.match(r'^\+251[79]\d{8}$', value):
         return value
-    if re.match(r'^2517\d{8}$', value):
+    if re.match(r'^251[79]\d{8}$', value):
         return '+' + value
-    if re.match(r'^07\d{8}$', value):
+    if re.match(r'^0[79]\d{8}$', value):
         return '+251' + value[1:]
-    if re.match(r'^7\d{8}$', value):
+    if re.match(r'^[79]\d{8}$', value):
         return '+251' + value
     return None
 

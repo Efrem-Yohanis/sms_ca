@@ -1,14 +1,21 @@
 """API views for Campaign Manager."""
 
 import logging
+import os
+import uuid
 
-from django.db.models import Count, Q, OuterRef, Subquery
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError, transaction
+from django.core.files.storage import default_storage
+from django.core.mail import EmailMessage, get_connection
+from django.db.models import Count, Exists, Max, Min, Q, OuterRef, Subquery
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import status
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.generics import CreateAPIView, ListCreateAPIView, RetrieveUpdateDestroyAPIView, UpdateAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from drf_spectacular.types import OpenApiTypes
@@ -17,15 +24,22 @@ from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_sche
 from .constants import SUPPORTED_LANGUAGES
 from .models import (
 	AudienceConfig,
+	AudienceBuildJob,
 	AudienceMember,
 	Campaign,
 	Channel,
 	CustomerProfileConfig,
 	DatabaseConfig,
 	DeliveryRecord,
+	EmailConfig,
+	EmailReport,
+	ReportSubscription,
+	ReportDeliveryLog,
+	CampaignProgressReport,
 	Language,
 	MessageContent,
 	MessageObject,
+	MessageBuildJob,
 	Schedule,
 	SentRecord,
 	SenderID,
@@ -60,9 +74,23 @@ from .serializers import (
 	DeliveryRecordCreateSerializer,
 	DeliveryRecordSerializer,
 	DeliveryRecordUpdateSerializer,
+	EmailConfigSerializer,
+	EmailConfigCreateUpdateSerializer,
+	EmailConfigTestParamsSerializer,
+	EmailReportSerializer,
+	CampaignEmailReportCreateSerializer,
+	ReportSubscriptionSerializer,
+	ReportDeliveryLogSerializer,
+	CampaignProgressReportSerializer,
+	 UserRegistrationSerializer,
+	UserSerializer,
+	UserAdminUpdateSerializer,
+	PasswordChangeSerializer,
 	LanguageSerializer,
 	MessageContentCreateUpdateSerializer,
 	MessageContentSerializer,
+	MessageContentApiInputSerializer,
+	MessageContentApiSerializer,
 	SupportedLanguageSerializer,
 	ScheduleCreateUpdateSerializer,
 	ScheduleSerializer,
@@ -79,14 +107,278 @@ from .services.campaign_readiness import CampaignReadinessService
 from .services.audience_service import AudienceService, AudienceBuildService
 from .services.sent_tracker_service import SentTrackerService
 from .services.message_builder import MessageBuilder
+from .services.campaign_progress_reports import build_campaigns_report_content
+from .services.email_reports import send_campaign_report
 
 logger = logging.getLogger(__name__)
+
+
+def _audience_counts(campaign):
+	if hasattr(campaign, 'audience_total'):
+		return {
+			'total': campaign.audience_total,
+			'valid': campaign.audience_valid,
+			'invalid': campaign.audience_invalid,
+		}
+	return AudienceMember.objects.filter(campaign=campaign).aggregate(
+		total=Count('id'),
+		valid=Count('id', filter=Q(is_valid=True)),
+		invalid=Count('id', filter=Q(is_valid=False)),
+	)
+
+
+def _audience_campaign_payload(campaign):
+	config = getattr(campaign, 'audience_config', None)
+	counts = _audience_counts(campaign)
+	total = counts['total'] or 0
+	valid = counts['valid'] or 0
+	invalid = counts['invalid'] or 0
+	percentage = valid * 100 / total if total else 0
+	created_at = config.created_at if config else campaign.created_at
+	updated_at = config.updated_at if config else campaign.updated_at
+	preview = [
+		{'msisdn': member.msisdn, 'lang': member.language.code}
+		for member in AudienceMember.objects.filter(campaign=campaign)
+		.select_related('language').order_by('sequence_number')[:20]
+	]
+	payload = {
+		'id': campaign.id,
+		'campaign': campaign.id,
+		'campaign_info': {
+			'id': campaign.id,
+			'name': campaign.name,
+			'status': campaign.status,
+			'execution_status': campaign.status,
+		},
+		'total_count': total,
+		'valid_count': valid,
+		'invalid_count': invalid,
+		'valid_percentage': percentage,
+		'summary': {'total': total, 'valid': valid, 'invalid': invalid},
+		'database_table': config.source_table if config else '',
+		'id_field': config.source_msisdn_column if config else '',
+		'filter_condition': config.source_filter_clause if config else '',
+		'created_at': created_at,
+		'updated_at': updated_at,
+		'recipients_preview': preview,
+	}
+	if config:
+		latest_job = config.build_jobs.order_by('-created_at').first()
+		payload['audience_config'] = {
+			'id': config.id,
+			'source_type': config.source_type,
+			'source_database_id': config.source_database_id,
+			'source_database_name': config.source_database.name if config.source_database_id else '',
+			'source_table': config.source_table,
+			'source_msisdn_column': config.source_msisdn_column,
+			'source_language_column': config.source_language_column,
+			'source_filter_clause': config.source_filter_clause,
+			'mapper_enabled': config.mapper_enabled,
+			'mapper_database_id': config.mapper_database_id,
+			'mapper_database_name': config.mapper_database.name if config.mapper_database_id else '',
+			'mapper_table': config.mapper_table,
+			'mapper_msisdn_column': config.mapper_msisdn_column,
+			'mapper_language_column': config.mapper_language_column,
+			'default_language': config.default_language.code if config.default_language_id else '',
+			'rebuild_before_each_run': config.rebuild_before_each_run,
+			'rebuild_on_each_round': config.rebuild_on_each_round,
+			'rebuild_minutes_before': config.rebuild_minutes_before,
+			'rebuild_timeout_minutes': config.rebuild_timeout_minutes,
+			'total_count': config.total_count,
+			'valid_count': config.valid_count,
+			'invalid_count': config.invalid_count,
+			'language_from_source': config.language_from_source,
+			'language_from_mapper': config.language_from_mapper,
+			'language_from_default': config.language_from_default,
+			'is_processed': config.is_processed,
+			'last_built_at': config.last_built_at,
+			'created_at': config.created_at,
+			'updated_at': config.updated_at,
+		}
+		payload['build_job'] = {
+			'id': latest_job.id,
+			'status': latest_job.status,
+			'processed_rows': latest_job.processed_rows,
+			'valid_rows': latest_job.valid_rows,
+			'invalid_rows': latest_job.invalid_rows,
+			'error_message': latest_job.error_message,
+			'created_at': latest_job.created_at,
+		} if latest_job else None
+		if config.source_type == 'database':
+			payload['database_info'] = {
+				'table': config.source_table,
+				'id_field': config.source_msisdn_column,
+				'filter': config.source_filter_clause,
+			}
+	return payload
+
+
+class AudienceCollectionView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='List campaign audiences')
+	def get(self, request):
+		members = AudienceMember.objects.filter(campaign_id=OuterRef('pk'))
+		configs = AudienceConfig.objects.filter(campaign_id=OuterRef('pk'))
+		campaigns = Campaign.objects.filter(is_deleted=False).annotate(
+			has_audience_members=Exists(members),
+			has_audience_config=Exists(configs),
+		).filter(
+			Q(has_audience_members=True) | Q(has_audience_config=True)
+		).select_related(
+			'audience_config', 'audience_config__source_database',
+			'audience_config__mapper_database', 'audience_config__default_language',
+		).order_by('-created_at')
+		campaign_filter = request.query_params.get('campaign')
+		if campaign_filter:
+			campaigns = campaigns.filter(id=campaign_filter)
+		paginator = StandardPagination()
+		page = paginator.paginate_queryset(campaigns, request)
+		return paginator.get_paginated_response([
+			_audience_campaign_payload(campaign) for campaign in page
+		])
+
+
+class AudienceSummaryView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='Summarize campaign audiences')
+	def get(self, request):
+		campaigns = Campaign.objects.filter(is_deleted=False).filter(
+			Q(audience_members__isnull=False) | Q(audience_config__isnull=False)
+		).distinct()
+		counts = AudienceMember.objects.filter(campaign__is_deleted=False).aggregate(
+			total=Count('id'),
+			valid=Count('id', filter=Q(is_valid=True)),
+			invalid=Count('id', filter=Q(is_valid=False)),
+		)
+		total = counts['total'] or 0
+		valid = counts['valid'] or 0
+		by_status = {
+			row['status']: row['count']
+			for row in campaigns.values('status').annotate(count=Count('id', distinct=True)).order_by()
+		}
+		return Response({
+			'total_audiences': campaigns.count(),
+			'total_recipients': total,
+			'total_valid': valid,
+			'total_invalid': counts['invalid'] or 0,
+			'avg_valid_percentage': valid * 100 / total if total else 0,
+			'by_campaign_status': by_status,
+		})
+
+
+class AudienceResourceView(APIView):
+	def _campaign(self, pk):
+		campaign = get_object_or_404(Campaign, id=pk, is_deleted=False)
+		if not AudienceMember.objects.filter(campaign=campaign).exists() and not AudienceConfig.objects.filter(campaign=campaign).exists():
+			from django.http import Http404
+			raise Http404
+		return campaign
+
+	@extend_schema(tags=['Audience Management'], summary='Get campaign audience details')
+	def get(self, request, pk):
+		return Response(_audience_campaign_payload(self._campaign(pk)))
+
+	def _replace_members(self, request, pk):
+		campaign = self._campaign(pk)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
+		recipients = request.data.get('recipients')
+		if not isinstance(recipients, list):
+			return Response({'recipients': ['Expected a list of recipients.']}, status=status.HTTP_400_BAD_REQUEST)
+		config = AudienceConfig.objects.filter(campaign=campaign).select_related('default_language').first()
+		default_language = config.default_language.code if config else 'en'
+		serializer = ManualAudienceInputSerializer(data={
+			'msisdns': [item.get('msisdn', '') for item in recipients if isinstance(item, dict)],
+			'languages': [item.get('lang', '') for item in recipients if isinstance(item, dict)],
+			'default_language': default_language,
+		})
+		serializer.is_valid(raise_exception=True)
+		AudienceService(campaign, default_language).create_from_manual(
+			serializer.validated_data['msisdns'],
+			serializer.validated_data.get('languages'),
+			'manual',
+		)
+		return Response(_audience_campaign_payload(campaign))
+
+	@extend_schema(tags=['Audience Management'], summary='Replace campaign audience recipients')
+	def put(self, request, pk):
+		return self._replace_members(request, pk)
+
+	@extend_schema(tags=['Audience Management'], summary='Update campaign audience recipients')
+	def patch(self, request, pk):
+		return self._replace_members(request, pk)
+
+	@extend_schema(tags=['Audience Management'], summary='Delete campaign audience')
+	def delete(self, request, pk):
+		campaign = self._campaign(pk)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
+		with transaction.atomic():
+			AudienceMember.objects.filter(campaign=campaign).delete()
+			AudienceConfig.objects.filter(campaign=campaign).delete()
+		campaign.refresh_readiness_flag()
+		return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AudienceStatisticsView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='Get campaign audience statistics')
+	def get(self, request, pk):
+		campaign = get_object_or_404(Campaign, id=pk, is_deleted=False)
+		members = AudienceMember.objects.filter(campaign=campaign)
+		counts = members.aggregate(
+			total=Count('id'),
+			valid=Count('id', filter=Q(is_valid=True)),
+			invalid=Count('id', filter=Q(is_valid=False)),
+		)
+		total = counts['total'] or 0
+		valid = counts['valid'] or 0
+		languages = {
+			row['language__code']: row['count']
+			for row in members.filter(is_valid=True).values('language__code').annotate(count=Count('id'))
+		}
+		invalid_samples = [
+			{'msisdn': member.msisdn, 'lang': member.language.code, 'error': member.validation_error}
+			for member in members.filter(is_valid=False).select_related('language').order_by('sequence_number')[:10]
+		]
+		return Response({
+			'audience_id': campaign.id,
+			'campaign_id': campaign.id,
+			'campaign_name': campaign.name,
+			'total_count': total,
+			'valid_count': valid,
+			'invalid_count': counts['invalid'] or 0,
+			'valid_percentage': valid * 100 / total if total else 0,
+			'invalid_percentage': (counts['invalid'] or 0) * 100 / total if total else 0,
+			'language_distribution': languages,
+			'invalid_samples': invalid_samples,
+		})
+
+
+class AudienceRecipientsPreviewView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='Preview campaign audience recipients')
+	def get(self, request, pk):
+		campaign = get_object_or_404(Campaign, id=pk, is_deleted=False)
+		members = AudienceMember.objects.filter(campaign=campaign).select_related('language').order_by('sequence_number')
+		total = members.count()
+		preview = [
+			{'msisdn': member.msisdn, 'lang': member.language.code}
+			for member in members[:100]
+		]
+		return Response({
+			'audience_id': campaign.id,
+			'campaign_id': campaign.id,
+			'campaign_name': campaign.name,
+			'total_recipients': total,
+			'valid_recipients': members.filter(is_valid=True).count(),
+			'invalid_recipients': members.filter(is_valid=False).count(),
+			'preview': preview,
+			'preview_count': len(preview),
+			'has_more': total > len(preview),
+		})
 
 
 def annotate_campaign_child_ids(queryset):
     return queryset.annotate(
         audience_id=Subquery(
-            AudienceMember.objects.filter(campaign_id=OuterRef('pk')).values('id')[:1],
+			AudienceConfig.objects.filter(campaign_id=OuterRef('pk')).values('id')[:1],
         ),
         message_content_id=Subquery(
             MessageContent.objects.filter(campaign_id=OuterRef('pk')).values('id')[:1],
@@ -95,6 +387,77 @@ def annotate_campaign_child_ids(queryset):
             Schedule.objects.filter(campaign_id=OuterRef('pk')).values('id')[:1],
         ),
     )
+
+class UserRegistrationView(CreateAPIView):
+	serializer_class = UserRegistrationSerializer
+	permission_classes = [AllowAny]
+
+
+class CurrentUserView(APIView):
+	permission_classes = [IsAuthenticated]
+
+	@extend_schema(tags=['User Management'], summary='Get current user', responses={200: UserSerializer})
+	def get(self, request):
+		return Response(UserSerializer(request.user).data)
+
+	@extend_schema(tags=['User Management'], summary='Update current user profile', request=UserSerializer, responses={200: UserSerializer})
+	def patch(self, request):
+		serializer = UserSerializer(request.user, data=request.data, partial=True)
+		serializer.is_valid(raise_exception=True)
+		serializer.save()
+		return Response(serializer.data)
+
+
+class PasswordChangeView(APIView):
+	permission_classes = [IsAuthenticated]
+
+	@extend_schema(tags=['User Management'], summary='Change current user password', request=PasswordChangeSerializer, responses={200: OpenApiResponse(description='Password changed.')})
+	def post(self, request):
+		serializer = PasswordChangeSerializer(data=request.data, context={'request': request})
+		serializer.is_valid(raise_exception=True)
+		if not request.user.check_password(serializer.validated_data['old_password']):
+			return Response({'old_password': ['Current password is incorrect.']}, status=status.HTTP_400_BAD_REQUEST)
+		request.user.set_password(serializer.validated_data['new_password'])
+		request.user.save(update_fields=['password'])
+		return Response({'success': True, 'message': 'Password changed successfully.'})
+
+
+class UserAdminListCreateView(ListCreateAPIView):
+	queryset = get_user_model().objects.all().order_by('username')
+	permission_classes = [IsAdminUser]
+	serializer_class = UserSerializer
+
+	@extend_schema(tags=['User Management'], summary='List users', responses={200: UserSerializer(many=True)})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['User Management'], summary='Create user', request=UserRegistrationSerializer, responses={201: UserSerializer})
+	def post(self, request, *args, **kwargs):
+		serializer = UserRegistrationSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		return Response(UserSerializer(serializer.save()).data, status=status.HTTP_201_CREATED)
+
+
+class UserAdminDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = get_user_model().objects.all()
+	permission_classes = [IsAdminUser]
+	serializer_class = UserAdminUpdateSerializer
+
+	@extend_schema(tags=['User Management'], summary='Get user', responses={200: UserSerializer})
+	def get(self, request, *args, **kwargs):
+		return Response(UserSerializer(self.get_object()).data)
+
+	@extend_schema(tags=['User Management'], summary='Update user', request=UserAdminUpdateSerializer, responses={200: UserSerializer})
+	def put(self, request, *args, **kwargs):
+		return super().put(request, *args, **kwargs)
+
+	@extend_schema(tags=['User Management'], summary='Patch user', request=UserAdminUpdateSerializer, responses={200: UserSerializer})
+	def patch(self, request, *args, **kwargs):
+		return super().patch(request, *args, **kwargs)
+
+	@extend_schema(tags=['User Management'], summary='Delete user', responses={204: OpenApiResponse(description='Deleted.')})
+	def delete(self, request, *args, **kwargs):
+		return super().delete(request, *args, **kwargs)
 
 
 class SenderIDListCreateView(ListCreateAPIView):
@@ -163,6 +526,255 @@ class SMSCConfigDetailView(RetrieveUpdateDestroyAPIView):
 	@extend_schema(tags=['SMSC Config'], summary='Delete SMSC configuration', responses={200: OpenApiResponse(description='Deleted.')})
 	def delete(self, request, *args, **kwargs):
 		return super().delete(request, *args, **kwargs)
+
+
+class EmailConfigListCreateView(ListCreateAPIView):
+	queryset = EmailConfig.objects.all()
+	serializer_class = EmailConfigSerializer
+
+	@extend_schema(tags=['Email Config'], summary='List email configurations', responses={200: EmailConfigSerializer(many=True)})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Config'], summary='Create email configuration', request=EmailConfigCreateUpdateSerializer, responses={201: EmailConfigSerializer})
+	def post(self, request, *args, **kwargs):
+		serializer = EmailConfigCreateUpdateSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		user = getattr(request, 'user', None)
+		if getattr(user, 'is_authenticated', False):
+			serializer.validated_data['created_by'] = user
+		instance = serializer.save()
+		return Response(EmailConfigSerializer(instance).data, status=status.HTTP_201_CREATED)
+
+
+class EmailConfigDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = EmailConfig.objects.all()
+	serializer_class = EmailConfigSerializer
+
+	@extend_schema(tags=['Email Config'], summary='Get email configuration', responses={200: EmailConfigSerializer})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Config'], summary='Update email configuration', request=EmailConfigCreateUpdateSerializer, responses={200: EmailConfigSerializer})
+	def put(self, request, *args, **kwargs):
+		return super().put(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Config'], summary='Patch email configuration', request=EmailConfigCreateUpdateSerializer, responses={200: EmailConfigSerializer})
+	def patch(self, request, *args, **kwargs):
+		return super().patch(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Config'], summary='Delete email configuration', responses={200: OpenApiResponse(description='Deleted.')})
+	def delete(self, request, *args, **kwargs):
+		return super().delete(request, *args, **kwargs)
+
+
+class EmailConfigTestView(APIView):
+	@extend_schema(tags=['Email Config'], summary='Test SMTP settings and optionally send a test email', request=EmailConfigTestParamsSerializer, responses={200: OpenApiResponse(description='SMTP test result.')})
+	def post(self, request, pk=None):
+		config = None
+		if pk is not None:
+			config = get_object_or_404(EmailConfig, pk=pk)
+			payload = {
+				'host': config.host,
+				'port': config.port,
+				'username': config.username,
+				'password': config.password,
+				'use_tls': config.use_tls,
+				'use_ssl': config.use_ssl,
+				'default_from_email': config.default_from_email,
+			}
+			test_email = request.data.get('test_email', '')
+		else:
+			serializer = EmailConfigTestParamsSerializer(data=request.data)
+			serializer.is_valid(raise_exception=True)
+			payload = serializer.validated_data
+			test_email = payload.pop('test_email', '')
+
+		try:
+			connection = get_connection(
+				host=payload['host'],
+				port=payload['port'],
+				username=payload.get('username', ''),
+				password=payload.get('password', ''),
+				use_tls=payload.get('use_tls', False),
+				use_ssl=payload.get('use_ssl', False),
+				fail_silently=False,
+			)
+			if test_email:
+				EmailMessage(
+					subject='SMTP configuration test',
+					body='This is a test email from the SMS Campaign Manager.',
+					from_email=payload.get('default_from_email') or None,
+					to=[test_email],
+					connection=connection,
+				).send(fail_silently=False)
+				message = f'Test email sent to {test_email}.'
+			else:
+				connection.open()
+				connection.close()
+				message = 'SMTP connection successful.'
+			if config:
+				config.last_tested_at = timezone.now()
+				config.last_test_status = 'success'
+				config.last_test_message = message
+				config.save(update_fields=['last_tested_at', 'last_test_status', 'last_test_message', 'updated_at'])
+			return Response({'success': True, 'message': message})
+		except Exception as exc:
+			if config:
+				config.last_tested_at = timezone.now()
+				config.last_test_status = 'failed'
+				config.last_test_message = str(exc)
+				config.save(update_fields=['last_tested_at', 'last_test_status', 'last_test_message', 'updated_at'])
+			return Response({'success': False, 'message': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CampaignProgressReportListCreateView(ListCreateAPIView):
+	queryset = CampaignProgressReport.objects.none()
+	serializer_class = CampaignProgressReportSerializer
+
+	def get_queryset(self):
+		return CampaignProgressReport.objects.prefetch_related('campaigns').all()
+
+	@extend_schema(tags=['Email Reports'], summary='List scheduled campaign progress reports', responses={200: CampaignProgressReportSerializer(many=True)})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Reports'], summary='Create scheduled campaign progress report', request=CampaignProgressReportSerializer, responses={201: CampaignProgressReportSerializer})
+	def post(self, request, *args, **kwargs):
+		serializer = self.get_serializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		user = getattr(request, 'user', None)
+		instance = serializer.save(created_by=user if getattr(user, 'is_authenticated', False) else None)
+		if instance.next_run_at is None:
+			instance.next_run_at = timezone.now()
+			instance.save(update_fields=['next_run_at', 'updated_at'])
+		return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED)
+
+
+class CampaignProgressReportDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = CampaignProgressReport.objects.prefetch_related('campaigns').all()
+	serializer_class = CampaignProgressReportSerializer
+
+	@extend_schema(tags=['Email Reports'], summary='Get campaign progress report', responses={200: CampaignProgressReportSerializer})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Reports'], summary='Replace campaign progress report', request=CampaignProgressReportSerializer, responses={200: CampaignProgressReportSerializer})
+	def put(self, request, *args, **kwargs):
+		return super().put(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Reports'], summary='Update campaign progress report', request=CampaignProgressReportSerializer, responses={200: CampaignProgressReportSerializer})
+	def patch(self, request, *args, **kwargs):
+		return super().patch(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Reports'], summary='Delete campaign progress report', responses={204: OpenApiResponse(description='Deleted.')})
+	def delete(self, request, *args, **kwargs):
+		return super().delete(request, *args, **kwargs)
+
+
+class CampaignEmailReportView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='Send campaign email report', request=CampaignEmailReportCreateSerializer, responses={201: EmailReportSerializer})
+	def post(self, request, campaign_id):
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		serializer = CampaignEmailReportCreateSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		payload = serializer.validated_data
+		recipients = payload.get('recipients') or campaign.owner_emails or []
+		recipients = list(dict.fromkeys(email.strip().lower() for email in recipients if email.strip()))
+		if not recipients:
+			return Response({'recipients': ['Select recipients or add owner emails to the campaign.']}, status=status.HTTP_400_BAD_REQUEST)
+		subject = payload.get('subject') or f'{campaign.name} - Reports'
+		log = send_campaign_report(
+			campaign=campaign,
+			recipients=recipients,
+			report_format=payload['format'],
+			subject=subject,
+			email_config=payload.get('email_config'),
+			include_sent_stats=payload['include_sent_stats'],
+			include_delivery_stats=payload['include_delivery_stats'],
+			include_message_stats=payload['include_message_stats'],
+		)
+		legacy_report = EmailReport.objects.create(
+			campaign=campaign,
+			report_type=payload.get('report_type') or payload['format'],
+			subject=subject,
+			recipients=recipients,
+			content=log.content,
+			status=log.status,
+			sent_at=log.sent_at,
+			error_message=log.error_message,
+			metadata={'report_delivery_log_id': log.pk, 'report_data': log.report_data},
+		)
+		return Response(
+			{'success': log.status == 'sent', 'data': ReportDeliveryLogSerializer(log).data,
+			 'legacy_report_id': legacy_report.pk},
+			status=status.HTTP_201_CREATED,
+		)
+
+
+class CampaignEmailReportHistoryView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='List email report history for a campaign', responses={200: ReportDeliveryLogSerializer(many=True)})
+	def get(self, request, campaign_id):
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		queryset = ReportDeliveryLog.objects.filter(campaign=campaign).order_by('-created_at')
+		paginator = StandardPagination()
+		page = paginator.paginate_queryset(queryset, request)
+		return paginator.get_paginated_response(ReportDeliveryLogSerializer(page, many=True).data)
+
+
+class ReportSubscriptionListCreateView(ListCreateAPIView):
+	queryset = ReportSubscription.objects.select_related('campaign').all()
+	serializer_class = ReportSubscriptionSerializer
+
+	@extend_schema(tags=['Email Reports'], summary='List report subscriptions', responses={200: ReportSubscriptionSerializer(many=True)})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['Email Reports'], summary='Create a report subscription', request=ReportSubscriptionSerializer, responses={201: ReportSubscriptionSerializer})
+	def post(self, request, *args, **kwargs):
+		serializer = self.get_serializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		user = getattr(request, 'user', None)
+		instance = serializer.save(created_by=user if getattr(user, 'is_authenticated', False) else None)
+		if instance.frequency in {'daily', 'weekly', 'monthly'} and instance.next_run_at is None:
+			instance.next_run_at = timezone.now()
+			instance.save(update_fields=['next_run_at', 'updated_at'])
+		return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED)
+
+
+class ReportSubscriptionDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = ReportSubscription.objects.select_related('campaign').all()
+	serializer_class = ReportSubscriptionSerializer
+
+
+class ReportDeliveryLogDetailView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='Read a report delivery log', responses={200: ReportDeliveryLogSerializer})
+	def get(self, request, pk):
+		log = get_object_or_404(ReportDeliveryLog, pk=pk)
+		return Response(ReportDeliveryLogSerializer(log).data)
+
+
+class EmailReportResendView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='Resend a failed email report', responses={200: ReportDeliveryLogSerializer})
+	def post(self, request, pk):
+		log = get_object_or_404(ReportDeliveryLog, pk=pk)
+		if log.status != 'failed':
+			return Response({'detail': 'Only failed report deliveries can be resent.'}, status=status.HTTP_400_BAD_REQUEST)
+		if log.campaign is None:
+			return Response({'detail': 'The campaign for this report is no longer available.'}, status=status.HTTP_400_BAD_REQUEST)
+		log = send_campaign_report(
+			campaign=log.campaign,
+			recipients=log.recipients,
+			report_format=log.format,
+			subject=log.subject,
+			include_sent_stats=log.include_sent_stats,
+			include_delivery_stats=log.include_delivery_stats,
+			include_message_stats=log.include_message_stats,
+			email_config=log.email_config,
+			subscription=log.subscription,
+			log=log,
+		)
+		return Response({'success': log.status == 'sent', 'data': ReportDeliveryLogSerializer(log).data})
 
 
 class SentRecordListCreateView(APIView):
@@ -247,11 +859,11 @@ class CampaignSentStatsView(APIView):
 class CustomerProfileConfigListCreateView(ListCreateAPIView):
 	queryset = CustomerProfileConfig.objects.all()
 	serializer_class = CustomerProfileConfigSerializer
-	@extend_schema(tags=['Databases'], summary='List customer profile configurations', responses={200: CustomerProfileConfigSerializer(many=True)})
+	@extend_schema(tags=['Customer Profile Config'], summary='List customer profile configurations', responses={200: CustomerProfileConfigSerializer(many=True)})
 	def get(self, request, *args, **kwargs):
 		return super().get(request, *args, **kwargs)
 
-	@extend_schema(tags=['Databases'], summary='Create customer profile configuration', request=CustomerProfileConfigSerializer, responses={201: CustomerProfileConfigSerializer})
+	@extend_schema(tags=['Customer Profile Config'], summary='Create customer profile configuration', request=CustomerProfileConfigSerializer, responses={201: CustomerProfileConfigSerializer})
 	def post(self, request, *args, **kwargs):
 		return super().post(request, *args, **kwargs)
 
@@ -260,19 +872,19 @@ class CustomerProfileConfigDetailView(RetrieveUpdateDestroyAPIView):
 	queryset = CustomerProfileConfig.objects.all()
 	serializer_class = CustomerProfileConfigSerializer
 
-	@extend_schema(tags=['Databases'], summary='Get customer profile configuration', responses={200: CustomerProfileConfigSerializer})
+	@extend_schema(tags=['Customer Profile Config'], summary='Get customer profile configuration', responses={200: CustomerProfileConfigSerializer})
 	def get(self, request, *args, **kwargs):
 		return super().get(request, *args, **kwargs)
 
-	@extend_schema(tags=['Databases'], summary='Replace customer profile configuration', request=CustomerProfileConfigSerializer, responses={200: CustomerProfileConfigSerializer})
+	@extend_schema(tags=['Customer Profile Config'], summary='Replace customer profile configuration', request=CustomerProfileConfigSerializer, responses={200: CustomerProfileConfigSerializer})
 	def put(self, request, *args, **kwargs):
 		return super().put(request, *args, **kwargs)
 
-	@extend_schema(tags=['Databases'], summary='Update customer profile configuration', request=CustomerProfileConfigSerializer, responses={200: CustomerProfileConfigSerializer})
+	@extend_schema(tags=['Customer Profile Config'], summary='Update customer profile configuration', request=CustomerProfileConfigSerializer, responses={200: CustomerProfileConfigSerializer})
 	def patch(self, request, *args, **kwargs):
 		return super().patch(request, *args, **kwargs)
 
-	@extend_schema(tags=['Databases'], summary='Delete customer profile configuration', responses={200: OpenApiResponse(description='Deleted.')})
+	@extend_schema(tags=['Customer Profile Config'], summary='Delete customer profile configuration', responses={200: OpenApiResponse(description='Deleted.')})
 	def delete(self, request, *args, **kwargs):
 		return super().delete(request, *args, **kwargs)
 
@@ -281,32 +893,49 @@ class CampaignAudienceView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Get campaign audience summary', responses={200: OpenApiResponse(description='Campaign audience summary.')})
 	def get(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		config = AudienceConfig.objects.filter(campaign=campaign).select_related('default_language').first()
+		try:
+			round_number = int(request.query_params.get('round_number') or (config.round_number if config else 1))
+		except (TypeError, ValueError):
+			return Response({'detail': 'round_number must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+		members = AudienceMember.objects.filter(campaign=campaign, round_number=round_number)
+		counts = members.aggregate(
+			total=Count('id'), valid=Count('id', filter=Q(is_valid=True)),
+			invalid=Count('id', filter=Q(is_valid=False)), built_at=Max('rebuilt_at'),
+		)
+		language_breakdown = list(members.values('language__code').annotate(count=Count('id')).order_by('language__code'))
+		language_sources = dict(members.values_list('language_source').annotate(count=Count('id')))
 		return Response({'success': True, 'data': {
 			'campaign_id': campaign.id,
-			'default_language': campaign.default_language,
-			'source_type': campaign.source_type,
-			'source_config': campaign.source_config,
-			'main_database': campaign.main_database_id,
-			'main_table': campaign.main_table,
-			'main_msisdn_column': campaign.main_msisdn_column,
-			'main_language_column': campaign.main_language_column,
-			'file_path': campaign.file_path,
-			'file_msisdn_column': campaign.file_msisdn_column,
-			'file_language_column': campaign.file_language_column,
-			'customer_profile': campaign.customer_profile_id,
-			'total_count': campaign.total_count,
-			'valid_count': campaign.valid_count,
-			'invalid_count': campaign.invalid_count,
-			'language_matched': campaign.language_matched,
-			'language_defaulted': campaign.language_defaulted,
-			'is_processed': campaign.is_processed,
-			'processing_started_at': campaign.processing_started_at,
-			'processing_completed_at': campaign.processing_completed_at,
+			'default_language': config.default_language.code if config else None,
+			'source_type': config.source_type if config else None,
+			'source_config': {},
+			'main_database': config.source_database_id if config else None,
+			'main_table': config.source_table if config else '',
+			'main_msisdn_column': config.source_msisdn_column if config else '',
+			'main_language_column': config.source_language_column if config else '',
+			'file_path': config.source_file_path if config else '',
+			'file_msisdn_column': config.source_file_msisdn_column if config else '',
+			'file_language_column': config.source_file_language_column if config else '',
+			'customer_profile': None,
+			'round_number': round_number,
+			'total_count': counts['total'],
+			'valid_count': counts['valid'],
+			'invalid_count': counts['invalid'],
+			'language_matched': language_sources.get('source', 0) + language_sources.get('mapper', 0),
+			'language_defaulted': language_sources.get('default', 0),
+			'language_breakdown': [{'language': item['language__code'], 'count': item['count']} for item in language_breakdown],
+			'built_at': counts['built_at'],
+			'is_processed': config.is_processed if config else False,
+			'processing_started_at': None,
+			'processing_completed_at': config.last_built_at if config else None,
 		}})
 
 	@extend_schema(tags=['Audience Management'], summary='Add manual campaign audience', request=ManualAudienceInputSerializer, responses={201: OpenApiResponse(description='Campaign audience summary.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
 		serializer = ManualAudienceInputSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		profile = None
@@ -314,29 +943,32 @@ class CampaignAudienceView(APIView):
 		if profile_id:
 			profile = get_object_or_404(CustomerProfileConfig, id=profile_id, is_active=True)
 		campaign = AudienceService(campaign, serializer.validated_data['default_language'], profile).create_from_manual(
-			serializer.validated_data['msisdns'], serializer.validated_data.get('languages')
+			serializer.validated_data['msisdns'],
+			serializer.validated_data.get('languages'),
+			serializer.validated_data['source_type'],
 		)
+		config = AudienceConfig.objects.filter(campaign=campaign).select_related('default_language').first()
 		return Response({'success': True, 'data': {
 			'campaign_id': campaign.id,
-			'default_language': campaign.default_language,
-			'source_type': campaign.source_type,
-			'source_config': campaign.source_config,
-			'main_database': campaign.main_database_id,
-			'main_table': campaign.main_table,
-			'main_msisdn_column': campaign.main_msisdn_column,
-			'main_language_column': campaign.main_language_column,
-			'file_path': campaign.file_path,
-			'file_msisdn_column': campaign.file_msisdn_column,
-			'file_language_column': campaign.file_language_column,
-			'customer_profile': campaign.customer_profile_id,
-			'total_count': campaign.total_count,
-			'valid_count': campaign.valid_count,
-			'invalid_count': campaign.invalid_count,
-			'language_matched': campaign.language_matched,
-			'language_defaulted': campaign.language_defaulted,
-			'is_processed': campaign.is_processed,
-			'processing_started_at': campaign.processing_started_at,
-			'processing_completed_at': campaign.processing_completed_at,
+			'default_language': config.default_language.code if config else None,
+			'source_type': config.source_type if config else None,
+			'source_config': {},
+			'main_database': config.source_database_id if config else None,
+			'main_table': config.source_table if config else '',
+			'main_msisdn_column': config.source_msisdn_column if config else '',
+			'main_language_column': config.source_language_column if config else '',
+			'file_path': config.source_file_path if config else '',
+			'file_msisdn_column': config.source_file_msisdn_column if config else '',
+			'file_language_column': config.source_file_language_column if config else '',
+			'customer_profile': None,
+			'total_count': config.total_count if config else 0,
+			'valid_count': config.valid_count if config else 0,
+			'invalid_count': config.invalid_count if config else 0,
+			'language_matched': (config.language_from_source + config.language_from_mapper) if config else 0,
+			'language_defaulted': config.language_from_default if config else 0,
+			'is_processed': config.is_processed if config else False,
+			'processing_started_at': None,
+			'processing_completed_at': config.last_built_at if config else None,
 		}}, status=status.HTTP_201_CREATED)
 
 
@@ -344,6 +976,8 @@ class ManualAudienceApiView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Create manual audience configuration', request=ManualAudienceSerializer, responses={201: OpenApiResponse(description='Manual audience configured.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
 		serializer = ManualAudienceSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		data = serializer.validated_data
@@ -353,14 +987,28 @@ class ManualAudienceApiView(APIView):
 		config.source_type = 'manual'
 		config.manual_msisdns = data['manual_msisdns']
 		config.manual_languages = data.get('manual_languages', [])
+		config.source_file_path = ''
+		config.source_file_msisdn_column = ''
+		config.source_file_language_column = ''
+		config.source_database = None
+		config.source_table = ''
+		config.source_filter_clause = ''
 		config.mapper_enabled = data.get('mapper_enabled', False)
 		config.mapper_database_id = data.get('mapper_database_id')
 		config.mapper_table = data.get('mapper_table', '')
 		config.mapper_msisdn_column = data.get('mapper_msisdn_column', '')
 		config.mapper_language_column = data.get('mapper_language_column', '')
 		config.mapper_join_type = data.get('mapper_join_type', 'LEFT')
+		config.rebuild_before_each_run = data.get('rebuild_before_each_run', data.get('rebuild_on_each_round', False))
+		config.rebuild_on_each_round = data.get('rebuild_on_each_round', config.rebuild_before_each_run)
+		config.rebuild_minutes_before = data.get('rebuild_minutes_before', 10)
+		config.rebuild_timeout_minutes = data.get('rebuild_timeout_minutes', 30)
 		config.default_language_id = data['default_language_id']
 		config.save()
+		logger.info(
+			'Audience configuration saved campaign_id=%s config_id=%s source_type=manual recipient_count=%s',
+			campaign.pk, config.pk, len(config.manual_msisdns),
+		)
 		return Response({'success': True, 'message': 'Manual audience configured.', 'data': AudienceConfigSerializer(config).data}, status=status.HTTP_201_CREATED)
 
 
@@ -370,14 +1018,26 @@ class FileAudienceApiView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Create file-import audience configuration', request=FileAudienceSerializer, responses={201: OpenApiResponse(description='File audience configured.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
 		serializer = FileAudienceSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		data = serializer.validated_data
 		config = AudienceConfig.objects.filter(campaign=campaign).first()
 		if config is None:
 			config = AudienceConfig(campaign=campaign)
+		upload = data['file']
+		stored_path = default_storage.save(
+			f'audience/{uuid.uuid4()}_{os.path.basename(upload.name)}',
+			upload,
+		)
 		config.source_type = 'file_import'
-		config.source_file_path = data.get('file').name
+		config.manual_msisdns = []
+		config.manual_languages = []
+		config.source_database = None
+		config.source_table = ''
+		config.source_filter_clause = ''
+		config.source_file_path = default_storage.path(stored_path)
 		config.source_file_msisdn_column = data['source_file_msisdn_column']
 		config.source_file_language_column = data.get('source_file_language_column', '')
 		config.mapper_enabled = data.get('mapper_enabled', False)
@@ -386,8 +1046,17 @@ class FileAudienceApiView(APIView):
 		config.mapper_msisdn_column = data.get('mapper_msisdn_column', '')
 		config.mapper_language_column = data.get('mapper_language_column', '')
 		config.mapper_join_type = data.get('mapper_join_type', 'LEFT')
+		config.rebuild_before_each_run = data.get('rebuild_before_each_run', data.get('rebuild_on_each_round', False))
+		config.rebuild_on_each_round = data.get('rebuild_on_each_round', config.rebuild_before_each_run)
+		config.rebuild_minutes_before = data.get('rebuild_minutes_before', 10)
+		config.rebuild_timeout_minutes = data.get('rebuild_timeout_minutes', 30)
 		config.default_language_id = data['default_language_id']
 		config.save()
+		logger.info(
+			'Audience configuration saved campaign_id=%s config_id=%s source_type=file_import file_name=%s msisdn_column=%s language_column=%s',
+			campaign.pk, config.pk, os.path.basename(upload.name),
+			config.source_file_msisdn_column, config.source_file_language_column or None,
+		)
 		return Response({'success': True, 'message': 'File audience configured.', 'data': AudienceConfigSerializer(config).data}, status=status.HTTP_201_CREATED)
 
 
@@ -395,6 +1064,8 @@ class DatabaseAudienceApiView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Create database audience configuration', request=DatabaseAudienceSerializer, responses={201: OpenApiResponse(description='Database audience configured.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
 		serializer = DatabaseAudienceSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		data = serializer.validated_data
@@ -402,6 +1073,11 @@ class DatabaseAudienceApiView(APIView):
 		if config is None:
 			config = AudienceConfig(campaign=campaign)
 		config.source_type = 'database'
+		config.manual_msisdns = []
+		config.manual_languages = []
+		config.source_file_path = ''
+		config.source_file_msisdn_column = ''
+		config.source_file_language_column = ''
 		config.source_database_id = data['source_database_id']
 		config.source_table = data['source_table']
 		config.source_msisdn_column = data['source_msisdn_column']
@@ -413,34 +1089,145 @@ class DatabaseAudienceApiView(APIView):
 		config.mapper_msisdn_column = data.get('mapper_msisdn_column', '')
 		config.mapper_language_column = data.get('mapper_language_column', '')
 		config.mapper_join_type = data.get('mapper_join_type', 'LEFT')
+		config.rebuild_before_each_run = data.get('rebuild_before_each_run', data.get('rebuild_on_each_round', False))
+		config.rebuild_on_each_round = data.get('rebuild_on_each_round', config.rebuild_before_each_run)
+		config.rebuild_minutes_before = data.get('rebuild_minutes_before', 10)
+		config.rebuild_timeout_minutes = data.get('rebuild_timeout_minutes', 30)
 		config.default_language_id = data['default_language_id']
 		config.save()
+		logger.info(
+			'Audience configuration saved campaign_id=%s config_id=%s source_type=database database_id=%s table=%s msisdn_column=%s language_column=%s',
+			campaign.pk, config.pk, config.source_database_id, config.source_table,
+			config.source_msisdn_column, config.source_language_column or None,
+		)
 		return Response({'success': True, 'message': 'Database audience configured.', 'data': AudienceConfigSerializer(config).data}, status=status.HTTP_201_CREATED)
 
 
 class AudienceBuildView(APIView):
-	@extend_schema(tags=['Audience Management'], summary='Build audience members from an audience config id', responses={200: OpenApiResponse(description='Audience build result.')})
+	@extend_schema(tags=['Audience Management'], summary='Start asynchronous audience build', responses={202: OpenApiResponse(description='Audience build started.')})
 	def post(self, request, pk):
 		config = get_object_or_404(AudienceConfig, id=pk)
+		if config.campaign.status not in {'draft', 'active', 'paused'}:
+			logger.warning(
+				'Audience build rejected config_id=%s campaign_id=%s campaign_status=%s',
+				config.pk, config.campaign_id, config.campaign.status,
+			)
+			return Response({'detail': 'Audience rebuilds are allowed only for draft, active, or paused campaigns.'}, status=status.HTTP_400_BAD_REQUEST)
+		requested_round = request.data.get('target_round', request.data.get('round_number'))
 		try:
-			result = AudienceBuildService(config).build()
-			return Response(result, status=status.HTTP_201_CREATED)
-		except Exception as exc:
-			return Response({'success': False, 'message': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+			if requested_round is not None:
+				target_round = int(requested_round)
+			elif request.data.get('increment_round'):
+				target_round = max(config.round_number, 1) + 1
+			else:
+				target_round = max(config.round_number, 1)
+		except (TypeError, ValueError):
+			logger.warning('Audience build rejected config_id=%s invalid_round=%r', config.pk, requested_round)
+			return Response({'success': False, 'detail': 'round_number must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+		if target_round < 1:
+			logger.warning('Audience build rejected config_id=%s invalid_round=%s', config.pk, target_round)
+			return Response({'success': False, 'detail': 'target_round must be at least 1.'}, status=status.HTTP_400_BAD_REQUEST)
+		try:
+			with transaction.atomic():
+				config = AudienceConfig.objects.select_for_update().get(pk=config.pk)
+				if AudienceBuildJob.objects.filter(
+					audience_config=config, status__in=['PENDING', 'RUNNING'],
+				).exists():
+					logger.warning('Audience build already active config_id=%s campaign_id=%s', config.pk, config.campaign_id)
+					return Response({'success': False, 'detail': 'A build is already running.'}, status=status.HTTP_409_CONFLICT)
+				job = AudienceBuildJob.objects.create(audience_config=config, round_number=target_round)
+				config.last_rebuild_status = 'running'
+				config.last_rebuild_phase = 'starting'
+				config.last_rebuild_processed = 0
+				config.last_rebuild_total = 0
+				config.last_rebuild_percent = 0
+				config.last_rebuild_started_at = timezone.now()
+				config.last_rebuild_error = ''
+				config.save(update_fields=[
+					'last_rebuild_status', 'last_rebuild_phase', 'last_rebuild_processed',
+					'last_rebuild_total', 'last_rebuild_percent', 'last_rebuild_started_at',
+					'last_rebuild_error', 'updated_at',
+				])
+		except IntegrityError:
+			logger.warning('Audience build concurrency conflict config_id=%s campaign_id=%s', config.pk, config.campaign_id)
+			return Response({'success': False, 'detail': 'A build is already running.'}, status=status.HTTP_409_CONFLICT)
+
+		logger.info(
+			'Audience build queued job_id=%s config_id=%s campaign_id=%s round=%s',
+			job.pk, config.pk, config.campaign_id, target_round,
+		)
+		return Response({'success': True, 'message': 'Build queued.', 'config_id': config.id, 'job_id': job.id, 'round_number': target_round}, status=status.HTTP_202_ACCEPTED)
+
+
+class AudienceConfigProgressView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='Get audience build progress', responses={200: OpenApiResponse(description='Progress snapshot.')})
+	def get(self, request, pk):
+		config = get_object_or_404(AudienceConfig, id=pk)
+		return Response({'success': True, 'data': {
+			'config_id': config.id,
+			'round_number': config.round_number,
+			'build_id': config.last_build_id,
+			'status': config.last_rebuild_status,
+			'phase': config.last_rebuild_phase,
+			'processed': config.last_rebuild_processed,
+			'total': config.last_rebuild_total,
+			'percent': float(config.last_rebuild_percent or 0),
+			'started_at': config.last_rebuild_started_at,
+			'completed_at': config.last_rebuild_completed_at,
+			'duration_seconds': config.last_rebuild_duration_seconds,
+			'error': config.last_rebuild_error or None,
+			'counters': {
+				'valid': config.valid_count,
+				'invalid': config.invalid_count,
+				'from_source': config.language_from_source,
+				'from_mapper': config.language_from_mapper,
+				'from_default': config.language_from_default,
+			},
+		}})
+
+
+class AudienceBuildJobView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='Get audience build job status', responses={200: OpenApiResponse(description='Audience build job status.')})
+	def get(self, request, pk):
+		job = get_object_or_404(AudienceBuildJob, pk=pk)
+		return Response({'success': True, 'data': {
+			'id': job.id, 'audience_config_id': job.audience_config_id, 'status': job.status,
+			'processed_rows': job.processed_rows, 'valid_rows': job.valid_rows,
+			'invalid_rows': job.invalid_rows, 'started_at': job.started_at,
+			'heartbeat_at': job.heartbeat_at, 'completed_at': job.completed_at,
+			'error_message': job.error_message, 'result': job.result,
+		}})
 
 
 class AudienceConfigCreateView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Get campaign audience config metadata', responses={200: AudienceConfigSerializer})
 	def get(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
-		config, _ = AudienceConfig.objects.get_or_create(campaign=campaign)
-		config.default_language_id = config.default_language_id or campaign.default_language_id
+		config = AudienceConfig.objects.filter(campaign=campaign).first()
+		if config is None:
+			return Response({'success': True, 'data': None})
 		return Response({'success': True, 'data': AudienceConfigSerializer(config).data})
 
 	@extend_schema(tags=['Audience Management'], summary='Create or update campaign audience metadata config', request=AudienceConfigSerializer, responses={201: AudienceConfigSerializer})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
-		config, _ = AudienceConfig.objects.get_or_create(campaign=campaign)
+		if campaign.status != 'draft':
+			return Response(
+				{'detail': 'Only draft campaigns can be edited.'},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+		config = AudienceConfig.objects.filter(campaign=campaign).first()
+		if config is None:
+			default_language_id = request.data.get('default_language_id')
+			if not default_language_id:
+				return Response(
+					{'default_language_id': ['This field is required.']},
+					status=status.HTTP_400_BAD_REQUEST,
+				)
+			config = AudienceConfig(
+				campaign=campaign,
+				default_language_id=default_language_id,
+			)
 		serializer = AudienceConfigSerializer(config, data=request.data, partial=True)
 		serializer.is_valid(raise_exception=True)
 		serializer.save()
@@ -451,6 +1238,8 @@ class AudienceConfigPreviewView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Preview campaign audience metadata as a JOIN-ready SQL sketch', responses={200: OpenApiResponse(description='Preview result.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status != 'draft':
+			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
 		config, _ = AudienceConfig.objects.get_or_create(campaign=campaign)
 		serializer = AudienceConfigSerializer(config, data=request.data, partial=True)
 		serializer.is_valid(raise_exception=True)
@@ -488,11 +1277,30 @@ class AudienceConfigPreviewView(APIView):
 class CampaignAudienceMembersView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='List campaign audience members', responses={200: AudienceMemberSerializer(many=True)})
 	def get(self, request, campaign_id):
-		get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
-		members = AudienceMember.objects.filter(campaign_id=campaign_id).order_by('sequence_number')
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		config = AudienceConfig.objects.filter(campaign=campaign).first()
+		try:
+			round_number = int(request.query_params.get('round_number') or (config.round_number if config else 1))
+		except (TypeError, ValueError):
+			return Response({'detail': 'round_number must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+		members = AudienceMember.objects.filter(campaign=campaign, round_number=round_number).order_by('sequence_number')
 		paginator = StandardPagination()
 		page = paginator.paginate_queryset(members, request)
 		return paginator.get_paginated_response(AudienceMemberSerializer(page, many=True).data)
+
+
+class CampaignAudienceRoundsView(APIView):
+	@extend_schema(tags=['Audience Management'], summary='List built audience rounds', responses={200: OpenApiResponse(description='Audience rounds.')})
+	def get(self, request, campaign_id):
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		rounds = AudienceMember.objects.filter(campaign=campaign).values('round_number').annotate(
+			rows=Count('id'), built_at=Max('rebuilt_at'),
+		).order_by('-round_number')
+		return Response([{
+			'round_number': row['round_number'],
+			'rows': row['rows'],
+			'built_at': row['built_at'],
+		} for row in rounds])
 
 
 class CampaignReadinessView(APIView):
@@ -518,6 +1326,12 @@ class CampaignActivateView(APIView):
 			build = build.lower() not in ('false', '0', 'no')
 		result = CampaignActionsService(campaign).activate_campaign(bool(build))
 		return Response(result, status=status.HTTP_200_OK if result['success'] else status.HTTP_400_BAD_REQUEST)
+
+
+class CampaignStartView(APIView):
+	@extend_schema(tags=['Campaign Actions'], summary='Start an active campaign', request=None, responses={200: OpenApiResponse(description='Start result.')})
+	def post(self, request, campaign_id):
+		return _campaign_action_response(campaign_id, 'start_campaign')
 
 
 class CampaignPauseView(APIView):
@@ -591,15 +1405,6 @@ class DeliveryReportCallbackView(APIView):
 			'REJECTD': 'REJECTED',
 		}
 		mapped_status = status_map.get(provider_status, 'UNKNOWN')
-		sent_record = SentRecord.objects.select_related('campaign', 'channel').filter(
-			provider_message_id=provider_message_id,
-		).first()
-		if sent_record is None:
-			return Response(
-				{'success': False, 'message': 'Unknown provider_message_id.'},
-				status=status.HTTP_404_NOT_FOUND,
-			)
-
 		delivered_at = request.data.get('delivered_at')
 		if delivered_at:
 			delivered_at = parse_datetime(str(delivered_at))
@@ -609,35 +1414,49 @@ class DeliveryReportCallbackView(APIView):
 					status=status.HTTP_400_BAD_REQUEST,
 				)
 
-		defaults = {
-			'campaign': sent_record.campaign,
-			'channel': sent_record.channel,
-			'message_object': None,
-			'sent_record': sent_record,
-			'msisdn': str(request.data.get('receiver') or sent_record.msisdn),
-			'batch_id': sent_record.batch_id,
-			'delivered_at': delivered_at if mapped_status == 'DELIVERED' else None,
-			'delivery_status': mapped_status,
-			'provider_status': provider_status,
-			'provider_response': dict(request.data),
-			'error_message': str(request.data.get('error_reason') or ''),
-		}
-		record = DeliveryRecord.objects.filter(sent_record=sent_record).order_by('-id').first()
-		if record is not None and record.is_terminal():
-			return Response({
-				'success': True,
-				'delivery_record_id': record.id,
-				'delivery_status': record.delivery_status,
-			})
-		if record is None:
-			record = DeliveryRecord.objects.create(**defaults)
-		else:
-			for field, value in defaults.items():
-				setattr(record, field, value)
-			record.save(update_fields=[
-				'delivered_at', 'delivery_status', 'provider_status',
-				'provider_response', 'error_message', 'updated_at',
-			])
+		with transaction.atomic():
+			sent_record = SentRecord.objects.select_related('campaign', 'channel').select_for_update().filter(
+				provider_message_id=provider_message_id,
+			).first()
+			if sent_record is None:
+				return Response(
+					{'success': False, 'message': 'Unknown provider_message_id.'},
+					status=status.HTTP_404_NOT_FOUND,
+				)
+
+			sent_record.provider_status = provider_status
+			sent_record.provider_response = dict(request.data)
+			sent_record.save(update_fields=['provider_status', 'provider_response', 'updated_at'])
+
+			defaults = {
+				'campaign': sent_record.campaign,
+				'channel': sent_record.channel,
+				'message_object': None,
+				'sent_record': sent_record,
+				'msisdn': str(request.data.get('receiver') or sent_record.msisdn),
+				'batch_id': sent_record.batch_id,
+				'delivered_at': delivered_at if mapped_status == 'DELIVERED' else None,
+				'delivery_status': mapped_status,
+				'provider_status': provider_status,
+				'provider_response': dict(request.data),
+				'error_message': str(request.data.get('error_reason') or ''),
+			}
+			record = DeliveryRecord.objects.filter(sent_record=sent_record).order_by('-id').first()
+			if record is not None and record.is_terminal():
+				return Response({
+					'success': True,
+					'delivery_record_id': record.id,
+					'delivery_status': record.delivery_status,
+				})
+			if record is None:
+				record = DeliveryRecord.objects.create(**defaults)
+			else:
+				for field, value in defaults.items():
+					setattr(record, field, value)
+				record.save(update_fields=[
+					'delivered_at', 'delivery_status', 'provider_status',
+					'provider_response', 'error_message', 'updated_at',
+				])
 
 		return Response({
 			'success': True,
@@ -710,7 +1529,7 @@ class CampaignDeliveryStatsView(APIView):
 
 
 class DatabaseConfigListCreateView(APIView):
-	@extend_schema(tags=['Databases'], summary='List database configurations', responses={200: DatabaseConfigSerializer(many=True)})
+	@extend_schema(tags=['Database Config'], summary='List database configurations', responses={200: DatabaseConfigSerializer(many=True)})
 	def get(self, request):
 		queryset = DatabaseConfig.objects.all()
 		database_type = request.query_params.get('database_type')
@@ -718,7 +1537,7 @@ class DatabaseConfigListCreateView(APIView):
 			queryset = queryset.filter(database_type=database_type)
 		return Response({'success': True, 'data': DatabaseConfigSerializer(queryset, many=True).data})
 
-	@extend_schema(tags=['Databases'], summary='Create database configuration', request=DatabaseConfigCreateUpdateSerializer, responses={201: DatabaseConfigSerializer})
+	@extend_schema(tags=['Database Config'], summary='Create database configuration', request=DatabaseConfigCreateUpdateSerializer, responses={201: DatabaseConfigSerializer})
 	def post(self, request):
 		serializer = DatabaseConfigCreateUpdateSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
@@ -730,7 +1549,7 @@ class DatabaseConfigDetailView(APIView):
 	def _config(self, pk):
 		return get_object_or_404(DatabaseConfig, pk=pk)
 
-	@extend_schema(tags=['Databases'], summary='Get database configuration', responses={200: DatabaseConfigSerializer})
+	@extend_schema(tags=['Database Config'], summary='Get database configuration', responses={200: DatabaseConfigSerializer})
 	def get(self, request, pk):
 		return Response({'success': True, 'data': DatabaseConfigSerializer(self._config(pk)).data})
 
@@ -741,22 +1560,22 @@ class DatabaseConfigDetailView(APIView):
 		config = serializer.save()
 		return Response({'success': True, 'data': DatabaseConfigSerializer(config).data})
 
-	@extend_schema(tags=['Databases'], summary='Replace database configuration', request=DatabaseConfigCreateUpdateSerializer, responses={200: DatabaseConfigSerializer})
+	@extend_schema(tags=['Database Config'], summary='Replace database configuration', request=DatabaseConfigCreateUpdateSerializer, responses={200: DatabaseConfigSerializer})
 	def put(self, request, pk):
 		return self._update(request, pk, False)
 
-	@extend_schema(tags=['Databases'], summary='Update database configuration', request=DatabaseConfigCreateUpdateSerializer, responses={200: DatabaseConfigSerializer})
+	@extend_schema(tags=['Database Config'], summary='Update database configuration', request=DatabaseConfigCreateUpdateSerializer, responses={200: DatabaseConfigSerializer})
 	def patch(self, request, pk):
 		return self._update(request, pk, True)
 
-	@extend_schema(tags=['Databases'], summary='Delete database configuration', responses={200: OpenApiResponse(description='Deleted.')})
+	@extend_schema(tags=['Database Config'], summary='Delete database configuration', responses={200: OpenApiResponse(description='Deleted.')})
 	def delete(self, request, pk):
 		self._config(pk).delete()
 		return Response({'success': True, 'message': 'Database configuration deleted successfully.'})
 
 
 class DatabaseConfigTestView(APIView):
-	@extend_schema(tags=['Databases'], summary='Test saved database connection', responses={200: DatabaseConfigTestResponseSerializer})
+	@extend_schema(tags=['Database Config'], summary='Test saved database connection', responses={200: DatabaseConfigTestResponseSerializer})
 	def post(self, request, pk):
 		config = get_object_or_404(DatabaseConfig, pk=pk)
 		result = DatabaseConnector(config).test_connection()
@@ -768,7 +1587,7 @@ class DatabaseConfigTestView(APIView):
 
 
 class DatabaseConfigTestParamsView(APIView):
-	@extend_schema(tags=['Databases'], summary='Test connection without saving', request=DatabaseConfigTestParamsSerializer, responses={200: OpenApiResponse(description='Connection test result.')})
+	@extend_schema(tags=['Database Config'], summary='Test connection without saving', request=DatabaseConfigTestParamsSerializer, responses={200: OpenApiResponse(description='Connection test result.')})
 	def post(self, request):
 		serializer = DatabaseConfigTestParamsSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
@@ -777,7 +1596,7 @@ class DatabaseConfigTestParamsView(APIView):
 
 
 class DatabaseConfigTablesView(APIView):
-	@extend_schema(tags=['Databases'], summary='List external database tables', responses={200: OpenApiResponse(description='Table names.')})
+	@extend_schema(tags=['Database Config'], summary='List external database tables', responses={200: OpenApiResponse(description='Table names.')})
 	def get(self, request, pk):
 		config = get_object_or_404(DatabaseConfig, pk=pk)
 		try:
@@ -788,7 +1607,7 @@ class DatabaseConfigTablesView(APIView):
 
 
 class DatabaseConfigColumnsView(APIView):
-	@extend_schema(tags=['Databases'], summary='List table columns', responses={200: OpenApiResponse(description='Column metadata.')})
+	@extend_schema(tags=['Database Config'], summary='List table columns', responses={200: OpenApiResponse(description='Column metadata.')})
 	def get(self, request, pk, table_name):
 		config = get_object_or_404(DatabaseConfig, pk=pk)
 		try:
@@ -799,7 +1618,7 @@ class DatabaseConfigColumnsView(APIView):
 
 
 class DatabaseConfigPreviewView(APIView):
-	@extend_schema(tags=['Databases'], summary='Preview table rows', responses={200: OpenApiResponse(description='Sample rows.')})
+	@extend_schema(tags=['Database Config'], summary='Preview table rows', responses={200: OpenApiResponse(description='Sample rows.')})
 	def get(self, request, pk, table_name):
 		config = get_object_or_404(DatabaseConfig, pk=pk)
 		try:
@@ -811,7 +1630,7 @@ class DatabaseConfigPreviewView(APIView):
 
 class CustomerProfilePreviewView(APIView):
 	@extend_schema(
-		tags=['Databases'],
+		tags=['Customer Profile Config'],
 		summary='Preview language lookup for MSISDNs',
 		request=CustomerProfilePreviewSerializer,
 		responses={200: OpenApiResponse(description='Language mapping preview')},
@@ -912,7 +1731,14 @@ class CampaignListCreateView(ListCreateAPIView):
 	pagination_class = StandardPagination
 
 	def get_queryset(self):
-		queryset = Campaign.objects.filter(is_deleted=False)
+		queryset = Campaign.objects.filter(is_deleted=False).select_related('schedule', 'audience_config').annotate(
+			total_messages=Count('messages', distinct=True),
+			total_processed=Count(
+				'messages',
+				filter=Q(messages__sent_status='SENT'),
+				distinct=True,
+			),
+		)
 
 		status_param = self.request.query_params.get('status')
 		if status_param:
@@ -928,7 +1754,6 @@ class CampaignListCreateView(ListCreateAPIView):
 
 		search = self.request.query_params.get('search')
 		if search:
-			from django.db.models import Q
 			queryset = queryset.filter(
 				Q(name__icontains=search) | Q(sender_id__icontains=search)
 			)
@@ -1015,7 +1840,7 @@ class CampaignDetailView(RetrieveUpdateDestroyAPIView):
 	def update(self, request, *args, **kwargs):
 		partial = kwargs.pop('partial', False)
 		campaign = self.get_object()
-		if campaign.status not in ('draft', 'invalid_schedule'):
+		if campaign.status != 'draft':
 			return Response(
 				{
 					'success': False,
@@ -1039,17 +1864,6 @@ class CampaignDetailView(RetrieveUpdateDestroyAPIView):
 
 	def destroy(self, request, *args, **kwargs):
 		campaign = self.get_object()
-		if campaign.status != 'draft':
-			return Response(
-				{
-					'success': False,
-					'message': (
-						f"Cannot delete campaign in '{campaign.status}' status. "
-						'Only draft campaigns can be soft-deleted.'
-					),
-				},
-				status=status.HTTP_400_BAD_REQUEST,
-			)
 		campaign.soft_delete()
 		return Response({
 			'success': True,
@@ -1137,6 +1951,105 @@ class LanguageDetailView(RetrieveUpdateDestroyAPIView):
 	summary='List supported message languages',
 	responses={200: SupportedLanguageSerializer(many=True)},
 )
+class MessageContentCollectionView(APIView):
+	def get(self, request):
+		queryset = MessageContent.objects.select_related(
+			'campaign', 'default_language',
+		).filter(campaign__is_deleted=False).order_by('-updated_at')
+		search = request.query_params.get('search', '').strip()
+		default_language = request.query_params.get('default_language')
+		completeness = request.query_params.get('completeness')
+		if search:
+			queryset = queryset.filter(campaign__name__icontains=search)
+		if default_language:
+			queryset = queryset.filter(default_language__code=default_language)
+
+		items = list(queryset)
+		if completeness in {'complete', 'partial', 'empty'}:
+			active_languages = list(Language.objects.filter(is_active=True).values_list('code', flat=True))
+			def matches(item):
+				count = sum(bool(getattr(item, code, '').strip()) for code in active_languages)
+				return {
+					'complete': count == len(active_languages),
+					'partial': 0 < count < len(active_languages),
+					'empty': count == 0,
+				}[completeness]
+			items = [item for item in items if matches(item)]
+
+		paginator = StandardPagination()
+		page = paginator.paginate_queryset(items, request)
+		return paginator.get_paginated_response(MessageContentApiSerializer(page, many=True).data)
+
+	def post(self, request):
+		input_serializer = MessageContentApiInputSerializer(data=request.data)
+		input_serializer.is_valid(raise_exception=True)
+		payload = input_serializer.validated_data
+		campaign = payload['campaign']
+		if campaign.status != 'draft':
+			return Response({'detail': f"Cannot modify message content in '{campaign.status}' status."}, status=status.HTTP_400_BAD_REQUEST)
+		if MessageContent.objects.filter(campaign=campaign).exists():
+			return Response({'detail': 'Message content already exists for this campaign.'}, status=status.HTTP_409_CONFLICT)
+		write_data = dict(payload['content'])
+		write_data['default_language'] = payload['default_language'].pk
+		content_serializer = MessageContentCreateUpdateSerializer(data=write_data)
+		content_serializer.is_valid(raise_exception=True)
+		content = content_serializer.save(campaign=campaign)
+		return Response(MessageContentApiSerializer(content).data, status=status.HTTP_201_CREATED)
+
+
+class MessageContentResourceView(APIView):
+	def get_object(self, pk):
+		return get_object_or_404(
+			MessageContent.objects.select_related('campaign', 'default_language'),
+			pk=pk,
+			campaign__is_deleted=False,
+		)
+
+	def get(self, request, pk):
+		return Response(MessageContentApiSerializer(self.get_object(pk)).data)
+
+	def _update(self, request, pk, partial):
+		content = self.get_object(pk)
+		if content.campaign.status != 'draft':
+			return Response({'detail': f"Cannot modify message content in '{content.campaign.status}' status."}, status=status.HTTP_400_BAD_REQUEST)
+		input_serializer = MessageContentApiInputSerializer(
+			data=request.data, partial=partial,
+		)
+		input_serializer.is_valid(raise_exception=True)
+		payload = input_serializer.validated_data
+		campaign = payload.get('campaign', content.campaign)
+		if campaign.status != 'draft':
+			return Response({'detail': f"Cannot modify message content in '{campaign.status}' status."}, status=status.HTTP_400_BAD_REQUEST)
+		if campaign.pk != content.campaign_id and MessageContent.objects.filter(campaign=campaign).exists():
+			return Response({'detail': 'Message content already exists for this campaign.'}, status=status.HTTP_409_CONFLICT)
+		write_data = dict(payload.get('content', {}))
+		if 'default_language' in payload:
+			write_data['default_language'] = payload['default_language'].pk
+		content_serializer = MessageContentCreateUpdateSerializer(
+			content, data=write_data, partial=partial,
+		)
+		content_serializer.is_valid(raise_exception=True)
+		with transaction.atomic():
+			content_serializer.save()
+			if campaign.pk != content.campaign_id:
+				content.campaign = campaign
+				content.save(update_fields=['campaign', 'updated_at'])
+		return Response(MessageContentApiSerializer(self.get_object(content.pk)).data)
+
+	def put(self, request, pk):
+		return self._update(request, pk, partial=False)
+
+	def patch(self, request, pk):
+		return self._update(request, pk, partial=True)
+
+	def delete(self, request, pk):
+		content = self.get_object(pk)
+		if content.campaign.status != 'draft':
+			return Response({'detail': f"Cannot modify message content in '{content.campaign.status}' status."}, status=status.HTTP_400_BAD_REQUEST)
+		content.delete()
+		return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class MessageLanguageListView(APIView):
 	def get(self, request):
 		return Response({
@@ -1155,7 +2068,7 @@ class MessageContentDetailView(APIView):
 		return get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
 
 	def _editable_error(self, campaign):
-		if campaign.status not in ('draft', 'invalid_schedule'):
+		if campaign.status != 'draft':
 			return Response({
 				'success': False,
 				'message': (
@@ -1260,7 +2173,7 @@ class ScheduleDetailView(APIView):
 		return get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
 
 	def _editable_error(self, campaign):
-		if campaign.status not in ('draft', 'invalid_schedule'):
+		if campaign.status != 'draft':
 			return Response({
 				'success': False,
 				'message': f"Cannot modify schedule in '{campaign.status}' status.",
@@ -1325,6 +2238,120 @@ class ScheduleDetailView(APIView):
 		return Response({'success': True, 'message': 'Schedule deleted successfully.'})
 
 
+class ScheduleCollectionView(APIView):
+	@extend_schema(tags=['Schedule Management'], summary='List schedules')
+	def get(self, request):
+		qs = Schedule.objects.select_related('campaign').all()
+		if schedule_type := request.query_params.get('schedule_type'):
+			qs = qs.filter(schedule_type=schedule_type)
+		if campaign_status := request.query_params.get('campaign_status'):
+			qs = qs.filter(campaign__status=campaign_status)
+		if is_active := request.query_params.get('is_active'):
+			qs = qs.filter(is_active=is_active.lower() == 'true')
+		paginator = StandardPagination()
+		page = paginator.paginate_queryset(qs, request)
+		return paginator.get_paginated_response(ScheduleSerializer(page, many=True).data)
+
+	@extend_schema(tags=['Schedule Management'], summary='Create a schedule')
+	def post(self, request):
+		campaign = get_object_or_404(Campaign, pk=request.data.get('campaign'), is_deleted=False)
+		if campaign.status != 'draft':
+			return Response({'success': False, 'message': 'Only draft campaigns can be scheduled.'}, status=status.HTTP_400_BAD_REQUEST)
+		if Schedule.objects.filter(campaign=campaign).exists():
+			return Response({'success': False, 'message': 'A schedule already exists for this campaign.'}, status=status.HTTP_409_CONFLICT)
+		serializer = ScheduleCreateUpdateSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+		schedule = serializer.save(campaign=campaign)
+		return Response({'success': True, 'data': ScheduleSerializer(schedule).data}, status=status.HTTP_201_CREATED)
+
+
+class ScheduleSummaryView(APIView):
+	@extend_schema(tags=['Schedule Management'], summary='Summarize schedules')
+	def get(self, request):
+		qs = Schedule.objects.all()
+		by_type = {row['schedule_type']: row['count'] for row in qs.values('schedule_type').annotate(count=Count('id'))}
+		by_status = {row['schedule_status']: row['count'] for row in qs.values('schedule_status').annotate(count=Count('id'))}
+		return Response({
+			'total_schedules': qs.count(),
+			'by_type': by_type,
+			'by_status': by_status,
+			'by_window_status': by_status,
+			'active_schedules': qs.filter(is_active=True).count(),
+			'inactive_schedules': qs.filter(is_active=False).count(),
+			'running_today': qs.filter(is_active=True, next_run_date=timezone.localdate()).count(),
+		})
+
+
+class ScheduleResourceView(APIView):
+	def _schedule(self, pk):
+		return get_object_or_404(Schedule.objects.select_related('campaign'), pk=pk)
+
+	@extend_schema(tags=['Schedule Management'], summary='Get schedule details')
+	def get(self, request, pk):
+		return Response({'success': True, 'data': ScheduleSerializer(self._schedule(pk)).data})
+
+	@extend_schema(tags=['Schedule Management'], summary='Update a schedule')
+	def patch(self, request, pk):
+		schedule = self._schedule(pk)
+		if schedule.campaign.status != 'draft':
+			return Response({'success': False, 'message': 'Only draft campaign schedules can be edited.'}, status=status.HTTP_400_BAD_REQUEST)
+		serializer = ScheduleCreateUpdateSerializer(schedule, data=request.data, partial=True)
+		serializer.is_valid(raise_exception=True)
+		schedule = serializer.save()
+		return Response({'success': True, 'data': ScheduleSerializer(schedule).data})
+
+	@extend_schema(tags=['Schedule Management'], summary='Delete a schedule')
+	def delete(self, request, pk):
+		schedule = self._schedule(pk)
+		if schedule.campaign.status != 'draft':
+			return Response({'success': False, 'message': 'Only draft campaign schedules can be deleted.'}, status=status.HTTP_400_BAD_REQUEST)
+		schedule.delete()
+		return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ScheduleUpcomingWindowsView(APIView):
+	@extend_schema(tags=['Schedule Management'], summary='Get upcoming schedule windows')
+	def get(self, request, pk):
+		schedule = get_object_or_404(Schedule, pk=pk)
+		return ScheduleUpcomingView().get(request, schedule.campaign_id)
+
+
+class ScheduleActivationView(APIView):
+	def post(self, request, pk):
+		schedule = get_object_or_404(Schedule, pk=pk)
+		schedule.is_active = True
+		if schedule.schedule_status == 'paused':
+			schedule.schedule_status = 'active'
+		schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
+		return Response({'detail': 'Schedule activated.', 'is_active': True})
+
+
+class ScheduleDeactivationView(APIView):
+	def post(self, request, pk):
+		schedule = get_object_or_404(Schedule, pk=pk)
+		schedule.is_active = False
+		schedule.schedule_status = 'paused'
+		schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
+		return Response({'detail': 'Schedule deactivated.', 'is_active': False})
+
+
+class ScheduleResetView(APIView):
+	def post(self, request, pk):
+		schedule = get_object_or_404(Schedule, pk=pk)
+		schedule.current_round = 0
+		schedule.completed_windows = []
+		schedule.total_windows_completed = 0
+		schedule.last_processed_at = None
+		schedule.next_run_date = schedule.start_date
+		schedule.is_active = True
+		schedule.schedule_status = 'active'
+		schedule.save(update_fields=[
+			'current_round', 'completed_windows', 'total_windows_completed',
+			'last_processed_at', 'next_run_date', 'is_active', 'schedule_status', 'updated_at',
+		])
+		return Response({'success': True, 'data': ScheduleSerializer(schedule).data})
+
+
 class CampaignBuildMessagesView(APIView):
 	@extend_schema(tags=['Campaign Messages'], summary='Build MessageObject rows for a campaign', responses={201: OpenApiResponse(description='Build result.')})
 	def post(self, request, pk):
@@ -1338,6 +2365,32 @@ class CampaignBuildMessagesView(APIView):
 		except Exception as exc:
 			return Response({'success': False, 'message': f'Build failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 		return Response({'success': True, 'message': 'Messages built successfully.', 'data': result}, status=status.HTTP_201_CREATED)
+
+
+class CampaignMessageBuildProgressView(APIView):
+	@extend_schema(tags=['Campaign Messages'], summary='Get latest message-object build progress', responses={200: OpenApiResponse(description='Message build progress.')})
+	def get(self, request, pk):
+		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
+		job = campaign.message_build_jobs.order_by('-created_at').first()
+		if job is None:
+			return Response({'success': True, 'data': None})
+		return Response({'success': True, 'data': {
+			'id': job.id,
+			'campaign_id': campaign.id,
+			'batch_id': job.batch_id,
+			'round_number': job.round_number,
+			'status': job.status,
+			'phase': job.phase,
+			'processed': job.processed_rows,
+			'total': job.total_rows,
+			'built': job.built_rows,
+			'skipped': job.skipped_rows,
+			'failed': job.failed_rows,
+			'percent': job.percent,
+			'error': job.error_message or None,
+			'started_at': job.started_at,
+			'completed_at': job.completed_at,
+		}})
 
 
 class CampaignMessagesListView(APIView):
@@ -1394,6 +2447,84 @@ class CampaignMessagesStatsView(APIView):
 				'language_breakdown': lang_breakdown,
 			},
 		})
+
+
+def _campaign_message_batches(messages):
+	batch_rows = messages.exclude(batch_id='').values('batch_id').annotate(
+		total_messages=Count('id'),
+		success_count=Count('id', filter=Q(sent_status='ACCEPTED')),
+		failed_count=Count('id', filter=(
+			Q(sent_status__in=['REJECTED', 'FAILED'])
+			| Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])
+		)),
+		pending_count=Count('id', filter=Q(sent_status='PENDING')),
+		created_at=Min('built_at'),
+	).order_by('-created_at')
+
+	result = []
+	for batch in batch_rows:
+		if batch['pending_count']:
+			batch_status = 'PROCESSING' if batch['success_count'] or batch['failed_count'] else 'PENDING'
+		else:
+			batch_status = 'FAILED' if batch['failed_count'] else 'COMPLETED'
+		result.append({**batch, 'status': batch_status})
+	return result
+
+
+class CampaignProgressView(APIView):
+	@extend_schema(tags=['Campaign Messages'], summary='Get campaign message delivery progress', responses={200: OpenApiResponse(description='Campaign progress and batch summary.')})
+	def get(self, request, pk):
+		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
+		messages = MessageObject.objects.filter(campaign=campaign)
+		counts = messages.aggregate(
+			total=Count('id'),
+			sent=Count('id', filter=Q(sent_status__in=['SUBMITTED', 'ACCEPTED'])),
+			delivered=Count('id', filter=Q(delivery_status='DELIVERED')),
+			failed=Count('id', filter=(
+				Q(sent_status__in=['REJECTED', 'FAILED'])
+				| Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])
+			)),
+			pending=Count('id', filter=Q(sent_status='PENDING')),
+			processed=Count('id', filter=(
+				Q(sent_status__in=['SUBMITTED', 'ACCEPTED', 'REJECTED', 'FAILED'])
+				| Q(delivery_status__in=['DELIVERED', 'UNDELIVERABLE', 'EXPIRED', 'REJECTED'])
+			)),
+		)
+		total = counts['total'] or 0
+		processed = counts['processed'] or 0
+		batches = _campaign_message_batches(messages)
+		batch_counts = {
+			'total_batches': len(batches),
+			'completed_batches': sum(batch['status'] == 'COMPLETED' for batch in batches),
+			'failed_batches': sum(batch['status'] == 'FAILED' for batch in batches),
+			'in_progress_batches': sum(batch['status'] in {'PENDING', 'PROCESSING'} for batch in batches),
+		}
+		return Response({
+			'campaign_id': campaign.pk,
+			'campaign_name': campaign.name,
+			'progress': {
+				'total_messages': total,
+				'sent_count': counts['sent'] or 0,
+				'delivered_count': counts['delivered'] or 0,
+				'failed_count': counts['failed'] or 0,
+				'pending_count': counts['pending'] or 0,
+				'progress_percent': round(processed / total * 100, 2) if total else 0,
+				'status': campaign.status,
+			},
+			'batches': batch_counts,
+			'recent_batches': batches[:10],
+		})
+
+
+class CampaignMessagesBatchesView(APIView):
+	@extend_schema(tags=['Campaign Messages'], summary='List campaign message batches', responses={200: OpenApiResponse(description='Campaign message batches.')})
+	def get(self, request, pk):
+		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
+		batches = _campaign_message_batches(MessageObject.objects.filter(campaign=campaign))
+		status_filter = request.query_params.get('status')
+		if status_filter:
+			batches = [batch for batch in batches if batch['status'] == status_filter.upper()]
+		return Response({'results': batches})
 
 
 class CampaignMessagesClearView(APIView):

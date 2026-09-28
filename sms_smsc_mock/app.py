@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import random
@@ -38,8 +39,13 @@ REJECTD_WEIGHT = float(os.getenv('SMSC_REJECTD_WEIGHT', '0.02'))
 
 # Throughput throttling, like a real SMSC enforcing a negotiated TPS
 # (transactions per second) cap on a bind/system_id.
-MAX_TPS = float(os.getenv('SMSC_MAX_TPS', '200'))
+MAX_TPS = float(os.getenv('SMSC_MAX_TPS', '5000'))
 TPS_BURST_CAPACITY = float(os.getenv('SMSC_TPS_BURST_CAPACITY', str(MAX_TPS)))
+
+KAFKA_ENABLED = os.getenv('SMSC_KAFKA_ENABLED', 'false').lower() in {'1', 'true', 'yes'}
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'localhost:9092')
+KAFKA_SEND_RESPONSE_TOPIC = os.getenv('KAFKA_SEND_RESPONSE_TOPIC', 'smsc-send-response')
+KAFKA_DELIVERY_TOPIC = os.getenv('KAFKA_DELIVERY_TOPIC', 'smsc-delivery-report')
 
 # Webhook (DLR) delivery
 DLR_TIMEOUT_SECONDS = float(os.getenv('SMSC_DLR_TIMEOUT_SECONDS', '5.0'))
@@ -158,6 +164,8 @@ class SmsStore:
         self.inserted = 0
         self.updated = 0
         self.http_client: httpx.AsyncClient | None = None
+        self.kafka_producer: Any | None = None
+        self.kafka_publish_failures = 0
         self._delivery_tasks: set[asyncio.Task] = set()
         self.tps_bucket = TokenBucket(rate=MAX_TPS, capacity=TPS_BURST_CAPACITY)
 
@@ -196,6 +204,18 @@ class SmsStore:
         self.initialize()
         self.stop_event.clear()
         self.http_client = httpx.AsyncClient(timeout=DLR_TIMEOUT_SECONDS)
+        if KAFKA_ENABLED:
+            from aiokafka import AIOKafkaProducer
+
+            self.kafka_producer = AIOKafkaProducer(
+                bootstrap_servers=KAFKA_BOOTSTRAP,
+                acks='all',
+                linger_ms=10,
+                compression_type='gzip',
+                value_serializer=lambda value: json.dumps(value).encode('utf-8'),
+                key_serializer=lambda key: key.encode('utf-8'),
+            )
+            await self.kafka_producer.start()
         self.writer_task = asyncio.create_task(self._writer())
 
     async def stop(self) -> None:
@@ -210,6 +230,9 @@ class SmsStore:
         if self.http_client:
             await self.http_client.aclose()
             self.http_client = None
+        if self.kafka_producer:
+            await self.kafka_producer.stop()
+            self.kafka_producer = None
 
     async def _enqueue(self, item: dict[str, Any]) -> None:
         try:
@@ -220,6 +243,17 @@ class SmsStore:
     async def accept(self, row: dict[str, Any]) -> None:
         """Enqueue the initial ACCEPTED insert and schedule delivery simulation."""
         await self._enqueue({'op': 'insert', **row})
+        await self._publish_event(KAFKA_SEND_RESPONSE_TOPIC, {
+            'event_type': 'SEND_RESPONSE',
+            'message_id': row['message_id'],
+            'provider_message_id': row['provider_message_id'],
+            'campaign_id': row['campaign_id'],
+            'recipient': row['recipient'],
+            'sender_id': row['sender_id'],
+            'status': 'ACCEPTED',
+            'segment_count': row['segment_count'],
+            'received_at': row['received_at'],
+        }, key=row['message_id'])
         task = asyncio.create_task(self._simulate_delivery(row))
         self._delivery_tasks.add(task)
         task.add_done_callback(self._delivery_tasks.discard)
@@ -250,6 +284,19 @@ class SmsStore:
                 delivered_at=delivered_at,
             )
 
+        await self._publish_event(KAFKA_DELIVERY_TOPIC, {
+            'event_type': 'DELIVERY_REPORT',
+            'message_id': row['message_id'],
+            'provider_message_id': row['provider_message_id'],
+            'campaign_id': row['campaign_id'],
+            'recipient': row['recipient'],
+            'status': status,
+            'err_code': err_code,
+            'error_reason': reason,
+            'segment_count': row['segment_count'],
+            'delivered_at': delivered_at,
+        }, key=row['message_id'])
+
         try:
             await self._enqueue({
                 'op': 'update',
@@ -264,6 +311,18 @@ class SmsStore:
             })
         except RuntimeError:
             logger.error('Queue full: could not persist final status for %s', row['message_id'])
+
+    async def _publish_event(self, topic: str, event: dict[str, Any], key: str) -> None:
+        if self.kafka_producer is None:
+            return
+        try:
+            await self.kafka_producer.send_and_wait(topic, event, key=key)
+        except Exception:
+            self.kafka_publish_failures += 1
+            logger.exception(
+                'Kafka publish failed topic=%s message_id=%s failures=%s',
+                topic, key, self.kafka_publish_failures,
+            )
 
     async def _post_dlr(
         self, callback_url: str, row: dict[str, Any], status: FinalStatus,
@@ -420,6 +479,9 @@ async def health() -> dict[str, Any]:
         'updated': store.updated,
         'pending_deliveries': len(store._delivery_tasks),
         'tps_tokens_available': round(store.tps_bucket.tokens, 1),
+        'kafka_enabled': KAFKA_ENABLED,
+        'kafka_connected': store.kafka_producer is not None,
+        'kafka_publish_failures': store.kafka_publish_failures,
     }
 
 

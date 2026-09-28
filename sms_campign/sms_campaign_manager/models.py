@@ -358,6 +358,243 @@ class SMSCConfig(models.Model):
         super().save(*args, **kwargs)
 
 
+class EmailConfig(models.Model):
+    """SMTP connection settings used for campaign notification emails."""
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150, unique=True)
+    description = models.TextField(blank=True, default='')
+    host = models.CharField(max_length=255, default='smtp.example.com')
+    port = models.PositiveIntegerField(default=587)
+    username = models.CharField(max_length=255, blank=True, default='')
+    password = EncryptedCharField(max_length=500, blank=True, default='')
+    use_tls = models.BooleanField(default=True)
+    use_ssl = models.BooleanField(default=False)
+    default_from_email = models.EmailField(default='no-reply@example.com')
+    is_default = models.BooleanField(default=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    last_test_status = models.CharField(max_length=20, blank=True, default='')
+    last_test_message = models.TextField(blank=True, default='')
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='email_configs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', 'name']
+        verbose_name = 'Email Configuration'
+        verbose_name_plural = 'Email Configurations'
+
+    def __str__(self):
+        return f'{self.name} ({self.host}:{self.port})'
+
+    def clean(self):
+        errors = {}
+        if not self.name or not self.name.strip():
+            errors['name'] = 'Name is required.'
+        if not self.host or not self.host.strip():
+            errors['host'] = 'Host is required.'
+        if not 1 <= self.port <= 65535:
+            errors['port'] = 'Port must be between 1 and 65535.'
+        if not self.default_from_email:
+            errors['default_from_email'] = 'Default sender email is required.'
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or '').strip()
+        self.host = (self.host or '').strip()
+        self.default_from_email = (self.default_from_email or '').strip()
+        if self.is_default:
+            EmailConfig.objects.filter(is_default=True).exclude(pk=self.pk).update(
+                is_default=False,
+            )
+        if not self.use_tls and self.use_ssl:
+            self.use_tls = False
+        self.full_clean(validate_unique=False)
+        super().save(*args, **kwargs)
+
+
+class CampaignProgressReport(models.Model):
+    """Reusable scheduled HTML progress report for one or more campaigns."""
+
+    FREQUENCY_CHOICES = [
+        ('10_minutes', 'Every 10 minutes'),
+        ('hourly', 'Every hour'),
+        ('daily', 'Daily'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150, unique=True)
+    campaigns = models.ManyToManyField(
+        'Campaign', related_name='progress_reports', blank=False,
+    )
+    recipients = models.JSONField(default=list)
+    include_campaign_owners = models.BooleanField(default=False)
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily')
+    is_active = models.BooleanField(default=True, db_index=True)
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='campaign_progress_reports',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+
+class EmailReport(models.Model):
+    """Log of email reports sent for a campaign."""
+
+    REPORT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    campaign = models.ForeignKey(
+        'Campaign',
+        on_delete=models.CASCADE,
+        related_name='email_reports',
+        db_index=True,
+    )
+    report_type = models.CharField(max_length=50, default='campaign_summary')
+    subject = models.CharField(max_length=255)
+    recipients = models.JSONField(default=list, blank=True)
+    content = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=20, choices=REPORT_STATUS_CHOICES, default='pending')
+    sent_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Email Report'
+        verbose_name_plural = 'Email Reports'
+
+    def __str__(self):
+        return f'{self.subject} ({self.status})'
+
+
+class ReportSubscription(models.Model):
+    """Campaign report recipients and delivery preferences."""
+
+    FREQUENCY_CHOICES = [
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+        ('on_completion', 'On completion'),
+        ('manual', 'Manual'),
+    ]
+    FORMAT_CHOICES = [
+        ('text', 'Plain text'),
+        ('html', 'HTML'),
+        ('csv', 'CSV'),
+        ('pdf', 'PDF'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    campaign = models.ForeignKey(
+        'Campaign',
+        on_delete=models.CASCADE,
+        related_name='report_subscriptions',
+        null=True,
+        blank=True,
+    )
+    recipients = models.JSONField(default=list)
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='manual')
+    format = models.CharField(max_length=10, choices=FORMAT_CHOICES, default='html')
+    include_sent_stats = models.BooleanField(default=True)
+    include_delivery_stats = models.BooleanField(default=True)
+    include_message_stats = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='report_subscriptions',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Report subscription #{self.pk} ({self.frequency})'
+
+
+class ReportDeliveryLog(models.Model):
+    """Snapshot of a campaign report delivery attempt."""
+
+    STATUS_CHOICES = [
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    subscription = models.ForeignKey(
+        ReportSubscription,
+        on_delete=models.SET_NULL,
+        related_name='delivery_logs',
+        null=True,
+        blank=True,
+    )
+    campaign = models.ForeignKey(
+        'Campaign',
+        on_delete=models.SET_NULL,
+        related_name='report_delivery_logs',
+        null=True,
+        blank=True,
+    )
+    email_config = models.ForeignKey(
+        EmailConfig,
+        on_delete=models.SET_NULL,
+        related_name='report_delivery_logs',
+        null=True,
+        blank=True,
+    )
+    recipients = models.JSONField(default=list)
+    format = models.CharField(max_length=10, choices=ReportSubscription.FORMAT_CHOICES)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='failed')
+    error_message = models.TextField(blank=True, default='')
+    attachment_names = models.JSONField(default=list, blank=True)
+    report_data = models.JSONField(default=dict, blank=True)
+    subject = models.CharField(max_length=255, blank=True, default='')
+    content = models.TextField(blank=True, default='')
+    include_sent_stats = models.BooleanField(default=True)
+    include_delivery_stats = models.BooleanField(default=True)
+    include_message_stats = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['campaign', '-created_at'], name='sms_campaig_campaig_3687b0_idx')]
+
+    def __str__(self):
+        return f'Report delivery #{self.pk} ({self.status})'
+
+
 # ============================================================================
 # DATABASE CONFIG (external DB connections)
 # ============================================================================
@@ -450,6 +687,11 @@ class Campaign(models.Model):
     sender_id = models.CharField(
         max_length=11,
         help_text="Sender ID (e.g., SMSINFO, MPESA)",
+    )
+    owner_emails = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Email addresses that receive campaign notifications',
     )
 
     # ==================== CHANNELS ====================
@@ -544,7 +786,7 @@ class Campaign(models.Model):
 
     @property
     def has_audience(self) -> bool:
-        return self.audience_members.exists()
+        return self.audience_members.filter(is_valid=True).exists()
 
     @property
     def has_schedule(self) -> bool:
@@ -557,6 +799,19 @@ class Campaign(models.Model):
     @property
     def has_messages(self) -> bool:
         return self.messages.exists()
+
+    @property
+    def execution_status(self) -> str:
+        return {
+            'draft': 'PENDING',
+            'active': 'PENDING',
+            'in_progress': 'PROCESSING',
+            'paused': 'PAUSED',
+            'stopped': 'STOPPED',
+            'completed': 'COMPLETED',
+            'invalid_schedule': 'FAILED',
+            'archived': 'COMPLETED',
+        }.get(self.status, 'PENDING')
 
     @property
     def is_ready_for_activation(self) -> bool:
@@ -717,6 +972,10 @@ class MessageContent(models.Model):
             if (text or '').strip()
         ]
 
+    def has_language(self, language) -> bool:
+        language_code = getattr(language, 'code', language)
+        return bool((self.get_content_dict().get(language_code) or '').strip())
+
 
 # ============================================================================
 # SCHEDULE (1:1 with Campaign)
@@ -745,6 +1004,7 @@ class Schedule(models.Model):
     run_days = models.JSONField(default=list, blank=True)
     time_windows = models.JSONField(default=list)
     timezone = models.CharField(max_length=50, default='UTC')
+    auto_reset = models.BooleanField(default=True)
     is_active = models.BooleanField(default=True, db_index=True)
     schedule_status = models.CharField(
         max_length=20, choices=SCHEDULE_STATE_CHOICES, default='active',
@@ -913,6 +1173,9 @@ class Audience(models.Model):
 
     custom_fields = models.JSONField(default=dict, blank=True)
     sequence_number = models.PositiveIntegerField(db_index=True)
+    round_number = models.PositiveIntegerField(default=1, db_index=True)
+    build_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    rebuilt_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -922,13 +1185,14 @@ class Audience(models.Model):
         verbose_name = 'Audience'
         verbose_name_plural = 'Audience'
         indexes = [
+            models.Index(fields=['campaign', 'round_number'], name='audience_campaign_round_idx'),
             models.Index(fields=['campaign', 'is_valid']),
             models.Index(fields=['campaign', 'language']),
             models.Index(fields=['msisdn', 'campaign']),
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['campaign', 'msisdn'],
+                fields=['campaign', 'msisdn', 'round_number'],
                 name='unique_campaign_msisdn',
             ),
         ]
@@ -1020,6 +1284,9 @@ class MessageObject(models.Model):
     )
 
     batch_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
+    worker_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    locked_until = models.DateTimeField(null=True, blank=True, db_index=True)
+    sending_started_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     built_at = models.DateTimeField(auto_now_add=True, db_index=True)
     sent_at = models.DateTimeField(null=True, blank=True)
@@ -1067,6 +1334,43 @@ class MessageObject(models.Model):
             'recipient': self.recipient,
             'message_content': self.message_content,
         }
+
+
+class MessageBuildJob(models.Model):
+    STATUS_CHOICES = [
+        ('RUNNING', 'Running'),
+        ('SUCCEEDED', 'Succeeded'),
+        ('FAILED', 'Failed'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE, related_name='message_build_jobs')
+    batch_id = models.CharField(max_length=50, blank=True, default='')
+    round_number = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='RUNNING', db_index=True)
+    phase = models.CharField(max_length=30, blank=True, default='starting')
+    processed_rows = models.PositiveBigIntegerField(default=0)
+    total_rows = models.PositiveBigIntegerField(default=0)
+    built_rows = models.PositiveBigIntegerField(default=0)
+    skipped_rows = models.PositiveBigIntegerField(default=0)
+    failed_rows = models.PositiveBigIntegerField(default=0)
+    percent = models.FloatField(default=0)
+    error_message = models.TextField(blank=True, default='')
+    started_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['campaign', '-created_at'], name='msgbuild_campaign_ct_idx')]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['campaign'],
+                condition=models.Q(status='RUNNING'),
+                name='unique_running_message_build_per_campaign',
+            ),
+        ]
 
 
 # ============================================================================
@@ -1238,6 +1542,91 @@ class DeliveryRecord(models.Model):
             )
 
 
+class _SendHistoryBase(models.Model):
+    """Shared immutable fields for accepted and rejected SMS submissions."""
+
+    id = models.BigAutoField(primary_key=True)
+    message_id = models.CharField(max_length=100, unique=True, db_index=True)
+    campaign = models.ForeignKey(Campaign, on_delete=models.PROTECT, db_index=True)
+    channel = models.ForeignKey(Channel, on_delete=models.PROTECT, db_index=True)
+    recipient = models.CharField(max_length=20, db_index=True)
+    sender_id = models.CharField(max_length=11)
+    batch_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
+    total_attempts = models.PositiveSmallIntegerField(default=1)
+    provider_message_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    provider_status = models.CharField(max_length=50, blank=True, default='')
+    provider_response = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+        indexes = [
+            models.Index(fields=['campaign', '-created_at']),
+            models.Index(fields=['recipient', 'campaign']),
+        ]
+
+
+class SuccessSent(_SendHistoryBase):
+    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = 'sms_campaign_manager_successsent'
+        ordering = ['-created_at']
+
+
+class FailedSent(_SendHistoryBase):
+    last_error = models.TextField(blank=True, default='')
+    error_code = models.CharField(max_length=50, blank=True, default='')
+    first_attempt_at = models.DateTimeField(null=True, blank=True)
+    final_attempt_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'sms_campaign_manager_failedsent'
+        ordering = ['-created_at']
+
+
+class _DeliveryHistoryBase(models.Model):
+    """Shared immutable fields for terminal delivery reports."""
+
+    id = models.BigAutoField(primary_key=True)
+    message_id = models.CharField(max_length=100, db_index=True)
+    provider_message_id = models.CharField(max_length=100, db_index=True)
+    campaign = models.ForeignKey(Campaign, on_delete=models.PROTECT, db_index=True)
+    channel = models.ForeignKey(Channel, on_delete=models.PROTECT, db_index=True)
+    recipient = models.CharField(max_length=20, db_index=True)
+    sender_id = models.CharField(max_length=11)
+    delivery_status = models.CharField(max_length=20, db_index=True)
+    delivery_code = models.CharField(max_length=20, blank=True, default='')
+    delivery_description = models.TextField(blank=True, default='')
+    provider_response = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+        indexes = [
+            models.Index(fields=['campaign', 'delivery_status']),
+            models.Index(fields=['recipient', 'campaign']),
+        ]
+
+
+class SuccessDelivery(_DeliveryHistoryBase):
+    delivered_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = 'sms_campaign_manager_successdelivery'
+        ordering = ['-created_at']
+
+
+class FailedDelivery(_DeliveryHistoryBase):
+    failed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = 'sms_campaign_manager_faileddelivery'
+        ordering = ['-created_at']
+
+
 # ============================================================================
 # CUSTOMER PROFILE CONFIG (language mapping)
 # ============================================================================
@@ -1300,6 +1689,12 @@ class AudienceConfig(models.Model):
     JOIN_TYPE_CHOICES = [
         ('LEFT', 'LEFT JOIN'),
         ('INNER', 'INNER JOIN'),
+    ]
+    REBUILD_STATUS_CHOICES = [
+        ('idle', 'Idle'),
+        ('running', 'Running'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
     ]
 
     id = models.BigAutoField(primary_key=True)
@@ -1416,6 +1811,24 @@ class AudienceConfig(models.Model):
         help_text='JOIN type between source and mapper',
     )
 
+    rebuild_before_each_run = models.BooleanField(
+        default=False,
+        help_text='Rebuild the audience from its source before each scheduled run',
+    )
+    rebuild_on_each_round = models.BooleanField(default=False)
+    rebuild_minutes_before = models.PositiveSmallIntegerField(
+        default=10,
+        help_text='Minutes before the scheduled start to begin rebuilding',
+    )
+    rebuild_timeout_minutes = models.PositiveSmallIntegerField(
+        default=30,
+        help_text='Maximum allowed audience rebuild duration in minutes',
+    )
+    round_number = models.PositiveIntegerField(default=1)
+    last_rebuild_round = models.PositiveIntegerField(default=0)
+    is_round_active = models.BooleanField(default=False)
+    last_build_id = models.CharField(max_length=64, blank=True, default='')
+
     default_language = models.ForeignKey(
         Language,
         on_delete=models.PROTECT,
@@ -1424,6 +1837,7 @@ class AudienceConfig(models.Model):
     )
 
     total_count = models.PositiveIntegerField(default=0)
+    total_rows_fetched = models.PositiveBigIntegerField(default=0)
     valid_count = models.PositiveIntegerField(default=0)
     invalid_count = models.PositiveIntegerField(default=0)
     language_from_source = models.PositiveIntegerField(default=0)
@@ -1432,6 +1846,22 @@ class AudienceConfig(models.Model):
 
     is_processed = models.BooleanField(default=False, db_index=True)
     last_built_at = models.DateTimeField(null=True, blank=True)
+    last_rebuild_started_at = models.DateTimeField(null=True, blank=True)
+    last_rebuild_completed_at = models.DateTimeField(null=True, blank=True)
+    last_rebuild_status = models.CharField(
+        max_length=20,
+        choices=REBUILD_STATUS_CHOICES,
+        default='idle',
+        db_index=True,
+    )
+    last_rebuild_phase = models.CharField(max_length=30, blank=True, default='')
+    last_rebuild_processed = models.PositiveBigIntegerField(default=0)
+    last_rebuild_total = models.PositiveBigIntegerField(default=0)
+    last_rebuild_percent = models.FloatField(default=0)
+    last_rebuild_error = models.TextField(blank=True, default='')
+    last_rebuild_duration_seconds = models.FloatField(null=True, blank=True)
+    avg_rebuild_duration_seconds = models.FloatField(default=0)
+    rebuild_history_seconds = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1442,6 +1872,41 @@ class AudienceConfig(models.Model):
 
     def __str__(self):
         return f'AudienceConfig for {self.campaign.name} ({self.source_type})'
+
+
+class AudienceBuildJob(models.Model):
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('RUNNING', 'Running'),
+        ('SUCCEEDED', 'Succeeded'),
+        ('FAILED', 'Failed'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    audience_config = models.ForeignKey(AudienceConfig, on_delete=models.CASCADE, related_name='build_jobs')
+    round_number = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+    processed_rows = models.PositiveBigIntegerField(default=0)
+    valid_rows = models.PositiveBigIntegerField(default=0)
+    invalid_rows = models.PositiveBigIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    result = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['audience_config', 'status'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['audience_config'],
+                condition=models.Q(status__in=['PENDING', 'RUNNING']),
+                name='unique_active_audience_build_per_config',
+            ),
+        ]
 
 
 # ============================================================================

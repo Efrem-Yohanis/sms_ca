@@ -21,7 +21,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-c!ny22+)!a&6$k^%51--8^*0caka5x()cj!q@)w9#6_jatv=d$'
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-c!ny22+)!a&6$k^%51--8^*0caka5x()cj!q@)w9#6_jatv=d$',
+)
 
 # Fernet encryption key for EncryptedCharField credentials.
 # Prefer an environment variable in production, but keep a local
@@ -32,9 +35,13 @@ FIELD_ENCRYPTION_KEY = os.environ.get(
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+    if host.strip()
+]
 
 
 # Application definition
@@ -85,12 +92,28 @@ WSGI_APPLICATION = 'sms_campign.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+DB_ENGINE = os.environ.get('DB_ENGINE', 'sqlite').lower()
+
+if DB_ENGINE == 'postgresql':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('DB_NAME', 'campaign_manager'),
+            'USER': os.environ.get('DB_USER', 'campaign_manager'),
+            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ.get('DB_HOST', 'localhost'),
+            'PORT': os.environ.get('DB_PORT', '5432'),
+        }
     }
-}
+elif DB_ENGINE == 'sqlite':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
+else:
+    raise ValueError(f'Unsupported DB_ENGINE: {DB_ENGINE}')
 
 
 # Password validation
@@ -134,8 +157,42 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.example.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
+EMAIL_USE_SSL = os.environ.get('EMAIL_USE_SSL', 'false').lower() == 'true'
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'no-reply@example.com')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'campaign_manager': {
+            'format': '%(asctime)s %(levelname)s %(name)s %(message)s',
+        },
+    },
+    'handlers': {
+        'campaign_manager_console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'campaign_manager',
+        },
+    },
+    'loggers': {
+        'sms_campaign_manager': {
+            'handlers': ['campaign_manager_console'],
+            'level': os.environ.get('DJANGO_CAMPAIGN_LOG_LEVEL', 'INFO').upper(),
+            'propagate': False,
+        },
+    },
+}
+
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],
@@ -153,11 +210,14 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Schedule Management', 'description': 'Campaign schedule management'},
         {'name': 'Audience Management', 'description': 'Campaign audience management'},
         {'name': 'Campaign Actions', 'description': 'Campaign lifecycle operations'},
-        {'name': 'Delivery Tracker', 'description': 'SMS delivery report tracking'},
-        {'name': 'Sent Tracker', 'description': 'SMS submission progress tracking'},
-        {'name': 'Databases', 'description': 'Database configuration, schema exploration, and customer profile mapping'},
+        {'name': 'Campaign Messages', 'description': 'Build and inspect the transient message queue'},
+        {'name': 'User Management', 'description': 'User profiles, passwords, and administrator user management'},
+        {'name': 'Database Config', 'description': 'Database configuration, schema exploration, and connection tests'},
+        {'name': 'Customer Profile Config', 'description': 'Customer profile mappings and language lookup previews'},
         {'name': 'Channel Manager', 'description': 'Campaign channel management'},
         {'name': 'Language Manager', 'description': 'Language CRUD operations'},
+        {'name': 'Email Config', 'description': 'SMTP configuration for sending campaign email notifications and reports'},
+        {'name': 'Email Reports', 'description': 'Campaign email report generation, delivery history, and send results'},
     ],
     'ENUM_NAME_OVERRIDES': {
         'DefaultLanguageE1dEnum': 'DefaultLanguageEnum',

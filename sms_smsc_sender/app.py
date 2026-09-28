@@ -5,7 +5,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, time as clock_time, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -17,13 +17,16 @@ DATABASE_PATH = os.getenv(
     os.path.join(BASE_DIR, 'sms_campign', 'db.sqlite3'),
 )
 SMSC_CONFIG_ID = os.getenv('SMSC_SENDER_CONFIG_ID')
-DJANGO_API_BASE_URL = os.getenv('SMSC_SENDER_DJANGO_API', 'http://127.0.0.1:8000/api/v1').rstrip('/')
-SCHEDULER_INTERVAL_SECONDS = int(os.getenv('SMSC_SENDER_SCHEDULER_INTERVAL', '60'))
 RUN_WORKER = os.getenv('SMSC_SENDER_RUN_WORKER', 'false').lower() in {'1', 'true', 'yes'}
+SENDER_INTERVAL_SECONDS = float(os.getenv('SMSC_SENDER_INTERVAL', '1'))
 DLR_CALLBACK_URL = os.getenv(
     'SMSC_SENDER_DLR_CALLBACK_URL',
-    f'{DJANGO_API_BASE_URL}/delivery-reports/callback/',
+    'http://127.0.0.1:8092/api/v1/delivery-reports/callback/',
 )
+DJANGO_API_BASE_URL = os.getenv(
+    'SMSC_SENDER_DJANGO_API_BASE_URL',
+    'http://127.0.0.1:8000/api/v1',
+).rstrip('/')
 
 
 class Sender:
@@ -31,8 +34,8 @@ class Sender:
         self.database_path = database_path
         self.lock = asyncio.Lock()
         self.worker_task: asyncio.Task | None = None
-        self.last_report: dict[str, Any] = {}
-        self.scheduler = CampaignScheduler(database_path)
+        self.last_report: dict[str, Any] = {"success": True, "campaigns": 0, "errors": []}
+        self.active_campaigns: dict[int, dict[str, Any]] = {}
 
     def connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -59,87 +62,210 @@ class Sender:
         finally:
             connection.close()
 
-    def pending_by_campaign(self, capacity: int) -> dict[int, list[sqlite3.Row]]:
+    def allocate_tps(self, campaign_count: int) -> dict[int, int]:
+        if campaign_count <= 0:
+            return {}
+        config = self.config()
+        global_tps = int(config['rate_limit_per_second'])
+        base, remainder = divmod(global_tps, campaign_count)
+        allocations: dict[int, int] = {}
+        for index, campaign_id in enumerate(sorted(self.active_campaigns)):
+            share = base + (1 if index < remainder else 0)
+            allocations[campaign_id] = share
+        return allocations
+
+    def pending_by_campaign(self, campaign_id: int, allocated_tps: int) -> list[sqlite3.Row]:
         connection = self.connection()
         try:
             rows = connection.execute(
-                                '''SELECT message.* FROM sms_campaign_manager_messageobject AS message
-                                     INNER JOIN sms_campaign_manager_campaign AS campaign
-                                         ON campaign.id = message.campaign_id
-                                     WHERE campaign.status IN ('active', 'in_progress')
-                                         AND campaign.is_deleted = 0
-                                         AND message.sent_status IN ('PENDING', 'FAILED')
-                     AND send_attempts < ?
-                                     ORDER BY message.campaign_id, message.id''',
-                (self.config()['max_retries'],),
+                '''SELECT message.*
+                   FROM sms_campaign_manager_messageobject AS message
+                   INNER JOIN sms_campaign_manager_campaign AS campaign
+                       ON campaign.id = message.campaign_id
+                   WHERE campaign.id = ?
+                     AND campaign.status IN ('active', 'in_progress')
+                     AND campaign.is_deleted = 0
+                     AND message.sent_status IN ('PENDING', 'FAILED')
+                     AND message.send_attempts < ?
+                     AND (message.locked_until IS NULL OR message.locked_until < ?)
+                   ORDER BY message.id ASC
+                   LIMIT ?''',
+                (
+                    campaign_id,
+                    int(self.config()['max_retries']),
+                    datetime.now(timezone.utc).isoformat(),
+                    max(1, allocated_tps),
+                ),
             ).fetchall()
+            return list(rows)
         finally:
             connection.close()
 
-        grouped: dict[int, list[sqlite3.Row]] = {}
-        for row in rows:
-            grouped.setdefault(row['campaign_id'], []).append(row)
-        campaign_ids = sorted(grouped)
-        if not campaign_ids:
-            return {}
+    def claim_batch(self, campaign_id: int, allocated_tps: int) -> list[sqlite3.Row]:
+        messages = self.pending_by_campaign(campaign_id, allocated_tps)
+        if not messages:
+            return []
 
-        base, remainder = divmod(capacity, len(campaign_ids))
-        return {
-            campaign_id: grouped[campaign_id][:base + (index < remainder)]
-            for index, campaign_id in enumerate(campaign_ids)
-            if base + (index < remainder) > 0
-        }
+        batch_id = f'batch_{campaign_id}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}'
+        worker_id = f'worker_{os.getpid()}_{uuid.uuid4().hex[:6]}'
+        now = datetime.now(timezone.utc)
+        lock_until = now + timedelta(minutes=5)
+
+        connection = self.connection()
+        try:
+            connection.execute('BEGIN IMMEDIATE')
+            message_ids = [message['id'] for message in messages]
+            placeholders = ', '.join('?' for _ in message_ids)
+            connection.execute(
+                f'''UPDATE sms_campaign_manager_messageobject
+                    SET batch_id = ?,
+                        worker_id = ?,
+                        sending_started_at = COALESCE(sending_started_at, ?),
+                        locked_until = ?,
+                        updated_at = ?
+                    WHERE id IN ({placeholders})''',
+                [batch_id, worker_id, now.isoformat(), lock_until.isoformat(), now.isoformat(), *message_ids],
+            )
+            rows = connection.execute(
+                f'''SELECT * FROM sms_campaign_manager_messageobject WHERE id IN ({placeholders}) ORDER BY id''',
+                message_ids,
+            ).fetchall()
+            connection.commit()
+            return list(rows)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def allocation_summary(groups: dict[int, list[sqlite3.Row]]) -> dict[str, int]:
         return {str(campaign_id): len(rows) for campaign_id, rows in groups.items()}
 
-    async def run_once(self) -> dict[str, Any]:
-        async with self.lock:
-            config = self.config()
-            capacity = int(config['rate_limit_per_second'])
-            groups = self.pending_by_campaign(capacity)
-            messages = [message for rows in groups.values() for message in rows]
-            if not messages:
-                report = {
-                    'success': True,
-                    'sent': 0,
-                    'failed': 0,
-                    'retried': 0,
-                    'removed': 0,
-                    'campaigns': 0,
-                    'allocated': {},
-                }
-                self.last_report = report
-                return report
+    def apply_campaign_action(self, campaign_id: int, action: str) -> dict[str, Any]:
+        endpoint = {'start': 'activate', 'stop': 'pause'}.get(action, action)
+        url = f'{DJANGO_API_BASE_URL}/campaigns/{campaign_id}/{endpoint}/'
+        try:
+            response = requests.post(url, json={}, timeout=10)
+            try:
+                body = response.json()
+            except ValueError:
+                body = {'raw': response.text[:500]}
+            if response.status_code in (200, 201, 400):
+                return {'success': True, 'campaign_id': campaign_id, 'action': action, 'response': body}
+            raise RuntimeError(f'Campaign {action} failed: HTTP {response.status_code}: {body}')
+        except requests.RequestException as exc:
+            raise RuntimeError(f'Campaign {action} failed for campaign {campaign_id}: {exc}') from exc
 
-            workers = min(capacity, int(os.getenv('SMSC_SENDER_WORKERS', '100')))
-            semaphore = asyncio.Semaphore(workers)
+    def start_campaign(self, campaign_id: int, round_number: int = 1) -> dict[str, Any]:
+        status = self.apply_campaign_action(campaign_id, 'start')
+        self.active_campaigns[campaign_id] = {
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'round_number': round_number,
+        }
+        return {
+            'success': True,
+            'message': 'Campaign started',
+            'data': {
+                'campaign_id': campaign_id,
+                'round_number': round_number,
+                'status': 'active',
+                'execution_status': 'PROCESSING',
+                'allocated_tps': self.allocate_tps(len(self.active_campaigns)).get(campaign_id, 0),
+                'total_global_tps': self.config()['rate_limit_per_second'],
+                'active_campaigns': len(self.active_campaigns),
+            },
+            'campaign_response': status,
+        }
 
-            async def submit(message: sqlite3.Row) -> dict[str, Any]:
-                async with semaphore:
-                    return await asyncio.to_thread(self.send_one, config, message)
+    def stop_campaign(self, campaign_id: int, round_number: int = 1) -> dict[str, Any]:
+        status = self.apply_campaign_action(campaign_id, 'stop')
+        self.active_campaigns.pop(campaign_id, None)
+        return {
+            'success': True,
+            'message': 'Campaign stopped',
+            'data': {
+                'campaign_id': campaign_id,
+                'round_number': round_number,
+                'status': 'paused',
+                'execution_status': 'PAUSED',
+                'active_campaigns': len(self.active_campaigns),
+            },
+            'campaign_response': status,
+        }
 
-            outcomes = await asyncio.gather(
-                *(submit(message) for message in messages),
-                return_exceptions=False,
-            )
-            report = {
+    def run_once_for_campaign(self, campaign_id: int, allocated_tps: int) -> dict[str, Any]:
+        config = self.config()
+        messages = self.claim_batch(campaign_id, allocated_tps)
+        if not messages:
+            return {
                 'success': True,
+                'campaign_id': campaign_id,
                 'sent': 0,
                 'failed': 0,
                 'retried': 0,
-                'removed': 0,
-                'campaigns': len(groups),
-                'allocated': self.allocation_summary(groups),
+                'allocated_tps': allocated_tps,
+                'batch_id': None,
+                'worker_id': None,
+            }
+
+        workers = min(allocated_tps, max(1, int(os.getenv('SMSC_SENDER_WORKERS', '100'))))
+        semaphore = asyncio.Semaphore(workers)
+
+        async def submit(message: sqlite3.Row) -> dict[str, Any]:
+            async with semaphore:
+                return await asyncio.to_thread(self.send_one, config, message)
+
+        async def run_async() -> list[dict[str, Any]]:
+            return await asyncio.gather(*(submit(message) for message in messages), return_exceptions=False)
+
+        outcomes = asyncio.get_event_loop().run_until_complete(run_async())
+        batch_id = messages[0]['batch_id']
+        worker_id = messages[0]['worker_id']
+        report = {
+            'success': True,
+            'campaign_id': campaign_id,
+            'batch_id': batch_id,
+            'worker_id': worker_id,
+            'allocated_tps': allocated_tps,
+            'sent': 0,
+            'failed': 0,
+            'retried': 0,
+            'errors': [],
+        }
+        for outcome in outcomes:
+            result = self.record_outcome(outcome, config)
+            report['sent'] += result['sent']
+            report['failed'] += result['failed']
+            report['retried'] += result['retried']
+            if result.get('error'):
+                report['errors'].append(result['error'])
+        self.last_report = report
+        return report
+
+    async def run_once(self) -> dict[str, Any]:
+        async with self.lock:
+            if not self.active_campaigns:
+                report = {'success': True, 'campaigns': 0, 'sent': 0, 'failed': 0, 'retried': 0, 'allocated': {}}
+                self.last_report = report
+                return report
+
+            allocations = self.allocate_tps(len(self.active_campaigns))
+            report = {
+                'success': True,
+                'campaigns': len(self.active_campaigns),
+                'sent': 0,
+                'failed': 0,
+                'retried': 0,
+                'allocated': {str(campaign_id): allocation for campaign_id, allocation in allocations.items()},
                 'errors': [],
             }
-            for outcome in outcomes:
-                result = self.record_outcome(outcome, config)
-                for key in ('sent', 'failed', 'retried', 'removed'):
-                    report[key] += result[key]
-                if result.get('error'):
-                    report['errors'].append(result['error'])
+            for campaign_id, allocated_tps in allocations.items():
+                result = await asyncio.to_thread(self.run_once_for_campaign, campaign_id, allocated_tps)
+                report['sent'] += result.get('sent', 0)
+                report['failed'] += result.get('failed', 0)
+                report['retried'] += result.get('retried', 0)
+                report['errors'].extend(result.get('errors', []))
             self.last_report = report
             return report
 
@@ -195,49 +321,31 @@ class Sender:
 
             now = datetime.now(timezone.utc).isoformat()
             attempts = int(message['send_attempts']) + 1
-            body = outcome['body']
-            provider_id = str(body.get('provider_message_id', ''))
-            provider_status = str(body.get('status', 'FAILED'))
-            sent_status = 'ACCEPTED' if outcome['accepted'] else 'FAILED'
-
-            connection.execute('BEGIN IMMEDIATE')
-            connection.execute(
-                '''INSERT INTO sms_campaign_manager_sentrecord
-                   (campaign_id, channel_id, message_object_id, msisdn, batch_id,
-                    submitted_at, sent_status, provider_message_id, provider_status,
-                    provider_response, error_message, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (
-                    message['campaign_id'], message['channel_id'], message['id'],
-                    message['recipient'], message['batch_id'], now, sent_status,
-                    provider_id, provider_status, json.dumps(body), outcome['error'], now, now,
-                ),
-            )
-
-            if outcome['accepted'] or attempts >= int(config['max_retries']):
-                connection.execute(
-                    'DELETE FROM sms_campaign_manager_messageobject WHERE id = ?',
-                    (message['id'],),
-                )
-                removed = 1
-            else:
-                connection.execute(
-                    '''UPDATE sms_campaign_manager_messageobject
-                       SET sent_status = 'FAILED', send_attempts = ?,
-                           last_error = ?, failed_at = ?, updated_at = ?
-                       WHERE id = ?''',
-                    (attempts, outcome['error'], now, now, message['id']),
-                )
-                removed = 0
-            connection.commit()
 
             if outcome['accepted']:
-                return {'sent': 1, 'failed': 0, 'retried': 0, 'removed': removed}
+                connection.execute(
+                    '''UPDATE sms_campaign_manager_messageobject
+                       SET sent_status = 'SENT', sent_at = ?, send_attempts = ?,
+                           locked_until = NULL, last_error = '', updated_at = ?
+                       WHERE id = ?''',
+                    (now, attempts, now, message['id']),
+                )
+                connection.commit()
+                return {'sent': 1, 'failed': 0, 'retried': 0, 'removed': 0}
+
+            connection.execute(
+                '''UPDATE sms_campaign_manager_messageobject
+                   SET sent_status = 'FAILED', send_attempts = ?,
+                       last_error = ?, failed_at = ?, locked_until = NULL, updated_at = ?
+                   WHERE id = ?''',
+                (attempts, outcome['error'], now, now, message['id']),
+            )
+            connection.commit()
             return {
                 'sent': 0,
                 'failed': 1,
                 'retried': int(attempts < int(config['max_retries'])),
-                'removed': removed,
+                'removed': 0,
                 'error': outcome['error'],
             }
         except Exception:
@@ -248,115 +356,14 @@ class Sender:
 
     async def worker(self) -> None:
         while True:
-            started = time.monotonic()
             try:
-                await self.scheduler.run_once()
-                await self.run_once()
+                await asyncio.to_thread(self.run_once)
             except Exception as exc:
                 self.last_report = {'success': False, 'error': str(exc)}
-            delay = max(0.0, SCHEDULER_INTERVAL_SECONDS - (time.monotonic() - started))
-            await asyncio.sleep(delay or 0.01)
-
-
-class CampaignScheduler:
-    """Synchronize scheduled campaign state through the Django API."""
-
-    def __init__(self, database_path: str):
-        self.database_path = database_path
-        self.last_report: dict[str, Any] = {}
-
-    def connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute('PRAGMA busy_timeout=30000')
-        return connection
-
-    def due_campaigns(self) -> list[sqlite3.Row]:
-        connection = self.connection()
-        try:
-            return connection.execute(
-                '''SELECT campaign.id, campaign.status, schedule.schedule_type,
-                          schedule.start_date, schedule.end_date,
-                          schedule.run_days, schedule.time_windows,
-                          schedule.schedule_status, schedule.is_active
-                   FROM sms_campaign_manager_campaign AS campaign
-                   INNER JOIN sms_campaign_manager_schedule AS schedule
-                     ON schedule.campaign_id = campaign.id
-                   WHERE campaign.is_deleted = 0
-                     AND schedule.is_active = 1''',
-            ).fetchall()
-        finally:
-            connection.close()
-
-    @staticmethod
-    def is_running_now(row: sqlite3.Row, current: datetime) -> bool:
-        current_date = current.date()
-        start = date.fromisoformat(row['start_date'])
-        end = date.fromisoformat(row['end_date']) if row['end_date'] else None
-        if current_date < start or (end and current_date > end):
-            return False
-        if row['schedule_status'] != 'active':
-            return False
-        windows = json.loads(row['time_windows'] or '[]')
-        if windows:
-            current_time = current.time().replace(tzinfo=None)
-            in_window = any(
-                clock_time.fromisoformat(window['start']) <= current_time < clock_time.fromisoformat(window['end'])
-                for window in windows
-            )
-            if not in_window:
-                return False
-        if row['schedule_type'] == 'once':
-            return current_date == start
-        if row['schedule_type'] == 'daily':
-            return True
-        if row['schedule_type'] == 'weekly':
-            return current_date.weekday() in (json.loads(row['run_days'] or '[]'))
-        if row['schedule_type'] == 'monthly':
-            return current_date.day == start.day
-        return False
-
-    def call_campaign_api(self, campaign_id: int, action: str) -> dict[str, Any]:
-        response = requests.post(
-            f'{DJANGO_API_BASE_URL}/campaigns/{campaign_id}/{action}/',
-            json={},
-            timeout=10,
-        )
-        try:
-            body = response.json()
-        except ValueError:
-            body = {'raw': response.text[:500]}
-        if response.status_code not in (200, 201):
-            raise RuntimeError(f'{action} campaign {campaign_id} failed: HTTP {response.status_code}: {body}')
-        return body
-
-    async def run_once(self) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
-        started: list[int] = []
-        stopped: list[int] = []
-        errors: list[str] = []
-        for row in self.due_campaigns():
-            running = self.is_running_now(row, now)
-            try:
-                if running and row['status'] == 'draft':
-                    self.call_campaign_api(row['id'], 'activate')
-                    started.append(row['id'])
-                elif not running and row['status'] in ('active', 'in_progress'):
-                    self.call_campaign_api(row['id'], 'cancel')
-                    stopped.append(row['id'])
-            except (requests.RequestException, RuntimeError, ValueError, TypeError) as exc:
-                errors.append(str(exc))
-        self.last_report = {
-            'success': not errors,
-            'started': started,
-            'stopped': stopped,
-            'errors': errors,
-        }
-        return self.last_report
+            await asyncio.sleep(SENDER_INTERVAL_SECONDS)
 
 
 sender = Sender(DATABASE_PATH)
-scheduler = sender.scheduler
 
 
 @asynccontextmanager
@@ -392,27 +399,51 @@ async def health() -> dict[str, Any]:
         'tps': config['rate_limit_per_second'],
         'last_report': sender.last_report,
         'worker_running': sender.worker_task is not None and not sender.worker_task.done(),
-        'scheduler_interval_seconds': SCHEDULER_INTERVAL_SECONDS,
-        'scheduler_report': scheduler.last_report,
+        'sender_interval_seconds': SENDER_INTERVAL_SECONDS,
     }
 
 
 @app.post('/run-once')
 async def run_once() -> dict[str, Any]:
     try:
-        schedule_report = await scheduler.run_once()
-        send_report = await sender.run_once()
-        return {'success': schedule_report['success'] and send_report['success'], 'scheduler': schedule_report, 'sender': send_report}
+        send_report = await asyncio.to_thread(sender.run_once)
+        return {'success': send_report['success'], 'sender': send_report}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post('/scheduler/run-once')
-async def scheduler_run_once() -> dict[str, Any]:
+@app.post('/sender/start')
+async def sender_start(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    campaign_id = int(payload.get('campaign_id'))
+    round_number = int(payload.get('round_number', 1))
+    response = sender.start_campaign(campaign_id, round_number)
+    if sender.worker_task is None or sender.worker_task.done():
+        sender.worker_task = asyncio.create_task(sender.worker())
+    return response
+
+
+@app.post('/sender/stop')
+async def sender_stop(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    campaign_id = int(payload.get('campaign_id'))
+    round_number = int(payload.get('round_number', 1))
+    return sender.stop_campaign(campaign_id, round_number)
+
+
+@app.get('/sender/status/{campaign_id}')
+async def sender_status(campaign_id: int) -> dict[str, Any]:
+    connection = sender.connection()
     try:
-        return await scheduler.run_once()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        pending = connection.execute(
+            '''SELECT COUNT(*) AS cnt
+               FROM sms_campaign_manager_messageobject
+               WHERE campaign_id = ? AND sent_status IN ('PENDING', 'FAILED')''',
+            (campaign_id,),
+        ).fetchone()['cnt']
+        return {'success': True, 'campaign_id': campaign_id, 'pending_count': pending}
+    finally:
+        connection.close()
 
 
 @app.post('/worker/start')

@@ -2,8 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import timedelta
 import os
 import time
+import uuid
 from typing import Any
 
 import requests
@@ -15,7 +17,7 @@ from ..models import MessageObject, SMSCConfig, SentRecord
 
 DLR_CALLBACK_URL = os.getenv(
     'SMSC_SENDER_DLR_CALLBACK_URL',
-    'http://127.0.0.1:8000/api/v1/delivery-reports/callback/',
+    '',
 )
 
 
@@ -90,7 +92,7 @@ class SmsSenderService:
             MessageObject.objects
             .filter(sent_status__in=['PENDING', 'FAILED'])
             .filter(send_attempts__lt=self.smsc_config.max_retries)
-            .filter(campaign__status__in=['active', 'in_progress'], campaign__is_deleted=False)
+            .filter(campaign__status='in_progress', campaign__is_deleted=False)
             .select_related('campaign', 'channel')
             .order_by('campaign_id', 'id')
         )
@@ -104,11 +106,37 @@ class SmsSenderService:
 
         capacity = self.smsc_config.rate_limit_per_second
         base, remainder = divmod(capacity, len(campaign_ids))
-        return {
+        allocated = {
             campaign_id: grouped[campaign_id][:base + (index < remainder)]
             for index, campaign_id in enumerate(campaign_ids)
             if base + (index < remainder) > 0
         }
+        for campaign_id, rows in allocated.items():
+            self._claim_batch(rows)
+        return allocated
+
+    def _claim_batch(self, messages: list[MessageObject]) -> None:
+        if not messages:
+            return
+        now = timezone.now()
+        expires_at = now + timedelta(minutes=5)
+        batch_id = (
+            f"batch_{messages[0].campaign_id}_{int(now.timestamp() * 1000)}_"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        worker_id = f'worker_{uuid.uuid4().hex[:12]}_{os.getpid()}'
+        for message in messages:
+            if message.sending_started_at is None:
+                message.sending_started_at = now
+            message.batch_id = batch_id
+            message.worker_id = worker_id
+            message.locked_until = expires_at
+            message.updated_at = now
+        MessageObject.objects.bulk_update(
+            messages,
+            ['batch_id', 'worker_id', 'locked_until', 'sending_started_at', 'updated_at'],
+            batch_size=1000,
+        )
 
     def _submit(self, messages: list[MessageObject]) -> list[SendOutcome]:
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
@@ -125,8 +153,9 @@ class SmsSenderService:
             'sender_id': message.sender_id,
             'receiver': message.recipient,
             'message_content': message.message_content,
-            'callback_url': DLR_CALLBACK_URL,
         }
+        if DLR_CALLBACK_URL:
+            payload['callback_url'] = DLR_CALLBACK_URL
         try:
             response = requests.post(
                 self.smsc_config.get_full_send_url(),
@@ -155,48 +184,30 @@ class SmsSenderService:
             return {'sent': 0, 'failed': 0, 'retried': 0, 'removed': 0}
 
         attempt_number = message.send_attempts + 1
-        provider_id = str(outcome.response.get('provider_message_id', ''))
-        provider_status = str(outcome.response.get('status', 'FAILED'))
-        sent_status = 'ACCEPTED' if outcome.accepted else 'FAILED'
+        now = timezone.now()
 
         if outcome.accepted:
             with transaction.atomic():
-                SentRecord.objects.create(
-                    campaign=message.campaign,
-                    channel=message.channel,
-                    message_object=message,
-                    msisdn=message.recipient,
-                    batch_id=message.batch_id,
-                    submitted_at=timezone.now(),
-                    sent_status=sent_status,
-                    provider_message_id=provider_id,
-                    provider_status=provider_status,
-                    provider_response=outcome.response,
+                MessageObject.objects.filter(pk=message.pk).update(
+                    sent_status='SENT',
+                    sent_at=now,
+                    send_attempts=attempt_number,
+                    locked_until=None,
+                    last_error='',
+                    updated_at=now,
                 )
-                message.delete()
-            return {'sent': 1, 'failed': 0, 'retried': 0, 'removed': 1}
+            return {'sent': 1, 'failed': 0, 'retried': 0, 'removed': 0}
 
         max_retries = self.smsc_config.max_retries
-        message.send_attempts = attempt_number
-        message.last_error = outcome.error
-        message.sent_status = 'FAILED'
-        message.failed_at = timezone.now()
-        message.save(update_fields=[
-            'send_attempts', 'last_error', 'sent_status', 'failed_at', 'updated_at',
-        ])
-        SentRecord.objects.create(
-            campaign=message.campaign,
-            channel=message.channel,
-            message_object=message,
-            msisdn=message.recipient,
-            batch_id=message.batch_id,
-            sent_status='FAILED',
-            provider_message_id=provider_id,
-            provider_status=provider_status,
-            provider_response=outcome.response,
-            error_message=outcome.error,
-        )
+        with transaction.atomic():
+            MessageObject.objects.filter(pk=message.pk).update(
+                sent_status='FAILED',
+                send_attempts=attempt_number,
+                last_error=outcome.error,
+                failed_at=now,
+                locked_until=None,
+                updated_at=now,
+            )
         if attempt_number >= max_retries:
-            message.delete()
-            return {'sent': 0, 'failed': 1, 'retried': 0, 'removed': 1}
+            return {'sent': 0, 'failed': 1, 'retried': 0, 'removed': 0}
         return {'sent': 0, 'failed': 1, 'retried': 1, 'removed': 0}

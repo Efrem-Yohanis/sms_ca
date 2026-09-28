@@ -1,0 +1,21 @@
+services:
+  sms-sender:
+    build:
+      context: .
+      dockerfile: sms_campign/Dockerfile
+    command: sh -c "until python manage.py migrate --check >/dev/null 2>&1; do sleep 2; done; python manage.py run_smsc_sender"
+    environment:
+      DB_ENGINE: postgresql
+      DB_NAME: ${POSTGRES_DB:-campaign_manager}
+      DB_USER: ${POSTGRES_USER:-campaign_manager}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
+      DB_HOST: db
+      DB_PORT: 5432
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      SMSC_SENDER_DLR_CALLBACK_URL: ""
+    depends_on:
+      django:
+        condition: service_started
+    restart: unless-stopped

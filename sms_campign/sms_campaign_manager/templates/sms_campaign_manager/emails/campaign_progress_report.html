@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f4;color:#172b2a;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f1f5f4;padding:28px 10px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:760px;background:#ffffff;border:1px solid #dce6e3;border-radius:12px;overflow:hidden;">
+        <tr><td style="padding:28px 30px;background:#123b39;color:#ffffff;">
+          <p style="margin:0 0 14px;color:#c7e5dc;font-size:11px;font-weight:bold;text-transform:uppercase;">Campaign Manager&nbsp;&nbsp; / &nbsp;&nbsp;Progress report</p>
+          <h1 style="margin:0;font-size:25px;line-height:1.3;font-weight:700;">{{ title }}</h1>
+          <p style="margin:10px 0 0;color:#d6e8e3;font-size:13px;line-height:1.5;">Generated {{ generated_at }}</p>
+        </td></tr>
+        <tr><td style="padding:24px 30px 8px;">
+          <h2 style="margin:0 0 14px;color:#173936;font-size:16px;">Report overview</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+              <td width="50%" valign="top" style="padding:6px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f8f6;border:1px solid #e1e9e6;border-radius:7px;"><tr><td style="padding:13px 15px;"><span style="color:#687a77;font-size:11px;text-transform:uppercase;">Campaigns</span><strong style="display:block;margin-top:5px;color:#173936;font-size:23px;">{{ totals.campaigns }}</strong></td></tr></table></td>
+              <td width="50%" valign="top" style="padding:6px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f8f6;border:1px solid #e1e9e6;border-radius:7px;"><tr><td style="padding:13px 15px;"><span style="color:#687a77;font-size:11px;text-transform:uppercase;">Successful sends</span><strong style="display:block;margin-top:5px;color:#17634f;font-size:23px;">{{ totals.success_sent }}</strong></td></tr></table></td>
+            </tr>
+            <tr>
+              <td width="50%" valign="top" style="padding:6px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f8f6;border:1px solid #e1e9e6;border-radius:7px;"><tr><td style="padding:13px 15px;"><span style="color:#687a77;font-size:11px;text-transform:uppercase;">Failed sends</span><strong style="display:block;margin-top:5px;color:#a54242;font-size:23px;">{{ totals.failed_sent }}</strong></td></tr></table></td>
+              <td width="50%" valign="top" style="padding:6px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f8f6;border:1px solid #e1e9e6;border-radius:7px;"><tr><td style="padding:13px 15px;"><span style="color:#687a77;font-size:11px;text-transform:uppercase;">Successful deliveries</span><strong style="display:block;margin-top:5px;color:#17634f;font-size:23px;">{{ totals.success_delivery }}</strong></td></tr></table></td>
+            </tr>
+            <tr><td colspan="2" style="padding:6px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f8f6;border:1px solid #e1e9e6;border-radius:7px;"><tr><td style="padding:13px 15px;"><span style="color:#687a77;font-size:11px;text-transform:uppercase;">Failed deliveries</span><strong style="display:block;margin-top:5px;color:#a54242;font-size:23px;">{{ totals.failed_delivery }}</strong></td></tr></table></td></tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:22px 30px 8px;">
+          <h2 style="margin:0 0 14px;color:#173936;font-size:16px;">Campaign details</h2>
+          {% for row in rows %}
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 14px;border:1px solid #dce6e3;border-radius:8px;">
+            <tr><td style="padding:15px 16px;background:#f7faf9;border-bottom:1px solid #e1e9e6;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>
+                <td valign="top" style="color:#173936;font-size:16px;font-weight:bold;overflow-wrap:anywhere;">{{ row.campaign_name }}</td>
+                <td width="90" align="right" valign="top"><span style="display:inline-block;padding:5px 9px;background:#e3f3ed;border-radius:12px;color:#17634f;font-size:11px;font-weight:bold;text-transform:capitalize;">{{ row.status }}</span></td>
+              </tr></table>
+            </td></tr>
+            <tr><td style="padding:12px 16px 4px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td width="58%" valign="top" style="padding:0 8px 9px 0;"><span style="display:block;color:#687a77;font-size:10px;text-transform:uppercase;">Owner</span><span style="display:block;margin-top:4px;color:#263b38;font-size:12px;overflow-wrap:anywhere;">{{ row.owner|default:"—" }}</span></td>
+                  <td width="42%" valign="top" style="padding:0 0 9px 8px;"><span style="display:block;color:#687a77;font-size:10px;text-transform:uppercase;">Started sending</span><span style="display:block;margin-top:4px;color:#263b38;font-size:12px;">{{ row.started_at_display }}</span></td>
+                </tr>
+                <tr><td colspan="2" style="padding:0 0 10px;"><span style="color:#687a77;font-size:10px;text-transform:uppercase;">Round</span><span style="margin-left:8px;color:#263b38;font-size:12px;font-weight:bold;">{{ row.round_number }}</span></td></tr>
+              </table>
+            </td></tr>
+            <tr><td style="padding:0 10px 12px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-top:1px solid #edf1f0;">
+                <tr>
+                  <td width="25%" valign="top" style="padding:12px 6px 2px;"><span style="display:block;color:#687a77;font-size:9px;line-height:1.4;text-transform:uppercase;">Total success sent</span><strong style="display:block;margin-top:4px;color:#17634f;font-size:18px;">{{ row.success_sent }}</strong></td>
+                  <td width="25%" valign="top" style="padding:12px 6px 2px;"><span style="display:block;color:#687a77;font-size:9px;line-height:1.4;text-transform:uppercase;">Total failed sent</span><strong style="display:block;margin-top:4px;color:#a54242;font-size:18px;">{{ row.failed_sent }}</strong></td>
+                  <td width="25%" valign="top" style="padding:12px 6px 2px;"><span style="display:block;color:#687a77;font-size:9px;line-height:1.4;text-transform:uppercase;">Total success delivery</span><strong style="display:block;margin-top:4px;color:#17634f;font-size:18px;">{{ row.success_delivery }}</strong></td>
+                  <td width="25%" valign="top" style="padding:12px 6px 2px;"><span style="display:block;color:#687a77;font-size:9px;line-height:1.4;text-transform:uppercase;">Total failed delivery</span><strong style="display:block;margin-top:4px;color:#a54242;font-size:18px;">{{ row.failed_delivery }}</strong></td>
+                </tr>
+              </table>
+            </td></tr>
+          </table>
+          {% empty %}
+          <p style="margin:0;padding:22px;border:1px solid #dce6e3;border-radius:8px;color:#687a77;font-size:13px;text-align:center;">No campaign data is available for this report.</p>
+          {% endfor %}
+        </td></tr>
+        <tr><td style="padding:18px 30px;background:#f7faf9;border-top:1px solid #e1e9e6;">
+          <p style="margin:0;color:#526461;font-size:11px;line-height:1.6;">This is an automated campaign progress report from Campaign Manager.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
