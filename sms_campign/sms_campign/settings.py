@@ -211,6 +211,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Audience Management', 'description': 'Campaign audience management'},
         {'name': 'Campaign Actions', 'description': 'Campaign lifecycle operations'},
         {'name': 'Campaign Messages', 'description': 'Build and inspect the transient message queue'},
+        {'name': 'Test SMS', 'description': 'Standalone SMSC test submissions and response history'},
         {'name': 'User Management', 'description': 'User profiles, passwords, and administrator user management'},
         {'name': 'Database Config', 'description': 'Database configuration, schema exploration, and connection tests'},
         {'name': 'Customer Profile Config', 'description': 'Customer profile mappings and language lookup previews'},

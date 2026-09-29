@@ -32,6 +32,7 @@ class MessageBuilder:
     def __init__(self, campaign, round_number=1, batch_id=None):
         self.campaign = campaign
         self.round_number = round_number
+        self.audience_round_number = round_number
         self.batch_id = batch_id or f'batch_{uuid.uuid4().hex[:8]}'
 
     def build(self):
@@ -44,14 +45,18 @@ class MessageBuilder:
             phase='validating',
         )
         try:
+            self._resolve_audience_round()
             self._validate_prerequisites()
             job.phase = 'clearing'
             job.save(update_fields=['phase', 'updated_at'])
 
-            cleared = MessageObject.objects.filter(campaign=self.campaign).delete()[0]
+            cleared = MessageObject.objects.filter(
+                campaign=self.campaign,
+                batch_id=self.batch_id,
+            ).delete()[0]
             audience_queryset = Audience.objects.filter(
                 campaign=self.campaign,
-                round_number=self.round_number,
+                round_number=self.audience_round_number,
                 is_valid=True,
             ).select_related('language').values(
                 'id', 'msisdn', 'language__code', 'custom_fields',
@@ -92,6 +97,7 @@ class MessageBuilder:
             return {
                 'campaign_id': self.campaign.id,
                 'round_number': self.round_number,
+                'audience_round_number': self.audience_round_number,
                 'batch_id': self.batch_id,
                 'build_job_id': job.pk,
                 'cleared': cleared,
@@ -125,7 +131,7 @@ class MessageBuilder:
 
         if not Audience.objects.filter(
             campaign=self.campaign,
-            round_number=self.round_number,
+            round_number=self.audience_round_number,
             is_valid=True,
         ).exists():
             errors.append(f'Campaign has no valid audience for round {self.round_number}.')
@@ -135,6 +141,21 @@ class MessageBuilder:
 
         if errors:
             raise ValueError('Cannot build messages: ' + '; '.join(errors))
+
+    def _resolve_audience_round(self):
+        if Audience.objects.filter(
+            campaign=self.campaign,
+            round_number=self.round_number,
+            is_valid=True,
+        ).exists():
+            return
+        previous_round = Audience.objects.filter(
+            campaign=self.campaign,
+            round_number__lt=self.round_number,
+            is_valid=True,
+        ).order_by('-round_number').values_list('round_number', flat=True).first()
+        if previous_round is not None:
+            self.audience_round_number = previous_round
 
     def _get_channel(self):
         ids = self.campaign.channels_id or []
@@ -164,7 +185,6 @@ class MessageBuilder:
                     continue
 
                 personalized = self._personalize(template, member.get('custom_fields') or {})
-                parts = self._calculate_parts(personalized)
 
                 language = languages_by_code.get(lang_code)
                 if not language:
@@ -178,11 +198,9 @@ class MessageBuilder:
                     message_content=personalized,
                     channel=channel,
                     language=language,
-                    message_parts=parts,
+                    round_number=self.round_number,
                     sent_status='PENDING',
-                    delivery_status='PENDING',
                     batch_id=self.batch_id,
-                    personalized_fields=member.get('custom_fields') or {},
                 ))
                 if processed % chunk_size == 0:
                     if rows:

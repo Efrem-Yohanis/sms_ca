@@ -22,6 +22,8 @@ from .models import (
     DeliveryRecord,
     EmailConfig,
     EmailReport,
+    GlobalTPSConfig,
+    NAddressesConfig,
     CampaignProgressReport,
     ReportSubscription,
     ReportDeliveryLog,
@@ -31,6 +33,7 @@ from .models import (
     SentRecord,
     SenderID,
     SMSCConfig,
+    TestMessage,
 )
 
 
@@ -531,6 +534,30 @@ class SenderIDCreateUpdateSerializer(serializers.ModelSerializer):
         return value
 
 
+class GlobalTPSConfigSerializer(serializers.ModelSerializer):
+    global_tps = serializers.IntegerField(min_value=1)
+
+    class Meta:
+        model = GlobalTPSConfig
+        fields = [
+            'id', 'name', 'description', 'global_tps', 'is_default', 'is_active',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+
+class NAddressesConfigSerializer(serializers.ModelSerializer):
+    max_addresses_per_request = serializers.IntegerField(min_value=1, max_value=10000)
+
+    class Meta:
+        model = NAddressesConfig
+        fields = [
+            'id', 'name', 'description', 'max_addresses_per_request',
+            'is_default', 'is_active', 'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+
 class SMSCConfigSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
 
@@ -700,27 +727,102 @@ class CampaignEmailReportCreateSerializer(serializers.Serializer):
 
 
 class ReportSubscriptionSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(max_length=150, min_length=1, trim_whitespace=True)
     recipients = serializers.ListField(
-        child=serializers.EmailField(), required=False, default=list,
+        child=serializers.EmailField(), required=False, default=list, allow_empty=True,
     )
-    campaign_name = serializers.CharField(source='campaign.name', read_only=True, default=None)
+    campaigns = serializers.SerializerMethodField()
+    campaign_ids = serializers.PrimaryKeyRelatedField(
+        source='campaigns',
+        many=True,
+        queryset=Campaign.objects.filter(
+            is_deleted=False,
+            status__in=['active', 'in_progress', 'paused'],
+        ),
+        required=True,
+        write_only=True,
+    )
+    email_config = serializers.IntegerField(source='email_config_id', read_only=True)
+    email_config_id = serializers.PrimaryKeyRelatedField(
+        source='email_config',
+        queryset=EmailConfig.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+    email_config_name = serializers.CharField(source='email_config.name', read_only=True, default=None)
+    frequency = serializers.ChoiceField(choices=['10min', '1hr', '1day', 'manual'])
+    format = serializers.ChoiceField(choices=['html', 'text', 'csv'], required=False, default='html')
+    include_campaign_owners = serializers.BooleanField(required=False, default=True)
+    is_active = serializers.BooleanField(required=False, default=True)
 
     class Meta:
         model = ReportSubscription
         fields = [
-            'id', 'campaign', 'campaign_name', 'recipients', 'frequency', 'format',
-            'include_sent_stats', 'include_delivery_stats', 'include_message_stats',
-            'is_active', 'next_run_at', 'last_sent_at', 'created_by', 'created_at', 'updated_at',
+            'id', 'name', 'campaigns', 'campaign_ids', 'recipients',
+            'include_campaign_owners', 'email_config', 'email_config_id',
+            'email_config_name', 'frequency', 'format', 'is_active',
+            'next_run_at', 'last_sent_at', 'created_by', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'campaign_name', 'last_sent_at', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'campaigns', 'email_config', 'email_config_name', 'last_sent_at', 'created_by', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.partial:
+            self.fields['campaign_ids'].required = False
+
+    def get_campaigns(self, obj):
+        campaigns = {campaign.id: campaign for campaign in obj.campaigns.all()}
+        if obj.campaign_id and not obj.campaign.is_deleted:
+            campaigns[obj.campaign_id] = obj.campaign
+        return [
+            {'id': campaign.id, 'name': campaign.name}
+            for campaign in sorted(campaigns.values(), key=lambda item: item.id)
+        ]
 
     def validate_recipients(self, value):
         normalized = list(dict.fromkeys(email.strip().lower() for email in value if email.strip()))
-        if not normalized:
-            raise serializers.ValidationError('Select or add at least one recipient.')
-        if len(normalized) > 50:
-            raise serializers.ValidationError('A report can have at most 50 recipients.')
         return normalized
+
+    def validate(self, attrs):
+        campaigns = attrs.get('campaigns')
+        if campaigns is None and self.instance:
+            campaigns = list(self.instance.campaigns.all())
+            if self.instance.campaign_id and not self.instance.campaign.is_deleted:
+                campaigns.append(self.instance.campaign)
+        campaigns = list({campaign.id: campaign for campaign in campaigns or []}.values())
+        if not campaigns:
+            raise serializers.ValidationError({'campaign_ids': ['Select at least one eligible campaign.']})
+        recipients = attrs.get('recipients', self.instance.recipients if self.instance else []) or []
+        include_owners = attrs.get(
+            'include_campaign_owners',
+            self.instance.include_campaign_owners if self.instance else True,
+        )
+        owner_emails = [
+            email
+            for campaign in campaigns
+            for email in (campaign.owner_emails or [])
+            if isinstance(email, str) and email.strip()
+        ]
+        if not recipients and not include_owners and not owner_emails:
+            raise serializers.ValidationError({'recipients': ['At least one recipient is required.']})
+        return attrs
+
+    def create(self, validated_data):
+        campaigns = validated_data.pop('campaigns', [])
+        validated_data['campaign'] = None
+        subscription = super().create(validated_data)
+        subscription.campaigns.set(campaigns)
+        return subscription
+
+    def update(self, instance, validated_data):
+        campaigns = validated_data.pop('campaigns', None)
+        instance = super().update(instance, validated_data)
+        if campaigns is not None:
+            instance.campaigns.set(campaigns)
+            instance.campaign = None
+            instance.save(update_fields=['campaign', 'updated_at'])
+        return instance
 
 
 class ReportDeliveryLogSerializer(serializers.ModelSerializer):
@@ -734,6 +836,47 @@ class ReportDeliveryLogSerializer(serializers.ModelSerializer):
             'include_sent_stats', 'include_delivery_stats', 'include_message_stats', 'created_at',
         ]
         read_only_fields = fields
+
+
+class TestMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TestMessage
+        fields = '__all__'
+        read_only_fields = ['created_at', 'created_by']
+
+
+class TestMessageListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TestMessage
+        fields = [
+            'id', 'sender_id', 'recipient', 'channel_code', 'message_content',
+            'test_campaign_id', 'provider_message_id', 'provider_status',
+            'http_status', 'accepted', 'duration_ms', 'error_message', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class CreateTestMessageSerializer(serializers.Serializer):
+    sender_id = serializers.CharField(max_length=11)
+    recipient = serializers.RegexField(regex=r'^[0-9]{7,20}$', max_length=20)
+    channel_code = serializers.CharField(max_length=30)
+    message_content = serializers.CharField(max_length=1000, trim_whitespace=False)
+    test_campaign_id = serializers.IntegerField(
+        default=9999,
+        min_value=0,
+        max_value=999999,
+    )
+
+    def validate_sender_id(self, value):
+        return value.strip()
+
+    def validate_channel_code(self, value):
+        return value.strip().lower()
+
+    def validate_message_content(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('Message content cannot be blank.')
+        return value
 
 
 class CampaignProgressReportSerializer(serializers.ModelSerializer):

@@ -276,7 +276,7 @@ class AudienceBuildService:
         config.last_rebuild_error = ''
         config.is_processed = False
         config.round_number = job.round_number
-        build_id = uuid.uuid4().hex
+        build_id = (job.result or {}).get('build_id') or uuid.uuid4().hex
         config.last_build_id = build_id
         config.save(update_fields=[
             'last_rebuild_started_at', 'last_rebuild_status', 'last_rebuild_phase',

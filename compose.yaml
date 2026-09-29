@@ -52,8 +52,8 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-ec"]
     command: |
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic smsc-send-response --partitions 20 --replication-factor 1
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic smsc-delivery-report --partitions 20 --replication-factor 1
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sent-response --partitions 20 --replication-factor 1
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic delivery-report --partitions 20 --replication-factor 1
       /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
     restart: "no"
 
@@ -87,7 +87,13 @@ services:
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
     ports:
-      - "8000:8000"
+      - "${DJANGO_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/schema/', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
@@ -117,7 +123,7 @@ services:
     build:
       context: .
       dockerfile: sms_campign/Dockerfile
-    command: sh -c "until python manage.py migrate --check >/dev/null 2>&1; do sleep 2; done; python manage.py run_smsc_kafka_status_updater"
+    command: python -m uvicorn sms_status_updater.app:app --host 0.0.0.0 --port 8010
     environment:
       DB_ENGINE: postgresql
       DB_NAME: ${POSTGRES_DB:-campaign_manager}
@@ -129,43 +135,91 @@ services:
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
       KAFKA_BOOTSTRAP: kafka:9092
-      KAFKA_SEND_RESPONSE_TOPIC: smsc-send-response
-      KAFKA_DELIVERY_TOPIC: smsc-delivery-report
-      KAFKA_MAX_POLL_RECORDS: ${KAFKA_MAX_POLL_RECORDS:-1000}
-      KAFKA_CONSUMER_GROUP_PREFIX: status-updater
+      KAFKA_SENT_TOPIC: sent-response
+      KAFKA_DELIVERY_TOPIC: delivery-report
+      KAFKA_BATCH_SIZE: ${KAFKA_BATCH_SIZE:-1000}
+      KAFKA_POLL_INTERVAL_MS: ${KAFKA_POLL_INTERVAL_MS:-1000}
+      KAFKA_STARTUP_TIMEOUT_SECONDS: ${KAFKA_STARTUP_TIMEOUT_SECONDS:-300}
+      KAFKA_SEND_GROUP: ${KAFKA_SEND_GROUP:-status-updater-send}
+      KAFKA_DELIVERY_GROUP: ${KAFKA_DELIVERY_GROUP:-status-updater-delivery}
+    ports:
+      - "8010:8010"
     depends_on:
       db:
         condition: service_healthy
       django:
-        condition: service_started
+        condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     restart: unless-stopped
+
+  dlr-receiver:
+    build:
+      context: .
+      dockerfile: dlr_receiver/Dockerfile
+    container_name: sms-dlr-receiver
+    restart: unless-stopped
+    environment:
+      DLR_RECEIVER_PORT: '8003'
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_DELIVERY_TOPIC: delivery-report
+      DLR_QUEUE_MAX: ${DLR_QUEUE_MAX:-100000}
+      DLR_BATCH_SIZE: ${DLR_BATCH_SIZE:-100}
+      DLR_FLUSH_INTERVAL: ${DLR_FLUSH_INTERVAL:-0.05}
+      DLR_MAX_RETRIES: ${DLR_MAX_RETRIES:-5}
+      DLR_RETRY_BACKOFF: ${DLR_RETRY_BACKOFF:-2.0}
+      DLR_KAFKA_STARTUP_TIMEOUT: ${DLR_KAFKA_STARTUP_TIMEOUT:-300}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - '8003:8003'
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - default
 
   smsc-mock:
     build:
       context: .
       dockerfile: sms_smsc_mock/Dockerfile
+    container_name: sms-mock-smsc
     environment:
       SMSC_MOCK_DATABASE: /data/smsc_mock.sqlite3
-      SMSC_MAX_TPS: ${SMSC_MAX_TPS:-5000}
-      SMSC_TPS_BURST_CAPACITY: ${SMSC_TPS_BURST_CAPACITY:-5000}
-      SMSC_QUEUE_MAX_SIZE: ${SMSC_QUEUE_MAX_SIZE:-50000}
-      SMSC_BATCH_SIZE: ${SMSC_BATCH_SIZE:-1000}
-      SMSC_FLUSH_INTERVAL_SECONDS: ${SMSC_FLUSH_INTERVAL_SECONDS:-0.01}
-      SMSC_KAFKA_ENABLED: "true"
-      KAFKA_BOOTSTRAP: kafka:9092
-      KAFKA_SEND_RESPONSE_TOPIC: smsc-send-response
-      KAFKA_DELIVERY_TOPIC: smsc-delivery-report
-      SMSC_MIN_DELIVERY_DELAY_SECONDS: ${SMSC_MIN_DELIVERY_DELAY_SECONDS:-1.0}
-      SMSC_MAX_DELIVERY_DELAY_SECONDS: ${SMSC_MAX_DELIVERY_DELAY_SECONDS:-5.0}
+      SMSC_MOCK_DLR_CALLBACK_URL: ${SMSC_MOCK_DLR_CALLBACK_URL:-http://dlr-receiver:8003/api/v1/delivery-reports/callback/}
+      SMSC_MOCK_USERNAME: ${SMSC_MOCK_USERNAME:-test-user}
+      SMSC_MOCK_PASSWORD: ${SMSC_MOCK_PASSWORD:-test-pass}
+      SMSC_MOCK_MAX_TPS: ${SMSC_MOCK_MAX_TPS:-5000}
+      SMSC_MOCK_TPS_BURST: ${SMSC_MOCK_TPS_BURST:-5000}
+      SMSC_MOCK_MIN_DELAY_SECONDS: ${SMSC_MOCK_MIN_DELAY_SECONDS:-1.0}
+      SMSC_MOCK_MAX_DELAY_SECONDS: ${SMSC_MOCK_MAX_DELAY_SECONDS:-5.0}
+      SMSC_MOCK_DELIVRD_WEIGHT: ${SMSC_MOCK_DELIVRD_WEIGHT:-0.92}
+      SMSC_MOCK_UNDELIV_WEIGHT: ${SMSC_MOCK_UNDELIV_WEIGHT:-0.04}
+      SMSC_MOCK_EXPIRED_WEIGHT: ${SMSC_MOCK_EXPIRED_WEIGHT:-0.02}
+      SMSC_MOCK_REJECTD_WEIGHT: ${SMSC_MOCK_REJECTD_WEIGHT:-0.02}
+      SMSC_MOCK_DLR_RETRIES: ${SMSC_MOCK_DLR_RETRIES:-3}
+      SMSC_MOCK_DLR_RETRY_BACKOFF: ${SMSC_MOCK_DLR_RETRY_BACKOFF:-2.0}
+      SMSC_MOCK_QUEUE_MAX: ${SMSC_MOCK_QUEUE_MAX:-50000}
+      SMSC_MOCK_BATCH_SIZE: ${SMSC_MOCK_BATCH_SIZE:-1000}
+      SMSC_MOCK_FLUSH_INTERVAL: ${SMSC_MOCK_FLUSH_INTERVAL:-0.01}
+      SMSC_MOCK_LOG_LEVEL: ${SMSC_MOCK_LOG_LEVEL:-INFO}
     ports:
       - "8090:8090"
     volumes:
       - smsc_mock_data:/data
     depends_on:
-      kafka-init:
-        condition: service_completed_successfully
+      dlr-receiver:
+        condition: service_healthy
+    networks:
+      default:
+        aliases:
+          - mock-smsc
+          - mock-smsc.local
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=2)"]
       interval: 5s
@@ -174,18 +228,67 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  scheduler:
-    build:
-      context: .
-      dockerfile: sms_campign/Dockerfile
-    command: python -m uvicorn sms_campaign_scheduler.app:app --host 0.0.0.0 --port 8093
-    environment:
-      SMSC_SCHEDULER_DJANGO_API: http://django:8000/api/v1
-      SMSC_SCHEDULER_INTERVAL: ${SMSC_SCHEDULER_INTERVAL:-60}
-      SMSC_SCHEDULER_RUN_WORKER: "true"
+  airflow-init:
+    image: apache/airflow:2.10.5-python3.11
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: &airflow-environment
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-campaign_manager}:${POSTGRES_PASSWORD:-campaign_manager_dev}@db:5432/${POSTGRES_DB:-campaign_manager}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-sms-airflow-local-secret-change-before-deploy}
+      AIRFLOW_DJANGO_API: http://django:8000/api/v1
+      AIRFLOW_SENDER_API: http://sms-sender:8001
+      AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-change-this-local-password}
+      AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+    command:
+      - bash
+      - -ec
+      - |
+        airflow db migrate
+        if ! airflow users list --output table | grep -Fq "$$AIRFLOW_ADMIN_USERNAME"; then
+          airflow users create --username "$$AIRFLOW_ADMIN_USERNAME" --firstname Airflow --lastname Admin --role Admin --email "$$AIRFLOW_ADMIN_EMAIL" --password "$$AIRFLOW_ADMIN_PASSWORD"
+        fi
     depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-scheduler:
+    image: apache/airflow:2.10.5-python3.11
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: *airflow-environment
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
       django:
+        condition: service_healthy
+      sms-sender:
         condition: service_started
+    restart: unless-stopped
+
+  airflow-webserver:
+    image: apache/airflow:2.10.5-python3.11
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: *airflow-environment
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ui:
@@ -203,3 +306,8 @@ volumes:
   pgadmin_data:
   kafka_data:
   smsc_mock_data:
+  airflow_logs:
+
+networks:
+  default:
+    name: ${SMS_NETWORK_NAME:-sms-network}

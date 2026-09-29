@@ -1,15 +1,26 @@
-FROM python:3.12-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY sms_smsc_mock/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY sms_smsc_mock/ ./sms_smsc_mock/
+COPY sms_smsc_mock/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir \
+        --trusted-host pypi.org \
+        --trusted-host pypi.python.org \
+        --trusted-host files.pythonhosted.org \
+        --retries 5 \
+        --timeout 120 \
+        -r /tmp/requirements.txt
+
+COPY sms_smsc_mock /app/sms_smsc_mock
 
 EXPOSE 8090
 
-CMD ["python", "-m", "uvicorn", "sms_smsc_mock.app:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8090/health || exit 1
+
+CMD ["uvicorn", "sms_smsc_mock.app:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "4"]

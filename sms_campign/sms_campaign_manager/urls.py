@@ -1,5 +1,6 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from .test_sms_views import TestMessageDetailView, TestMessageListCreateView, TestMessageResendView
 
 from .views import (
 	UserRegistrationView,
@@ -21,6 +22,7 @@ from .views import (
 	ScheduleDetailView,
 	ScheduleCollectionView,
 	ScheduleSummaryView,
+	ScheduleDueNowView,
 	ScheduleResourceView,
 	ScheduleUpcomingWindowsView,
 	ScheduleActivationView,
@@ -72,6 +74,12 @@ from .views import (
 	SenderIDDetailView,
 	SMSCConfigListCreateView,
 	SMSCConfigDetailView,
+	GlobalTPSConfigListCreateView,
+	GlobalTPSConfigDetailView,
+	GlobalTPSConfigActiveView,
+	NAddressesConfigListCreateView,
+	NAddressesConfigDetailView,
+	NAddressesConfigActiveView,
 	EmailConfigListCreateView,
 	EmailConfigDetailView,
 	EmailConfigTestView,
@@ -82,11 +90,16 @@ from .views import (
 	EmailReportResendView,
 	ReportSubscriptionListCreateView,
 	ReportSubscriptionDetailView,
+	ReportSubscriptionDueNowView,
+	ReportSubscriptionSendNowView,
 	ReportDeliveryLogDetailView,
 )
 
 
 urlpatterns = [
+	path('test-sms/', TestMessageListCreateView.as_view(), name='test-sms-list-create'),
+	path('test-sms/<int:pk>/', TestMessageDetailView.as_view(), name='test-sms-detail'),
+	path('test-sms/<int:pk>/resend/', TestMessageResendView.as_view(), name='test-sms-resend'),
 	path('auth/register/', UserRegistrationView.as_view(), name='user-register'),
 	path('auth/login/', TokenObtainPairView.as_view(), name='token-obtain-pair'),
 	path('auth/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
@@ -110,6 +123,12 @@ urlpatterns = [
 	path('sender-ids/<int:pk>/', SenderIDDetailView.as_view(), name='sender-id-detail'),
 	path('smsc-configs/', SMSCConfigListCreateView.as_view(), name='smsc-config-list-create'),
 	path('smsc-configs/<int:pk>/', SMSCConfigDetailView.as_view(), name='smsc-config-detail'),
+	path('global-tps-config/', GlobalTPSConfigListCreateView.as_view(), name='global-tps-config-list-create'),
+	path('global-tps-config/active/', GlobalTPSConfigActiveView.as_view(), name='global-tps-config-active'),
+	path('global-tps-config/<int:pk>/', GlobalTPSConfigDetailView.as_view(), name='global-tps-config-detail'),
+	path('n-addresses-config/', NAddressesConfigListCreateView.as_view(), name='n-addresses-config-list-create'),
+	path('n-addresses-config/active/', NAddressesConfigActiveView.as_view(), name='n-addresses-config-active'),
+	path('n-addresses-config/<int:pk>/', NAddressesConfigDetailView.as_view(), name='n-addresses-config-detail'),
 	path('email-config/', EmailConfigListCreateView.as_view(), name='email-config-list-create'),
 	path('email-config/test/', EmailConfigTestView.as_view(), name='email-config-test'),
 	path('email-config/<int:pk>/', EmailConfigDetailView.as_view(), name='email-config-detail'),
@@ -117,7 +136,9 @@ urlpatterns = [
 	path('email-reports/', CampaignProgressReportListCreateView.as_view(), name='email-report-list-create'),
 	path('email-reports/<int:pk>/', CampaignProgressReportDetailView.as_view(), name='email-report-detail'),
 	path('report-subscriptions/', ReportSubscriptionListCreateView.as_view(), name='report-subscription-list-create'),
+	path('report-subscriptions/due-now/', ReportSubscriptionDueNowView.as_view(), name='report-subscription-due-now'),
 	path('report-subscriptions/<int:pk>/', ReportSubscriptionDetailView.as_view(), name='report-subscription-detail'),
+	path('report-subscriptions/<int:pk>/send-now/', ReportSubscriptionSendNowView.as_view(), name='report-subscription-send-now'),
 	path('report-delivery-logs/<int:pk>/', ReportDeliveryLogDetailView.as_view(), name='report-delivery-log-detail'),
 	path('report-delivery-logs/<int:pk>/resend/', EmailReportResendView.as_view(), name='email-report-resend'),
 	path('audiences/', AudienceCollectionView.as_view(), name='audience-list'),
@@ -170,6 +191,7 @@ urlpatterns = [
 		ScheduleCollectionView.as_view(),
 		name='schedule-list-create',
 	),
+	path('schedules/due-now/', ScheduleDueNowView.as_view(), name='schedule-due-now'),
 	path('schedules/summary/', ScheduleSummaryView.as_view(), name='schedule-summary'),
 	path(
 		'schedules/<int:pk>/upcoming_windows/',

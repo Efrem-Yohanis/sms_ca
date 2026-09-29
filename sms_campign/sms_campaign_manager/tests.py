@@ -2,7 +2,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch
 
 from django.utils import timezone
@@ -28,6 +28,8 @@ from .models import (
     DeliveryRecord,
     Audience,
     EmailConfig,
+    GlobalTPSConfig,
+    NAddressesConfig,
     EmailReport,
     ReportDeliveryLog,
     ReportSubscription,
@@ -489,12 +491,15 @@ class EmailConfigAndReportTests(TestCase):
         self.assertIn('verify@example.com', config.last_test_message)
 
     def test_report_subscription_crud_accepts_selected_recipients(self):
+        self.campaign.status = 'active'
+        self.campaign.save(update_fields=['status', 'updated_at'])
         create_response = self.client.post(
             '/api/v1/report-subscriptions/',
             {
-                'campaign': self.campaign.id,
+                'name': 'Hourly report',
+                'campaign_ids': [self.campaign.id],
                 'recipients': [' Reports@Example.com ', 'reports@example.com'],
-                'frequency': 'weekly',
+                'frequency': '1hr',
                 'format': 'csv',
             },
             format='json',
@@ -502,19 +507,163 @@ class EmailConfigAndReportTests(TestCase):
         self.assertEqual(create_response.status_code, 201, create_response.content)
         subscription_id = create_response.json()['id']
         self.assertEqual(create_response.json()['recipients'], ['reports@example.com'])
+        self.assertEqual(create_response.json()['campaigns'], [{'id': self.campaign.id, 'name': self.campaign.name}])
+        self.assertEqual(create_response.json()['frequency'], '1hr')
         self.assertTrue(ReportSubscription.objects.filter(pk=subscription_id).exists())
 
         patch_response = self.client.patch(
             f'/api/v1/report-subscriptions/{subscription_id}/',
-            json.dumps({'frequency': 'monthly', 'is_active': False}),
+            json.dumps({'frequency': '10min'}),
             content_type='application/json',
         )
         self.assertEqual(patch_response.status_code, 200, patch_response.content)
-        self.assertEqual(patch_response.json()['frequency'], 'monthly')
-        self.assertFalse(patch_response.json()['is_active'])
+        self.assertEqual(patch_response.json()['frequency'], '10min')
+        self.assertGreater(datetime.fromisoformat(patch_response.json()['next_run_at']), timezone.now())
 
         delete_response = self.client.delete(f'/api/v1/report-subscriptions/{subscription_id}/')
         self.assertEqual(delete_response.status_code, 204)
+
+    def test_report_subscription_due_now_filters_active_scheduled_reports(self):
+        due = ReportSubscription.objects.create(
+            name='Daily summary',
+            campaign=self.campaign,
+            recipients=['manager@example.com'],
+            frequency='1day',
+            next_run_at=timezone.now() - timedelta(minutes=1),
+        )
+        ReportSubscription.objects.create(
+            name='Future summary',
+            campaign=self.campaign,
+            recipients=['manager@example.com'],
+            frequency='1hr',
+            next_run_at=timezone.now() + timedelta(hours=1),
+        )
+        ReportSubscription.objects.create(
+            name='Manual summary',
+            campaign=self.campaign,
+            recipients=['manager@example.com'],
+            frequency='manual',
+            next_run_at=timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.get('/api/v1/report-subscriptions/due-now/')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual([row['id'] for row in response.json()['data']], [due.id])
+        self.assertEqual(response.json()['data'][0]['name'], 'Daily summary')
+        self.assertEqual(response.json()['data'][0]['frequency'], '1day')
+        self.assertEqual(response.json()['data'][0]['next_run_at'], due.next_run_at.isoformat())
+
+    @patch('sms_campaign_manager.services.email_reports.EmailMultiAlternatives.send', return_value=1)
+    def test_scheduled_report_sends_per_recipient_logs_and_advances_schedule(self, mock_send):
+        self.campaign.status = 'active'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        other_campaign = Campaign.objects.create(
+            name='Additional report campaign',
+            sender_id=self.sender.sender_id,
+            owner_emails=[' OPS@example.com ', 'director@example.com'],
+            channels_id=[self.channel.id],
+            status='paused',
+        )
+        scheduled_at = timezone.now() - timedelta(hours=2)
+        subscription = ReportSubscription.objects.create(
+            name='Operations report',
+            recipients=[' Reports@example.com ', 'reports@example.com'],
+            include_campaign_owners=True,
+            frequency='1day',
+            next_run_at=scheduled_at,
+        )
+        subscription.campaigns.add(self.campaign, other_campaign)
+
+        response = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+        self.assertTrue(response.json().get('success'), response.json())
+        subscription.refresh_from_db()
+        self.assertGreater(subscription.next_run_at, timezone.now(), f'next_run_at was not advanced: {subscription.next_run_at}')
+        self.assertEqual(ReportDeliveryLog.objects.filter(subscription=subscription, status='sent').count(), 3)
+        retry_response = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertTrue(body['success'])
+        self.assertEqual(retry_response.status_code, 200, retry_response.content)
+        self.assertEqual(mock_send.call_count, 3, retry_response.json())
+        self.assertTrue(ReportDeliveryLog.objects.filter(pk=retry_response.json()['log_id'], subscription=subscription).exists())
+        self.assertEqual(body['recipients_count'], 3)
+        self.assertGreater(timezone.datetime.fromisoformat(body['sent_at']), scheduled_at)
+        deliveries = ReportDeliveryLog.objects.filter(subscription=subscription, status='sent').order_by('recipients')
+        self.assertEqual(deliveries.count(), 3)
+        self.assertEqual(sorted(log.recipients[0] for log in deliveries), ['director@example.com', 'ops@example.com', 'reports@example.com'])
+        self.assertTrue(all(len(log.report_data['campaigns']) == 2 for log in deliveries))
+        self.assertTrue(all(log.report_data['campaigns'][0]['owner_email'] == log.recipients[0] for log in deliveries))
+        self.assertEqual(len(deliveries.first().report_data['campaigns'][0]), 12)
+        subscription.refresh_from_db()
+        self.assertGreater(subscription.next_run_at, timezone.now())
+        self.assertIsNotNone(subscription.last_sent_at)
+        self.assertEqual(mock_send.call_count, 3)
+
+    @patch('sms_campaign_manager.services.email_reports.EmailMultiAlternatives.send', return_value=1)
+    def test_manual_send_does_not_change_next_run_at(self, mock_send):
+        self.campaign.status = 'active'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        scheduled_at = timezone.now() + timedelta(hours=2)
+        subscription = ReportSubscription.objects.create(
+            name='Manual report',
+            recipients=['reports@example.com'],
+            frequency='1hr',
+            next_run_at=scheduled_at,
+            include_campaign_owners=False,
+        )
+        subscription.campaigns.add(self.campaign)
+
+        response = self.client.post(f'/api/v1/report-subscriptions/{subscription.id}/send-now/', {}, format='json')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(response.json()['success'])
+        subscription.refresh_from_db()
+        self.assertEqual(subscription.next_run_at, scheduled_at)
+        self.assertIsNotNone(subscription.last_sent_at)
+        mock_send.assert_called_once()
+
+    @patch('sms_campaign_manager.services.email_reports.EmailMultiAlternatives.send', side_effect=RuntimeError('SMTP unavailable'))
+    def test_report_subscription_send_failure_keeps_due_time_and_returns_log(self, mock_send):
+        scheduled_at = timezone.now() - timedelta(minutes=1)
+        subscription = ReportSubscription.objects.create(
+            name='Retry report',
+            recipients=['reports@example.com'],
+            frequency='1hr',
+            next_run_at=scheduled_at,
+            include_campaign_owners=False,
+        )
+        self.campaign.status = 'active'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        subscription.campaigns.add(self.campaign)
+
+        response = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(response.json()['success'])
+        self.assertEqual(response.json()['error'], 'SMTP unavailable')
+        self.assertEqual(ReportDeliveryLog.objects.get(pk=response.json()['log_id']).status, 'failed')
+        subscription.refresh_from_db()
+        self.assertEqual(subscription.next_run_at, scheduled_at)
+        mock_send.assert_called_once()
+
+    def test_report_subscription_send_missing_id_returns_contract_404(self):
+        response = self.client.post('/api/v1/report-subscriptions/999999/send-now/', {}, format='json')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {'success': False, 'error': 'Subscription not found.'})
 
     def test_campaign_progress_report_crud(self):
         create_response = self.client.post(
@@ -949,20 +1098,24 @@ class CampaignWorkflowStepTests(TestCase):
 
         delivery_event = {
             'event_type': 'DELIVERY_REPORT',
-            'message_id': message.message_id,
             'provider_message_id': 'smsc-provider-kafka-1',
-            'campaign_id': campaign.id,
-            'recipient': message.recipient,
+            'msisdn': message.recipient,
             'status': 'DELIVRD',
-            'err_code': '000',
-            'error_reason': 'Delivered',
-            'segment_count': 1,
-            'delivered_at': timezone.now().isoformat(),
+            'doneDate': '260928080404',
+            'event': 'Delivery receipt received',
+            'raw_payload': {
+                'messageId': 'smsc-provider-kafka-1',
+                'msisdn': message.recipient,
+                'status': 'DELIVRD',
+                'doneDate': '260928080404',
+            },
         }
 
         self.assertEqual(process_delivery_batch([delivery_event]), 1)
         self.assertEqual(process_delivery_batch([delivery_event]), 0)
-        self.assertEqual(SuccessDelivery.objects.filter(message_id=message.message_id).count(), 1)
+        delivery = SuccessDelivery.objects.get(message_id=message.message_id)
+        self.assertEqual(delivery.done_date, '260928080404')
+        self.assertEqual(delivery.raw_dlr_payload, delivery_event['raw_payload'])
 
     @patch('sms_campaign_manager.services.campaign_activation_email.EmailMultiAlternatives')
     def test_campaign_activation_builds_messages_and_emails_owner_snapshot(self, email_message):
@@ -1101,6 +1254,9 @@ class CampaignWorkflowStepTests(TestCase):
         self.assertEqual(start_response.status_code, 200, start_response.content)
         campaign.refresh_from_db()
         self.assertEqual(campaign.status, 'in_progress')
+        retry_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
+        self.assertEqual(retry_response.status_code, 200, retry_response.content)
+        self.assertEqual(retry_response.json()['data']['status'], 'in_progress')
         self.assertTrue(actions.pause_campaign()['success'])
         self.assertTrue(actions.resume_campaign()['success'])
         self.assertTrue(actions.complete_campaign()['success'])
@@ -1147,6 +1303,198 @@ class CampaignWorkflowStepTests(TestCase):
         self.assertEqual(clear_response.status_code, 200, clear_response.content)
         self.assertEqual(MessageObject.objects.filter(campaign=campaign).count(), 0)
 
+    def test_campaign_activation_is_idempotent_for_sender_start(self):
+        campaign = self.create_campaign()
+        campaign.status = 'active'
+        campaign.is_ready_to_execute = True
+        campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+
+        response = self.client.post(
+            f'/api/v1/campaigns/{campaign.id}/activate/',
+            {'build_messages': False},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(response.json()['success'])
+        self.assertEqual(response.json()['data']['status'], 'active')
+        self.assertEqual(response.json()['data']['messages_built'], 0)
+
+    def test_message_build_replaces_only_requested_batch_and_defaults_scheduler_batch_id(self):
+        campaign = self.create_campaign()
+        MessageContent.objects.create(
+            campaign=campaign,
+            en='Hello customer',
+            default_language=self.language,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='+251700000001',
+            language=self.language,
+            sequence_number=1,
+            round_number=2,
+        )
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='daily',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+        )
+        retained = MessageObject.objects.create(
+            campaign=campaign,
+            message_id='retained-round-one-message',
+            recipient='+251700000002',
+            sender_id=campaign.sender_id,
+            message_content='Round one',
+            batch_id='campaign-1-round-1',
+            round_number=1,
+        )
+
+        response = self.client.post(
+            f'/api/v1/campaigns/{campaign.id}/messages/build/',
+            {'round_number': 2},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()['data']['batch_id'], f'campaign-{campaign.id}-round-2')
+        self.assertTrue(response.json()['data']['is_ready_to_execute'])
+        self.assertTrue(MessageObject.objects.filter(pk=retained.pk).exists())
+        self.assertTrue(MessageObject.objects.filter(campaign=campaign, batch_id=f'campaign-{campaign.id}-round-2').exists())
+
+    def test_message_build_reuses_previous_audience_when_round_rebuild_is_disabled(self):
+        campaign = self.create_campaign()
+        MessageContent.objects.create(
+            campaign=campaign,
+            en='Hello customer',
+            default_language=self.language,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='+251700000004',
+            language=self.language,
+            sequence_number=1,
+            round_number=1,
+        )
+
+        response = self.client.post(
+            f'/api/v1/campaigns/{campaign.id}/messages/build/',
+            {'round_number': 2},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()['data']['audience_round_number'], 1)
+        message = MessageObject.objects.get(campaign=campaign)
+        self.assertEqual(message.round_number, 2)
+
+    def test_schedule_due_now_returns_scheduler_fields(self):
+        campaign = self.create_campaign()
+        config = AudienceConfig.objects.create(
+            campaign=campaign,
+            default_language=self.language,
+            rebuild_on_each_round=True,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='+251700000003',
+            language=self.language,
+            sequence_number=1,
+            round_number=1,
+        )
+        MessageContent.objects.create(
+            campaign=campaign,
+            en='Hello customer',
+            default_language=self.language,
+        )
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='daily',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+            schedule_status='active',
+            is_active=True,
+        )
+
+        response = self.client.get('/api/v1/schedules/due-now/')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        row = next(item for item in response.json()['data'] if item['campaign_id'] == campaign.id)
+        self.assertEqual(row, {
+            'campaign_id': campaign.id,
+            'round_number': 1,
+            'should_run': True,
+            'is_ready': True,
+            'audience_needs_rebuild': True,
+            'messages_need_build': True,
+            'audience_config_id': config.id,
+        })
+
+    def test_schedule_due_now_reuses_existing_audience_for_later_static_round(self):
+        campaign = self.create_campaign()
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='daily',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+            schedule_status='active',
+            is_active=True,
+            current_round=1,
+        )
+        config = AudienceConfig.objects.create(
+            campaign=campaign,
+            default_language=self.language,
+            rebuild_on_each_round=False,
+            last_rebuild_round=1,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='+251700000005',
+            language=self.language,
+            sequence_number=1,
+            round_number=1,
+        )
+
+        response = self.client.get('/api/v1/schedules/due-now/')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        row = next(item for item in response.json()['data'] if item['campaign_id'] == campaign.id)
+        self.assertEqual(row['round_number'], 2)
+        self.assertFalse(row['audience_needs_rebuild'])
+        self.assertTrue(row['messages_need_build'])
+        self.assertEqual(row['audience_config_id'], config.id)
+
+    def test_paused_campaign_reactivates_for_a_new_scheduled_round(self):
+        campaign = self.create_campaign()
+        campaign.status = 'paused'
+        campaign.is_ready_to_execute = True
+        campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        MessageObject.objects.create(
+            campaign=campaign,
+            message_id='paused-round-two-message',
+            recipient='+251700000006',
+            sender_id=campaign.sender_id,
+            message_content='Round two',
+            channel=self.channel,
+            language=self.language,
+            round_number=2,
+            batch_id=f'campaign-{campaign.id}-round-2',
+        )
+
+        activation = self.client.post(
+            f'/api/v1/campaigns/{campaign.id}/activate/',
+            {'build_messages': False},
+            format='json',
+        )
+        start = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
+
+        self.assertEqual(activation.status_code, 200, activation.content)
+        self.assertEqual(start.status_code, 200, start.content)
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.status, 'in_progress')
+
     @patch('sms_campaign_manager.services.smsc_sender.requests.post')
     def test_step_5_sender_submits_pending_message(self, post):
         campaign = self.create_campaign()
@@ -1164,21 +1512,26 @@ class CampaignWorkflowStepTests(TestCase):
         )
         config = SMSCConfig.objects.create(
             name='workflow-smsc', base_url='http://127.0.0.1:8090',
-            send_endpoint='/api/send', auth_type='none',
+            send_endpoint='/onion/swift/duos', auth_type='none',
             rate_limit_per_second=10, rate_limit_per_minute=600,
         )
-        response = Mock(status_code=200, content=b'{}')
-        response.json.return_value = {
-            'status': 'ACCEPTED', 'provider_message_id': 'provider-workflow-1',
-        }
+        response = Mock(status_code=200, content=b'[]')
+        response.json.return_value = [{
+            'status': 'submitted',
+            'messageId': '11779274578648910',
+            'msisdn': '251700000001',
+        }]
         post.return_value = response
 
         result = SmsSenderService(config, workers=1).run_once()
 
         self.assertEqual(result['sent'], 1)
-        self.assertTrue(MessageObject.objects.filter(pk=message.pk).exists())
-        self.assertEqual(MessageObject.objects.get(pk=message.pk).sent_status, 'SENT')
-        self.assertFalse(SentRecord.objects.filter(provider_message_id='provider-workflow-1').exists())
+        self.assertFalse(MessageObject.objects.filter(pk=message.pk).exists())
+        history = SuccessSent.objects.get(provider_message_id='11779274578648910')
+        self.assertEqual(history.message_id, message.message_id)
+        self.assertEqual(history.recipient, '251700000001')
+        self.assertEqual(post.call_args.kwargs['json']['destAddr'], [{'id': '251700000001'}])
+        self.assertEqual(post.call_args.args[0], 'http://127.0.0.1:8090/onion/swift/duos')
 
     def test_sender_claim_keeps_first_sending_started_at_across_retries(self):
         campaign = self.create_campaign()
@@ -1603,9 +1956,14 @@ class AudienceConfigContractTests(TestCase):
 
         self.assertEqual(response.status_code, 202)
         job = AudienceBuildJob.objects.get(pk=response.json()['job_id'])
+        self.assertEqual(response.json()['target_round'], 1)
         status_response = self.client.get(f'/api/v1/audience-build-jobs/{job.id}/')
         self.assertEqual(status_response.status_code, 200)
         self.assertEqual(status_response.json()['data']['status'], 'PENDING')
+        progress_response = self.client.get(f'/api/v1/audience-configs/{config.id}/progress/')
+        self.assertEqual(progress_response.status_code, 200)
+        self.assertEqual(progress_response.json()['data']['round_number'], 1)
+        self.assertEqual(progress_response.json()['data']['build_id'], job.result['build_id'])
 
 
 class DeliveryReportCallbackTests(TestCase):
@@ -1680,3 +2038,47 @@ class SchemaRegistryTests(TestCase):
                 if isinstance(op, dict) and 'databases' in op.get('tags', []):
                     lowercase_tag_ops.append((path, method, op.get('tags')))
         self.assertEqual(lowercase_tag_ops, [])
+
+
+class SenderLimitConfigApiTests(TestCase):
+    def test_configs_have_independent_active_values_and_validate_address_limit(self):
+        first_tps = self.client.post(
+            '/api/v1/global-tps-config/',
+            {'name': 'Default TPS', 'global_tps': 4000, 'is_default': True, 'is_active': True},
+            format='json',
+        )
+        self.assertEqual(first_tps.status_code, 201, first_tps.content)
+
+        second_tps = self.client.post(
+            '/api/v1/global-tps-config/',
+            {'name': 'High TPS', 'global_tps': 5000, 'is_active': True},
+            format='json',
+        )
+        self.assertEqual(second_tps.status_code, 201, second_tps.content)
+        self.assertFalse(GlobalTPSConfig.objects.get(name='Default TPS').is_active)
+
+        addresses = self.client.post(
+            '/api/v1/n-addresses-config/',
+            {
+                'name': 'Default addresses',
+                'max_addresses_per_request': 1000,
+                'is_default': True,
+                'is_active': True,
+            },
+            format='json',
+        )
+        self.assertEqual(addresses.status_code, 201, addresses.content)
+        self.assertTrue(GlobalTPSConfig.objects.get(name='High TPS').is_active)
+
+        active_tps = self.client.get('/api/v1/global-tps-config/active/')
+        active_addresses = self.client.get('/api/v1/n-addresses-config/active/')
+        self.assertEqual(active_tps.json()['data']['global_tps'], 5000)
+        self.assertEqual(active_addresses.json()['data']['max_addresses_per_request'], 1000)
+
+        invalid = self.client.post(
+            '/api/v1/n-addresses-config/',
+            {'name': 'Too many', 'max_addresses_per_request': 10001},
+            format='json',
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(NAddressesConfig.objects.count(), 1)

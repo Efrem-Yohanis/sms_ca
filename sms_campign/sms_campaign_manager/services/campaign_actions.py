@@ -16,6 +16,31 @@ class CampaignActionsService:
         return CampaignReadinessService(self.campaign).check()
 
     def activate_campaign(self, build_messages=True):
+        if self.campaign.status == 'paused':
+            if not self.campaign.is_ready_to_execute:
+                return {
+                    'success': False,
+                    'message': 'Campaign is not ready for activation.',
+                    'errors': ['Campaign is not ready to execute.'],
+                }
+            if not self.campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
+                return {
+                    'success': False,
+                    'message': 'Campaign has no queued messages for this round.',
+                    'errors': ['No pending messages exist.'],
+                }
+            self.campaign.status = 'active'
+            self.campaign.activated_at = timezone.now()
+            self.campaign.save(update_fields=['status', 'activated_at', 'updated_at'])
+            return {
+                'success': True,
+                'message': 'Campaign activated successfully.',
+                'data': {
+                    'campaign_id': self.campaign.id,
+                    'status': self.campaign.status,
+                    'messages_built': 0,
+                },
+            }
         report = self.validate_campaign()
         if not report['is_ready']:
             return {
@@ -66,6 +91,12 @@ class CampaignActionsService:
         return {'success': True, 'message': 'Campaign paused successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
 
     def start_campaign(self):
+        if self.campaign.status == 'in_progress':
+            return {
+                'success': True,
+                'message': 'Campaign sending is already in progress.',
+                'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status},
+            }
         if self.campaign.status != 'active':
             return {'success': False, 'message': f"Cannot start campaign in '{self.campaign.status}' status."}
         if not self.campaign.is_ready_to_execute:

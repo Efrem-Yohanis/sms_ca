@@ -243,6 +243,10 @@ class SMSCConfig(models.Model):
         default=5,
         help_text="Seconds between retries",
     )
+    max_addresses_per_request = models.PositiveIntegerField(
+        default=1000,
+        help_text="Maximum number of destinations per HTTP request to the SMSC",
+    )
 
     # ==================== TIMEOUTS ====================
     request_timeout_seconds = models.PositiveIntegerField(default=30)
@@ -356,6 +360,179 @@ class SMSCConfig(models.Model):
 
         self.full_clean(validate_unique=False)
         super().save(*args, **kwargs)
+
+
+class TestMessage(models.Model):
+    """An isolated SMSC test submission, separate from campaign messages."""
+
+    id = models.BigAutoField(primary_key=True)
+    sender_id = models.CharField(max_length=11)
+    recipient = models.CharField(max_length=20, db_index=True)
+    channel_code = models.CharField(max_length=30)
+    message_content = models.TextField()
+    test_campaign_id = models.IntegerField(default=9999)
+    provider_message_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    provider_status = models.CharField(max_length=50, blank=True, default='')
+    http_status = models.PositiveIntegerField(null=True, blank=True)
+    accepted = models.BooleanField(default=False)
+    duration_ms = models.PositiveIntegerField(default=0)
+    request_url = models.CharField(max_length=500, blank=True, default='')
+    request_method = models.CharField(max_length=10, blank=True, default='')
+    request_payload = models.JSONField(default=dict, blank=True)
+    response_payload = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='test_messages',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Test Message'
+        verbose_name_plural = 'Test Messages'
+        indexes = [
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['provider_message_id']),
+        ]
+
+    def __str__(self):
+        return f'Test #{self.id} -> {self.recipient} ({self.provider_status or "pending"})'
+
+
+class GlobalTPSConfig(models.Model):
+    """Global messages-per-second ceiling used across active campaigns."""
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150, unique=True)
+    description = models.TextField(blank=True, default='')
+    global_tps = models.PositiveIntegerField(default=4000)
+    is_default = models.BooleanField(default=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_global_tps_configs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', '-updated_at']
+        verbose_name = 'Global TPS Config'
+        verbose_name_plural = 'Global TPS Configs'
+        indexes = [
+            models.Index(fields=['is_active']),
+            models.Index(fields=['is_default']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['is_default'],
+                condition=models.Q(is_default=True),
+                name='one_global_tps_default',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} (TPS={self.global_tps})'
+
+    def clean(self):
+        errors = {}
+        if not self.name or not self.name.strip():
+            errors['name'] = 'Name is required.'
+        if self.global_tps <= 0:
+            errors['global_tps'] = 'Global TPS must be greater than 0.'
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or '').strip()
+        if self.is_default:
+            GlobalTPSConfig.objects.filter(is_default=True).exclude(pk=self.pk).update(
+                is_default=False,
+            )
+        if self.is_active:
+            GlobalTPSConfig.objects.filter(is_active=True).exclude(pk=self.pk).update(
+                is_active=False,
+            )
+        self.full_clean(validate_unique=False)
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_active(cls):
+        return cls.objects.filter(is_active=True).order_by('-is_default', '-updated_at').first()
+
+
+class NAddressesConfig(models.Model):
+    """Maximum destinations included in one SMSC request."""
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150, unique=True)
+    description = models.TextField(blank=True, default='')
+    max_addresses_per_request = models.PositiveIntegerField(default=1000)
+    is_default = models.BooleanField(default=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_n_addresses_configs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', '-updated_at']
+        verbose_name = 'N-Addresses Config'
+        verbose_name_plural = 'N-Addresses Configs'
+        indexes = [
+            models.Index(fields=['is_active']),
+            models.Index(fields=['is_default']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['is_default'],
+                condition=models.Q(is_default=True),
+                name='one_n_addresses_default',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} (N={self.max_addresses_per_request})'
+
+    def clean(self):
+        errors = {}
+        if not self.name or not self.name.strip():
+            errors['name'] = 'Name is required.'
+        if self.max_addresses_per_request <= 0:
+            errors['max_addresses_per_request'] = 'Must be greater than 0.'
+        elif self.max_addresses_per_request > 10000:
+            errors['max_addresses_per_request'] = 'Must be 10000 or fewer.'
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or '').strip()
+        if self.is_default:
+            NAddressesConfig.objects.filter(is_default=True).exclude(pk=self.pk).update(
+                is_default=False,
+            )
+        if self.is_active:
+            NAddressesConfig.objects.filter(is_active=True).exclude(pk=self.pk).update(
+                is_active=False,
+            )
+        self.full_clean(validate_unique=False)
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_active(cls):
+        return cls.objects.filter(is_active=True).order_by('-is_default', '-updated_at').first()
 
 
 class EmailConfig(models.Model):
@@ -496,17 +673,15 @@ class ReportSubscription(models.Model):
     """Campaign report recipients and delivery preferences."""
 
     FREQUENCY_CHOICES = [
-        ('daily', 'Daily'),
-        ('weekly', 'Weekly'),
-        ('monthly', 'Monthly'),
-        ('on_completion', 'On completion'),
-        ('manual', 'Manual'),
+        ('10min', 'Every 10 minutes'),
+        ('1hr', 'Every hour'),
+        ('1day', 'Every day'),
+        ('manual', 'Manual only'),
     ]
     FORMAT_CHOICES = [
         ('text', 'Plain text'),
         ('html', 'HTML'),
         ('csv', 'CSV'),
-        ('pdf', 'PDF'),
     ]
 
     id = models.BigAutoField(primary_key=True)
@@ -517,7 +692,21 @@ class ReportSubscription(models.Model):
         null=True,
         blank=True,
     )
+    campaigns = models.ManyToManyField(
+        'Campaign',
+        related_name='multi_campaign_report_subscriptions',
+        blank=True,
+    )
+    email_config = models.ForeignKey(
+        EmailConfig,
+        on_delete=models.SET_NULL,
+        related_name='report_subscriptions',
+        null=True,
+        blank=True,
+    )
+    name = models.CharField(max_length=150, blank=True, default='')
     recipients = models.JSONField(default=list)
+    include_campaign_owners = models.BooleanField(default=True)
     frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='manual')
     format = models.CharField(max_length=10, choices=FORMAT_CHOICES, default='html')
     include_sent_stats = models.BooleanField(default=True)
@@ -1212,20 +1401,13 @@ AudienceMember = Audience
 # ============================================================================
 
 class MessageObject(models.Model):
-    """
-    Message object — payload sent to SMSC API.
-    Built at activation time. One row per recipient.
+    """Transient sender queue, with terminal results stored in history tables."""
 
-    AUTHORITATIVE STATUS: sent_status/delivery_status on this model reflect
-    the message's *current* state. SentRecord/DeliveryRecord are append-only
-    attempt history — each one's save() pushes its status onto the parent
-    MessageObject (see below) so the two never disagree. Don't update
-    sent_status/delivery_status here directly from application code; write
-    a SentRecord/DeliveryRecord instead and let that propagate.
-
-    NOTE: like Audience, this is bulk_create()'d at scale and bypasses
-    save()/clean().
-    """
+    SENT_STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('SENT', 'Sent'),
+        ('FAILED', 'Failed'),
+    ]
 
     id = models.BigAutoField(primary_key=True)
     message_id = models.CharField(
@@ -1241,63 +1423,46 @@ class MessageObject(models.Model):
         related_name='messages',
         db_index=True,
     )
-
-    recipient = models.CharField(
-        max_length=20,
-        db_index=True,
-        help_text="Recipient MSISDN",
-    )
-    sender_id = models.CharField(
-        max_length=11,
-        help_text="Sender ID shown to end users",
-    )
-    message_content = models.TextField(
-        help_text="Fully personalized message content",
-    )
-
     channel = models.ForeignKey(
         Channel,
         on_delete=models.SET_NULL,
-        null=True, blank=True,
+        null=True,
+        blank=True,
         related_name='messages',
     )
     language = models.ForeignKey(
         Language,
         on_delete=models.SET_NULL,
-        null=True, blank=True,
+        null=True,
+        blank=True,
         related_name='messages',
     )
-
-    message_parts = models.PositiveSmallIntegerField(default=1)
-
+    round_number = models.PositiveIntegerField(
+        default=1,
+        db_index=True,
+        help_text="Which round of the campaign this message belongs to",
+    )
+    recipient = models.CharField(
+        max_length=20,
+        db_index=True,
+        help_text="Recipient MSISDN (digits only, no +)",
+    )
+    sender_id = models.CharField(max_length=11, help_text="Sender ID shown to end users")
+    message_content = models.TextField(
+        help_text="Fully personalized message content for this recipient",
+    )
     sent_status = models.CharField(
         max_length=20,
         choices=SENT_STATUS_CHOICES,
         default='PENDING',
         db_index=True,
     )
-    delivery_status = models.CharField(
-        max_length=20,
-        choices=DELIVERY_STATUS_CHOICES,
-        default='PENDING',
-        db_index=True,
-    )
-
     batch_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
     worker_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
     locked_until = models.DateTimeField(null=True, blank=True, db_index=True)
     sending_started_at = models.DateTimeField(null=True, blank=True, db_index=True)
-
-    built_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    sent_at = models.DateTimeField(null=True, blank=True)
-    delivered_at = models.DateTimeField(null=True, blank=True)
-    failed_at = models.DateTimeField(null=True, blank=True)
-
-    personalized_fields = models.JSONField(default=dict, blank=True)
     send_attempts = models.PositiveSmallIntegerField(default=0)
-    delivery_attempts = models.PositiveSmallIntegerField(default=0)
-    last_error = models.TextField(blank=True, default='')
-
+    built_at = models.DateTimeField(auto_now_add=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1307,13 +1472,9 @@ class MessageObject(models.Model):
         verbose_name_plural = 'Message Objects'
         indexes = [
             models.Index(fields=['campaign', 'sent_status']),
-            models.Index(fields=['campaign', 'delivery_status']),
-            models.Index(fields=['campaign', 'batch_id']),
-            models.Index(fields=['recipient', 'campaign']),
+            models.Index(fields=['campaign', 'round_number']),
             models.Index(fields=['sent_status']),
-            models.Index(fields=['delivery_status']),
-            models.Index(fields=['channel']),
-            models.Index(fields=['language']),
+            models.Index(fields=['locked_until']),
         ]
 
     def __str__(self):
@@ -1535,96 +1696,222 @@ class DeliveryRecord(models.Model):
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
-        if self.message_object_id:
-            MessageObject.objects.filter(pk=self.message_object_id).update(
-                delivery_status=self.delivery_status,
-                updated_at=timezone.now(),
-            )
 
 
-class _SendHistoryBase(models.Model):
-    """Shared immutable fields for accepted and rejected SMS submissions."""
+class SuccessSent(models.Model):
+    """Permanent record of every message the SMSC accepted on submit."""
 
     id = models.BigAutoField(primary_key=True)
     message_id = models.CharField(max_length=100, unique=True, db_index=True)
-    campaign = models.ForeignKey(Campaign, on_delete=models.PROTECT, db_index=True)
-    channel = models.ForeignKey(Channel, on_delete=models.PROTECT, db_index=True)
+    provider_message_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.PROTECT,
+        related_name='success_sent_messages',
+        db_index=True,
+    )
+    channel = models.ForeignKey(
+        Channel,
+        on_delete=models.PROTECT,
+        related_name='success_sent_messages',
+        db_index=True,
+    )
+    round_number = models.PositiveIntegerField(default=1, db_index=True)
     recipient = models.CharField(max_length=20, db_index=True)
     sender_id = models.CharField(max_length=11)
+    message_content = models.TextField(blank=True, default='')
+    message_parts = models.PositiveSmallIntegerField(default=1)
+    servicetype = models.CharField(max_length=20, blank=True, default='')
+    servicetag = models.CharField(max_length=50, blank=True, default='')
     batch_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
-    total_attempts = models.PositiveSmallIntegerField(default=1)
-    provider_message_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    worker_id = models.CharField(max_length=100, blank=True, default='')
+    request_payload = models.JSONField(default=dict, blank=True)
     provider_status = models.CharField(max_length=50, blank=True, default='')
     provider_response = models.JSONField(default=dict, blank=True)
+    total_attempts = models.PositiveSmallIntegerField(default=1)
+    built_at = models.DateTimeField(null=True, blank=True)
+    sending_started_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        abstract = True
+        ordering = ['-created_at']
+        verbose_name = 'Success Sent'
+        verbose_name_plural = 'Success Sents'
         indexes = [
-            models.Index(fields=['campaign', '-created_at']),
+            models.Index(fields=['campaign', 'sent_at']),
+            models.Index(fields=['provider_message_id']),
             models.Index(fields=['recipient', 'campaign']),
+            models.Index(fields=['-created_at']),
         ]
 
-
-class SuccessSent(_SendHistoryBase):
-    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
-
-    class Meta:
-        db_table = 'sms_campaign_manager_successsent'
-        ordering = ['-created_at']
+    def __str__(self):
+        return f'SuccessSent #{self.id} — {self.message_id}'
 
 
-class FailedSent(_SendHistoryBase):
+class FailedSent(models.Model):
+    """Permanent record of every message the SMSC rejected on submit."""
+
+    id = models.BigAutoField(primary_key=True)
+    message_id = models.CharField(max_length=100, unique=True, db_index=True)
+    provider_message_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.PROTECT,
+        related_name='failed_sent_messages',
+        db_index=True,
+    )
+    channel = models.ForeignKey(
+        Channel,
+        on_delete=models.PROTECT,
+        related_name='failed_sent_messages',
+        db_index=True,
+    )
+    round_number = models.PositiveIntegerField(default=1, db_index=True)
+    recipient = models.CharField(max_length=20, db_index=True)
+    sender_id = models.CharField(max_length=11)
+    message_content = models.TextField(blank=True, default='')
+    message_parts = models.PositiveSmallIntegerField(default=1)
+    servicetype = models.CharField(max_length=20, blank=True, default='')
+    servicetag = models.CharField(max_length=50, blank=True, default='')
+    batch_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
+    worker_id = models.CharField(max_length=100, blank=True, default='')
+    request_payload = models.JSONField(default=dict, blank=True)
+    provider_status = models.CharField(max_length=50, blank=True, default='')
+    provider_response = models.JSONField(default=dict, blank=True)
+    total_attempts = models.PositiveSmallIntegerField(default=0)
     last_error = models.TextField(blank=True, default='')
     error_code = models.CharField(max_length=50, blank=True, default='')
+    error_type = models.CharField(max_length=30, blank=True, default='')
+    http_status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    built_at = models.DateTimeField(null=True, blank=True)
+    sending_started_at = models.DateTimeField(null=True, blank=True)
     first_attempt_at = models.DateTimeField(null=True, blank=True)
-    final_attempt_at = models.DateTimeField(null=True, blank=True)
+    final_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'sms_campaign_manager_failedsent'
         ordering = ['-created_at']
+        verbose_name = 'Failed Sent'
+        verbose_name_plural = 'Failed Sents'
+        indexes = [
+            models.Index(fields=['campaign', 'final_attempt_at']),
+            models.Index(fields=['error_type', 'campaign']),
+            models.Index(fields=['provider_message_id']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        return f'FailedSent #{self.id} — {self.message_id}'
 
 
-class _DeliveryHistoryBase(models.Model):
-    """Shared immutable fields for terminal delivery reports."""
+class SuccessDelivery(models.Model):
+    """Permanent record of every DELIVRD delivery report."""
 
     id = models.BigAutoField(primary_key=True)
     message_id = models.CharField(max_length=100, db_index=True)
     provider_message_id = models.CharField(max_length=100, db_index=True)
-    campaign = models.ForeignKey(Campaign, on_delete=models.PROTECT, db_index=True)
-    channel = models.ForeignKey(Channel, on_delete=models.PROTECT, db_index=True)
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.PROTECT,
+        related_name='success_delivery_messages',
+        db_index=True,
+    )
+    channel = models.ForeignKey(
+        Channel,
+        on_delete=models.PROTECT,
+        related_name='success_delivery_messages',
+        db_index=True,
+    )
+    round_number = models.PositiveIntegerField(default=1, db_index=True)
     recipient = models.CharField(max_length=20, db_index=True)
-    sender_id = models.CharField(max_length=11)
-    delivery_status = models.CharField(max_length=20, db_index=True)
+    delivery_status = models.CharField(max_length=20, default='DELIVERED', db_index=True)
     delivery_code = models.CharField(max_length=20, blank=True, default='')
     delivery_description = models.TextField(blank=True, default='')
+    event = models.CharField(max_length=100, blank=True, default='')
+    done_date = models.CharField(max_length=20, blank=True, default='')
     provider_response = models.JSONField(default=dict, blank=True)
+    raw_dlr_payload = models.JSONField(default=dict, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        abstract = True
+        ordering = ['-created_at']
+        verbose_name = 'Success Delivery'
+        verbose_name_plural = 'Success Deliveries'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['message_id', 'provider_message_id'],
+                name='unique_success_delivery_per_message',
+            ),
+        ]
         indexes = [
-            models.Index(fields=['campaign', 'delivery_status']),
-            models.Index(fields=['recipient', 'campaign']),
+            models.Index(fields=['campaign', 'delivered_at']),
+            models.Index(fields=['provider_message_id']),
+            models.Index(fields=['delivery_status']),
+            models.Index(fields=['-created_at']),
         ]
 
+    def __str__(self):
+        return f'SuccessDelivery #{self.id} — {self.message_id}'
 
-class SuccessDelivery(_DeliveryHistoryBase):
-    delivered_at = models.DateTimeField(null=True, blank=True, db_index=True)
+class FailedDelivery(models.Model):
+    """Permanent record of every non-DELIVRD delivery report."""
 
-    class Meta:
-        db_table = 'sms_campaign_manager_successdelivery'
-        ordering = ['-created_at']
-
-
-class FailedDelivery(_DeliveryHistoryBase):
+    id = models.BigAutoField(primary_key=True)
+    message_id = models.CharField(max_length=100, db_index=True)
+    provider_message_id = models.CharField(max_length=100, db_index=True)
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.PROTECT,
+        related_name='failed_delivery_messages',
+        db_index=True,
+    )
+    channel = models.ForeignKey(
+        Channel,
+        on_delete=models.PROTECT,
+        related_name='failed_delivery_messages',
+        db_index=True,
+    )
+    round_number = models.PositiveIntegerField(default=1, db_index=True)
+    recipient = models.CharField(max_length=20, db_index=True)
+    delivery_status = models.CharField(max_length=20, db_index=True)
+    delivery_code = models.CharField(max_length=20, blank=True, default='')
+    delivery_description = models.TextField(blank=True, default='')
+    error_code = models.CharField(max_length=50, blank=True, default='')
+    error_reason = models.TextField(blank=True, default='')
+    event = models.CharField(max_length=100, blank=True, default='')
+    done_date = models.CharField(max_length=20, blank=True, default='')
+    provider_response = models.JSONField(default=dict, blank=True)
+    raw_dlr_payload = models.JSONField(default=dict, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
     failed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'sms_campaign_manager_faileddelivery'
         ordering = ['-created_at']
+        verbose_name = 'Failed Delivery'
+        verbose_name_plural = 'Failed Deliveries'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['message_id', 'provider_message_id'],
+                name='unique_failed_delivery_per_message',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['campaign', 'failed_at']),
+            models.Index(fields=['delivery_status', 'campaign']),
+            models.Index(fields=['provider_message_id']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        return f'FailedDelivery #{self.id} — {self.message_id}'
 
 
 # ============================================================================

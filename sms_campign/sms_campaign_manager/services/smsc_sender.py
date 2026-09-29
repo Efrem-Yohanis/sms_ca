@@ -12,7 +12,7 @@ import requests
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import MessageObject, SMSCConfig, SentRecord
+from ..models import FailedSent, MessageObject, SMSCConfig, SuccessSent
 
 
 DLR_CALLBACK_URL = os.getenv(
@@ -148,14 +148,13 @@ class SmsSenderService:
 
     def _submit_one(self, message: MessageObject) -> SendOutcome:
         payload = {
-            'message_id': message.message_id,
-            'campaign_id': message.campaign_id,
-            'sender_id': message.sender_id,
-            'receiver': message.recipient,
-            'message_content': message.message_content,
+            'shortMessage': message.message_content,
+            'messageType': 'TEXT',
+            'destAddr': [{'id': ''.join(character for character in message.recipient if character.isdigit())}],
+            'sourceAddr': {'name': message.sender_id},
+            'servicetag': {'name': str(message.campaign_id)},
+            'servicetype': {'name': 'normal'},
         }
-        if DLR_CALLBACK_URL:
-            payload['callback_url'] = DLR_CALLBACK_URL
         try:
             response = requests.post(
                 self.smsc_config.get_full_send_url(),
@@ -167,8 +166,22 @@ class SmsSenderService:
                 ),
             )
             body = response.json() if response.content else {}
-            if response.status_code in (200, 201) and body.get('status') in (None, 'ACCEPTED'):
-                return SendOutcome(message.id, True, body)
+            if (
+                response.status_code == 200
+                and isinstance(body, list)
+                and len(body) == 1
+                and isinstance(body[0], dict)
+            ):
+                result = body[0]
+                provider_id = str(result.get('messageId') or '')
+                if result.get('status') == 'submitted' and provider_id:
+                    return SendOutcome(message.id, True, result)
+                return SendOutcome(
+                    message.id,
+                    False,
+                    result,
+                    f'SMSC did not submit the destination: {result}',
+                )
             return SendOutcome(
                 message.id,
                 False,
@@ -188,26 +201,78 @@ class SmsSenderService:
 
         if outcome.accepted:
             with transaction.atomic():
-                MessageObject.objects.filter(pk=message.pk).update(
-                    sent_status='SENT',
+                SuccessSent.objects.create(
+                    message_id=message.message_id,
+                    provider_message_id=str(outcome.response['messageId']),
+                    campaign=message.campaign,
+                    channel=message.channel,
+                    round_number=message.round_number,
+                    recipient=str(outcome.response.get('msisdn') or message.recipient),
+                    sender_id=message.sender_id,
+                    message_content=message.message_content,
+                    servicetype='normal',
+                    servicetag=str(message.campaign_id),
+                    batch_id=message.batch_id,
+                    worker_id=message.worker_id,
+                    request_payload={
+                        'shortMessage': message.message_content,
+                        'messageType': 'TEXT',
+                        'destAddr': [{'id': ''.join(character for character in message.recipient if character.isdigit())}],
+                        'sourceAddr': {'name': message.sender_id},
+                        'servicetag': {'name': str(message.campaign_id)},
+                        'servicetype': {'name': 'normal'},
+                    },
+                    provider_status='submitted',
+                    provider_response=outcome.response,
+                    total_attempts=attempt_number,
+                    built_at=message.built_at,
+                    sending_started_at=message.sending_started_at,
                     sent_at=now,
-                    send_attempts=attempt_number,
-                    locked_until=None,
-                    last_error='',
-                    updated_at=now,
                 )
+                MessageObject.objects.filter(pk=message.pk).delete()
             return {'sent': 1, 'failed': 0, 'retried': 0, 'removed': 0}
 
         max_retries = self.smsc_config.max_retries
         with transaction.atomic():
-            MessageObject.objects.filter(pk=message.pk).update(
-                sent_status='FAILED',
-                send_attempts=attempt_number,
-                last_error=outcome.error,
-                failed_at=now,
-                locked_until=None,
-                updated_at=now,
-            )
-        if attempt_number >= max_retries:
+            if attempt_number >= max_retries:
+                FailedSent.objects.create(
+                    message_id=message.message_id,
+                    provider_message_id=str(outcome.response.get('messageId') or ''),
+                    campaign=message.campaign,
+                    channel=message.channel,
+                    round_number=message.round_number,
+                    recipient=str(outcome.response.get('msisdn') or message.recipient),
+                    sender_id=message.sender_id,
+                    message_content=message.message_content,
+                    servicetype='normal',
+                    servicetag=str(message.campaign_id),
+                    batch_id=message.batch_id,
+                    worker_id=message.worker_id,
+                    request_payload={
+                        'shortMessage': message.message_content,
+                        'messageType': 'TEXT',
+                        'destAddr': [{'id': ''.join(character for character in message.recipient if character.isdigit())}],
+                        'sourceAddr': {'name': message.sender_id},
+                        'servicetag': {'name': str(message.campaign_id)},
+                        'servicetype': {'name': 'normal'},
+                    },
+                    provider_status=str(outcome.response.get('status') or 'failed'),
+                    provider_response=outcome.response,
+                    total_attempts=attempt_number,
+                    last_error=outcome.error,
+                    error_type='SMSC',
+                    built_at=message.built_at,
+                    sending_started_at=message.sending_started_at,
+                    first_attempt_at=message.sending_started_at,
+                    final_attempt_at=now,
+                )
+                MessageObject.objects.filter(pk=message.pk).delete()
+            else:
+                MessageObject.objects.filter(pk=message.pk).update(
+                    sent_status='FAILED',
+                    send_attempts=attempt_number,
+                    locked_until=None,
+                    updated_at=now,
+                )
             return {'sent': 0, 'failed': 1, 'retried': 0, 'removed': 0}
         return {'sent': 0, 'failed': 1, 'retried': 1, 'removed': 0}

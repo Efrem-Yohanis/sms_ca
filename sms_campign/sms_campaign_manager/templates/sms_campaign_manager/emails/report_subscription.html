@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ report_name }}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f5f8;color:#1f2937;font-family:Arial,Helvetica,sans-serif;font-size:13px">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:#f3f5f8">
+    <tr><td align="center" style="padding:24px 12px">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:1200px;border-collapse:collapse;background:#ffffff">
+        <tr><td style="padding:24px;background:#1f3a5f;color:#ffffff">
+          <div style="font-size:20px;font-weight:bold">Hourly Campaign Report</div>
+          <div style="padding-top:5px;font-size:15px">{{ report_name }}</div>
+          <div style="padding-top:8px;color:#dbe5f0">Generated {{ generated_at_display }}</div>
+        </td></tr>
+        <tr><td style="padding:20px 24px">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse">
+            <tr>
+              <td style="padding:12px;background:#eef1f5"><strong>Campaigns</strong><br>{{ summary_total_campaigns }}</td>
+              <td style="padding:12px;background:#eef1f5"><strong>Sent</strong><br>{{ summary_total_sent }}</td>
+              <td style="padding:12px;background:#eef1f5"><strong>Delivered</strong><br>{{ summary_total_delivered }}</td>
+              <td style="padding:12px;background:#eef1f5"><strong>Failed</strong><br>{{ summary_total_failed }}</td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:0 24px 24px">
+          <div style="overflow-x:auto">
+            <table width="100%" cellspacing="0" cellpadding="0" style="min-width:1100px;border-collapse:collapse;font-size:12px">
+              <thead><tr style="background:#eef1f5;text-align:left">
+                <th style="padding:9px">Campaign Name</th>
+                <th style="padding:9px">Campaign ID</th>
+                <th style="padding:9px">Owner Email</th>
+                <th style="padding:9px">Total Audience</th>
+                <th style="padding:9px">Sent Started At</th>
+                <th style="padding:9px">Sent Completed At</th>
+                <th style="padding:9px;color:#15803d">Sent Success</th>
+                <th style="padding:9px;color:#b91c1c">Sent Failed</th>
+                <th style="padding:9px;color:#15803d">Delivery Success</th>
+                <th style="padding:9px;color:#b91c1c">Delivery Failed</th>
+                <th style="padding:9px">Delivery Started At</th>
+                <th style="padding:9px">Last Delivery At</th>
+              </tr></thead>
+              <tbody>
+                {{ campaign_rows }}
+                <tr style="background:#eef1f5">{{ total_cells }}</tr>
+              </tbody>
+            </table>
+          </div>
+        </td></tr>
+        <tr><td style="padding:16px 24px;background:#f7f9fb;color:#64748b;font-size:11px">
+          This is an automated report from Campaign Manager. Do not reply.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

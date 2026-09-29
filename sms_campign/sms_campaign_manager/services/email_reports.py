@@ -1,13 +1,27 @@
 import csv
 import io
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from html import escape
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Min, Q
+from django.template.loader import render_to_string
 from django.utils import timezone
+from django.utils.safestring import mark_safe
 
-from ..models import DeliveryRecord, MessageObject, ReportDeliveryLog, SentRecord
+from ..models import (
+    Audience,
+    Campaign,
+    DeliveryRecord,
+    FailedDelivery,
+    FailedSent,
+    MessageObject,
+    ReportDeliveryLog,
+    SentRecord,
+    SuccessDelivery,
+    SuccessSent,
+)
 from .email_delivery import get_active_email_config, get_email_connection
 
 
@@ -206,7 +220,9 @@ def send_campaign_report(
             message.attach_alternative(body, 'text/html')
         for filename, content, mimetype in attachments:
             message.attach(filename, content, mimetype)
-        message.send(fail_silently=False)
+        sent_count = message.send(fail_silently=False)
+        if sent_count < 1:
+            raise RuntimeError('Email backend did not send the report to any recipients.')
         log.status = 'sent'
         log.sent_at = timezone.now()
     except Exception as exc:
@@ -214,3 +230,198 @@ def send_campaign_report(
 
     log.save()
     return log
+
+
+REPORT_COLUMNS = [
+    ('campaign_name', 'Campaign Name'),
+    ('campaign_id', 'Campaign ID'),
+    ('owner_email', 'Owner Email'),
+    ('total_audience', 'Total Audience'),
+    ('sent_started_at', 'Sent Started At'),
+    ('sent_completed_at', 'Sent Completed At'),
+    ('sent_success', 'Sent Success'),
+    ('sent_failed', 'Sent Failed'),
+    ('delivery_success', 'Delivery Success'),
+    ('delivery_failed', 'Delivery Failed'),
+    ('delivery_started_at', 'Delivery Started At'),
+    ('last_delivery_at', 'Last Delivery At'),
+]
+TOTAL_KEYS = ('total_audience', 'sent_success', 'sent_failed', 'delivery_success', 'delivery_failed')
+
+
+def _format_datetime(value):
+    if value is None:
+        return '—'
+    return timezone.localtime(value).strftime('%Y-%m-%d %H:%M:%S %Z')
+
+
+def _campaign_report_row(campaign, owner_email):
+    schedule = getattr(campaign, 'schedule', None)
+    current_round = schedule.current_round if schedule and schedule.current_round else None
+    audience_rows = Audience.objects.filter(campaign=campaign)
+    if current_round is None:
+        current_round = audience_rows.aggregate(round_number=Max('round_number'))['round_number'] or 1
+
+    sent_stats = SuccessSent.objects.filter(campaign=campaign).aggregate(
+        started=Min('sent_at'),
+        completed=Max('sent_at'),
+        count=Count('id'),
+    )
+    sent_failed = FailedSent.objects.filter(campaign=campaign).count()
+    delivery_success = SuccessDelivery.objects.filter(campaign=campaign)
+    delivery_failed = FailedDelivery.objects.filter(campaign=campaign)
+    delivery_started_values = [
+        value for value in (
+            delivery_success.aggregate(value=Min('delivered_at'))['value'],
+            delivery_failed.aggregate(value=Min('failed_at'))['value'],
+        ) if value is not None
+    ]
+    delivery_last_values = [
+        value for value in (
+            delivery_success.aggregate(value=Max('delivered_at'))['value'],
+            delivery_failed.aggregate(value=Max('failed_at'))['value'],
+        ) if value is not None
+    ]
+    return {
+        'campaign_name': campaign.name,
+        'campaign_id': campaign.id,
+        'owner_email': owner_email,
+        'total_audience': audience_rows.filter(round_number=current_round).count(),
+        'sent_started_at': _format_datetime(sent_stats['started']),
+        'sent_completed_at': _format_datetime(sent_stats['completed']),
+        'sent_success': sent_stats['count'] or 0,
+        'sent_failed': sent_failed,
+        'delivery_success': delivery_success.count(),
+        'delivery_failed': delivery_failed.count(),
+        'delivery_started_at': _format_datetime(min(delivery_started_values) if delivery_started_values else None),
+        'last_delivery_at': _format_datetime(max(delivery_last_values) if delivery_last_values else None),
+    }
+
+
+def build_subscription_report_data(subscription, campaigns, recipient):
+    rows = [_campaign_report_row(campaign, recipient) for campaign in campaigns]
+    totals = {key: sum(row[key] for row in rows) for key in TOTAL_KEYS}
+    sent_total = totals['sent_success'] + totals['sent_failed']
+    delivered_total = totals['delivery_success']
+    failed_total = totals['sent_failed'] + totals['delivery_failed']
+    return {
+        'report_name': subscription.name,
+        'generated_at': timezone.now().isoformat(),
+        'generated_at_display': timezone.localtime().strftime('%Y-%m-%d %H:%M:%S %Z'),
+        'summary_total_campaigns': len(rows),
+        'summary_total_sent': sent_total,
+        'summary_total_delivered': delivered_total,
+        'summary_total_failed': failed_total,
+        'campaigns': rows,
+        'totals': totals,
+    }
+
+
+def render_subscription_report(report_data, report_format):
+    rows = report_data['campaigns']
+    totals = report_data['totals']
+    if report_format == 'html':
+        campaign_rows = []
+        for row in rows:
+            cells = ''.join(
+                f'<td style="padding:8px;border-bottom:1px solid #e1e5ea">{escape(str(row[key]))}</td>'
+                for key, _ in REPORT_COLUMNS
+            )
+            campaign_rows.append(f'<tr>{cells}</tr>')
+        total_cells = []
+        for key, _ in REPORT_COLUMNS:
+            value = totals[key] if key in totals else '—'
+            total_cells.append(f'<td style="padding:8px;font-weight:bold">{escape(str(value))}</td>')
+        return render_to_string('sms_campaign_manager/emails/report_subscription.html', {
+            **report_data,
+            'campaign_rows': mark_safe(''.join(campaign_rows)),
+            'total_cells': mark_safe(''.join(total_cells)),
+        }), []
+
+    if report_format == 'text':
+        lines = [
+            report_data['report_name'],
+            f"Generated {report_data['generated_at_display']}",
+            f"Campaigns: {report_data['summary_total_campaigns']} | Sent: {report_data['summary_total_sent']} | Delivered: {report_data['summary_total_delivered']} | Failed: {report_data['summary_total_failed']}",
+            '',
+            ' | '.join(label for _, label in REPORT_COLUMNS),
+        ]
+        lines.extend(' | '.join(str(row[key]) for key, _ in REPORT_COLUMNS) for row in rows)
+        lines.append(' | '.join(str(totals.get(key, '—')) if key in TOTAL_KEYS else '—' for key, _ in REPORT_COLUMNS))
+        return '\n'.join(lines), []
+
+    if report_format == 'csv':
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([label for _, label in REPORT_COLUMNS])
+        writer.writerows([[row[key] for key, _ in REPORT_COLUMNS] for row in rows])
+        writer.writerow([totals.get(key, '') if key in TOTAL_KEYS else '' for key, _ in REPORT_COLUMNS])
+        return 'Campaign report is attached as CSV.', [('campaign-report.csv', output.getvalue(), 'text/csv')]
+
+    raise ValueError(f'Unsupported report format: {report_format}')
+
+
+def send_subscription_report(subscription, campaigns, recipients):
+    config = subscription.email_config
+    if not config or not config.is_active:
+        config = get_active_email_config()
+    subject = f'Hourly Campaign Report: {subscription.name}'
+    logs = []
+    for recipient in recipients:
+        report_data = None
+        body = ''
+        attachments = []
+        render_error = ''
+        try:
+            report_data = build_subscription_report_data(subscription, campaigns, recipient)
+            body, attachments = render_subscription_report(report_data, subscription.format)
+        except Exception as exc:
+            render_error = str(exc)
+        log = ReportDeliveryLog.objects.create(
+            subscription=subscription,
+            campaign=campaigns[0] if len(campaigns) == 1 else None,
+            email_config=config,
+            recipients=[recipient],
+            format=subscription.format,
+            subject=subject,
+            report_data=report_data or {},
+            content=body,
+            attachment_names=[filename for filename, _, _ in attachments],
+        )
+        try:
+            if render_error:
+                raise RuntimeError(render_error)
+            message = EmailMultiAlternatives(
+                subject=subject,
+                body=body,
+                from_email=config.default_from_email if config else settings.DEFAULT_FROM_EMAIL,
+                to=[recipient],
+                connection=get_email_connection(config),
+            )
+            if subscription.format == 'html':
+                message.attach_alternative(body, 'text/html')
+            for filename, content, mimetype in attachments:
+                message.attach(filename, content, mimetype)
+            if message.send(fail_silently=False) < 1:
+                raise RuntimeError('Email backend did not send the report.')
+            log.status = 'sent'
+            log.sent_at = timezone.now()
+        except Exception as exc:
+            log.status = 'failed'
+            log.error_message = str(exc)
+        log.save(update_fields=['status', 'sent_at', 'error_message'])
+        logs.append(log)
+    return logs
+
+
+def next_subscription_run_at(frequency, now):
+    now = now.astimezone(datetime_timezone.utc)
+    if frequency == '10min':
+        boundary = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
+        return boundary + timedelta(minutes=10)
+    if frequency == '1hr':
+        boundary = now.replace(minute=0, second=0, microsecond=0)
+        return boundary + timedelta(hours=1)
+    if frequency == '1day':
+        return now + timedelta(days=1)
+    return None

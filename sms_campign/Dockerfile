@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY sms_campign/ ./sms_campign/
 COPY sms_campaign_scheduler/ ./sms_campign/sms_campaign_scheduler/
+COPY sms_status_updater/ ./sms_status_updater/
 WORKDIR /app/sms_campign
 
 EXPOSE 8000

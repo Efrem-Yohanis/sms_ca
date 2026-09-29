@@ -1,133 +1,96 @@
-# Local SMSC Mock
+# Mock Onion SMSC
 
-Simulates a real SMPP-style SMSC, not just a "always succeeds" stub:
+The mock implements the real SMSC's HTTP contract for local development. It accepts authenticated batches, returns one result per destination, and sends an asynchronous HTTP delivery receipt for each message. It does not publish to Kafka.
 
-1. Client calls `/api/send` (or `/api/send/batch`).
-2. The mock first checks a **TPS (throughput) limiter** — real SMSCs enforce a negotiated max submit rate per bind/system_id, and reject bursts over it with `ESME_RTHROTTLED`. Exceeding `SMSC_MAX_TPS` here returns `429`.
-3. If accepted, it returns `200 ACCEPTED` immediately with a `provider_message_id` and `segment_count` (long messages get split into concatenated-SMS segments, same as a real SMSC would).
-4. When Kafka is enabled, the mock publishes a `SEND_RESPONSE` event to `smsc-send-response` after acceptance.
-5. A background task waits a **randomized transit delay** (`SMSC_MIN_DELIVERY_DELAY_SECONDS`–`SMSC_MAX_DELIVERY_DELAY_SECONDS`, slightly longer for multi-segment messages), then resolves to one of four **final statuses**, weighted like real network traffic:
+## Service
 
-| Status | Default weight | Meaning |
-|---|---|---|
-| `DELIVRD` | 92% | Delivered to handset |
-| `UNDELIV` | 4% | Absent subscriber / handset full / network error / unknown subscriber |
-| `EXPIRED` | 2% | Validity period expired before delivery |
-| `REJECTD` | 2% | Rejected by network / destination blocked |
+| Property | Value |
+|---|---|
+| Compose service | `smsc-mock` |
+| Container | `sms-mock-smsc` |
+| Port | `8090` |
+| Internal URLs | `http://mock-smsc:8090`, `http://mock-smsc.local:8090` |
+| Network | `sms-network` |
+| Runtime | Python 3.11, FastAPI, Uvicorn (4 workers) |
 
-Each status carries an SMPP-style `err_code` and human-readable reason (see `REASON_CODES` in `app.py`).
+## Submit Messages
 
-6. The final status is published to `smsc-delivery-report`. If the request included a `callback_url`, the mock also POSTs a delivery report (DLR) to it — with retries on failure/timeout — including both structured JSON fields and a standard SMPP `deliver_sm` DLR text string (`id:... stat:DELIVRD err:000 ...`).
-
-All writes still go through one queue drained by a single SQLite writer task, so there's no lock contention regardless of throughput.
-
-## Kafka and Compose
-
-The root Compose stack starts a single-node Kafka broker, creates both topics with 20 partitions, starts the mock at `http://localhost:8090`, and runs a Django status-updater consumer. The Kafka broker is available to host tools at `localhost:9094`; application containers use `kafka:9092`.
-
-The send-response event includes the message and provider IDs, campaign, recipient, sender, acceptance status, segment count, and timestamp. The delivery-report event includes the final status, error code/reason, segment count, and delivery timestamp. Both topics use `message_id` as the key. The status-updater writes through `SentRecord` and `DeliveryRecord`, updates linked `MessageObject` statuses, and commits offsets only after the database transaction succeeds.
-
-The status-updater group IDs are `status-updater-send` and `status-updater-delivery`. If an event cannot yet be matched to a send record, it is retried without committing its Kafka offset.
-
-## Install
-
-```powershell
-pip install fastapi uvicorn httpx
-```
-
-## Start standalone
-
-```powershell
-python -m uvicorn sms_smsc_mock.app:app --host 127.0.0.1 --port 8090 --workers 1
-```
-
-One worker only — the TPS bucket, queue, SQLite writer, and Kafka producer lifecycle are process-local. Do not add Uvicorn workers unless those components are moved to shared services.
-
-The mock's standalone default is 5,000 TPS. The Compose stack sets `SMSC_KAFKA_ENABLED=true`; standalone runs leave Kafka disabled unless `SMSC_KAFKA_ENABLED=true` is set.
-
-## Send one message
-
-```powershell
-curl -X POST http://127.0.0.1:8090/api/send `
-  -H "Content-Type: application/json" `
-  -d '{"campaign_id":13,"sender_id":"SMSINFO","receiver":"+251911000001","message_content":"Hello from the SMSC test service","callback_url":"http://127.0.0.1:9000/dlr"}'
-```
-
-Response:
+`POST /onion/swift/duos` requires HTTP Basic authentication and `Content-Type: application/json`.
 
 ```json
 {
-  "success": true,
-  "status": "ACCEPTED",
-  "provider_message_id": "smsc_<id>",
-  "message_id": "msg_<id>",
-  "segment_count": 1
+  "shortMessage": "Hello Alice, our offer is live!",
+  "messageType": "TEXT",
+  "destAddr": [
+    { "id": "251799120001" },
+    { "id": "251799120002" }
+  ],
+  "sourceAddr": { "name": "SMSINFO" },
+  "servicetag": { "name": "camp-5" },
+  "servicetype": { "name": "normal" }
 }
 ```
 
-If you're over the TPS limit:
+`shortMessage` and `sourceAddr.name` are required. `messageType` is `TEXT` or `BIN`, defaulting to `TEXT`. `destAddr` contains 1–10,000 objects; every `id` must contain 7–20 digits without a plus sign. `servicetag` and `servicetype` are optional objects with a `name` value. Unicode message text is accepted.
+
+Success returns HTTP 200 and an array in request order:
 
 ```json
-{"detail": "ESME_RTHROTTLED: submit throughput exceeded, retry shortly"}
+[
+  { "messageId": "11779274578648910", "msisdn": "251799120001", "status": "submitted" },
+  { "messageId": "11779274578648911", "msisdn": "251799120002", "status": "submitted" }
+]
 ```
-with HTTP `429`.
 
-## Delivery report (DLR)
+Message IDs are numeric strings composed of the current millisecond timestamp and a six-digit random suffix. Invalid JSON or request fields return 400. Missing, malformed, or incorrect Basic credentials return 401. A depleted global token bucket returns 503 with `{"error":"Service Unavailable","message":"Rate limit exceeded. Retry shortly."}`.
 
-POSTed to `callback_url` once the simulated transit delay elapses:
+Set both `SMSC_MOCK_USERNAME` and `SMSC_MOCK_PASSWORD` to enforce exact credentials. If either is empty, any syntactically valid Basic header with non-empty credentials is accepted. Bearer authentication is not supported.
+
+## Delivery Receipts
+
+After a random delay, each destination independently receives a weighted outcome: `DELIVRD` (0.92), `UNDELIV` (0.04), `EXPIRED` (0.02), or `REJECTD` (0.02). The mock POSTs this JSON to the fixed `SMSC_MOCK_DLR_CALLBACK_URL`:
 
 ```json
 {
-  "message_id": "msg_<id>",
-  "provider_message_id": "smsc_<id>",
-  "campaign_id": 13,
-  "receiver": "+251911000001",
-  "status": "UNDELIV",
-  "err_code": "008",
-  "error_reason": "Absent Subscriber",
-  "segment_count": 1,
-  "delivered_at": "2026-09-16T10:15:32.123456+00:00",
-  "dlr_text": "id:msg_<id> sub:001 dlvrd:000 submit date:2609161015 done date:2609161018 stat:UNDELIV err:008 text:Hello from the SMSC "
+  "event": "Delivery receipt received",
+  "msisdn": "251799120001",
+  "messageId": "11779274578648910",
+  "status": "DELIVRD",
+  "doneDate": "260928080404"
 }
 ```
 
-Your callback endpoint should return any 2xx status; non-2xx or timeouts (`SMSC_DLR_TIMEOUT_SECONDS`) trigger a retry, up to `SMSC_DLR_MAX_ATTEMPTS`.
+`doneDate` is a UTC `YYMMDDhhmmss` timestamp. Only HTTP 200 is considered successful. Other responses and network errors are retried up to `SMSC_MOCK_DLR_RETRIES` times, waiting `SMSC_MOCK_DLR_RETRY_BACKOFF × attempt_number` seconds between attempts. Exhausted failures are logged and recorded.
 
-## Check message status directly
+## Inspect State
 
-```powershell
-curl http://127.0.0.1:8090/api/messages/msg_<id>
-```
+`GET /api/messages/{messageId}` returns 404 for unknown IDs, or the stored message and DLR state. `GET /health` returns service status, write queue depth, accepted and delivered totals, pending DLR tasks, available TPS tokens, and the configured callback URL.
 
-Same fields as the DLR payload, plus `received_at`, `dlr_sent`, `dlr_attempts`, `dlr_last_error`.
+## Storage and Throughput
 
-## Config (environment variables)
+SQLite stores message rows in `/data/smsc_mock.sqlite3` in Compose, using WAL mode and `synchronous=NORMAL`. A bounded asyncio queue batches writes; defaults are 50,000 queued records, 1,000 rows per write batch, and a 0.01-second flush interval. A file-locked token bucket state is shared between Uvicorn workers so the 5,000 TPS limit and 5,000-message burst capacity are global across workers.
+
+## Environment
 
 | Variable | Default | Purpose |
-|---|---|---|
+|---|---:|---|
 | `SMSC_MOCK_DATABASE` | `sms_smsc_mock/smsc_mock.sqlite3` | SQLite file path |
-| `SMSC_QUEUE_MAX_SIZE` | `50000` | Bounded write queue; full queue returns `503` |
-| `SMSC_BATCH_SIZE` | `1000` | Max rows per SQLite write batch |
-| `SMSC_FLUSH_INTERVAL_SECONDS` | `0.01` | How often the writer flushes |
-| `SMSC_MIN_DELIVERY_DELAY_SECONDS` | `1.0` | Fastest simulated transit time |
-| `SMSC_MAX_DELIVERY_DELAY_SECONDS` | `5.0` | Slowest simulated transit time |
-| `SMSC_DELIVRD_WEIGHT` | `0.92` | Relative weight for a delivered outcome |
-| `SMSC_UNDELIV_WEIGHT` | `0.04` | Relative weight for undelivered |
-| `SMSC_EXPIRED_WEIGHT` | `0.02` | Relative weight for expired |
-| `SMSC_REJECTD_WEIGHT` | `0.02` | Relative weight for rejected |
-| `SMSC_MAX_TPS` | `5000` | Sustained submit rate before `429 ESME_RTHROTTLED` |
-| `SMSC_TPS_BURST_CAPACITY` | same as `SMSC_MAX_TPS` | Token-bucket burst size above the sustained rate |
-| `SMSC_KAFKA_ENABLED` | `false` | Publish send and delivery events to Kafka |
-| `KAFKA_BOOTSTRAP` | `localhost:9092` | Kafka bootstrap address |
-| `KAFKA_SEND_RESPONSE_TOPIC` | `smsc-send-response` | Accepted-send event topic |
-| `KAFKA_DELIVERY_TOPIC` | `smsc-delivery-report` | Final delivery event topic |
-| `SMSC_DLR_TIMEOUT_SECONDS` | `5.0` | Timeout per webhook POST attempt |
-| `SMSC_DLR_MAX_ATTEMPTS` | `3` | Retries on webhook failure |
-| `SMSC_DLR_RETRY_BACKOFF_SECONDS` | `2.0` | Backoff multiplier between retries |
+| `SMSC_MOCK_DLR_CALLBACK_URL` | empty | Fixed DLR destination; configure for a running receiver |
+| `SMSC_MOCK_USERNAME` | empty | Basic-auth username |
+| `SMSC_MOCK_PASSWORD` | empty | Basic-auth password |
+| `SMSC_MOCK_MAX_TPS` | `5000` | Global token refill rate per second |
+| `SMSC_MOCK_TPS_BURST` | `5000` | Global token capacity |
+| `SMSC_MOCK_MIN_DELAY_SECONDS` | `1.0` | Minimum DLR delay |
+| `SMSC_MOCK_MAX_DELAY_SECONDS` | `5.0` | Maximum DLR delay |
+| `SMSC_MOCK_DELIVRD_WEIGHT` | `0.92` | `DELIVRD` outcome weight |
+| `SMSC_MOCK_UNDELIV_WEIGHT` | `0.04` | `UNDELIV` outcome weight |
+| `SMSC_MOCK_EXPIRED_WEIGHT` | `0.02` | `EXPIRED` outcome weight |
+| `SMSC_MOCK_REJECTD_WEIGHT` | `0.02` | `REJECTD` outcome weight |
+| `SMSC_MOCK_DLR_RETRIES` | `3` | Callback attempts |
+| `SMSC_MOCK_DLR_RETRY_BACKOFF` | `2.0` | Retry backoff multiplier in seconds |
+| `SMSC_MOCK_QUEUE_MAX` | `50000` | Bounded write queue size |
+| `SMSC_MOCK_BATCH_SIZE` | `1000` | Maximum records per SQLite transaction |
+| `SMSC_MOCK_FLUSH_INTERVAL` | `0.01` | Partial-batch flush interval in seconds |
+| `SMSC_MOCK_LOG_LEVEL` | `INFO` | Logging level |
 
-To make everything always succeed (like before), set:
-```powershell
-$env:SMSC_DELIVRD_WEIGHT="1"; $env:SMSC_UNDELIV_WEIGHT="0"; $env:SMSC_EXPIRED_WEIGHT="0"; $env:SMSC_REJECTD_WEIGHT="0"
-```
-
-`message_id` is optional and generated when omitted. The legacy field name `recipient` is still accepted as an alias for `receiver`.
+Configure the sender's SMSC entry with `base_url=http://mock-smsc:8090`, `send_endpoint=/onion/swift/duos`, `auth_type=basic`, and the same username and password. The callback service must be reachable at the configured callback URL; Compose defaults it to `http://dlr-receiver:8003/api/v1/delivery-reports/callback/`.

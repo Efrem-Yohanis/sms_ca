@@ -3,6 +3,7 @@
 import logging
 import os
 import uuid
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
@@ -33,6 +34,8 @@ from .models import (
 	DeliveryRecord,
 	EmailConfig,
 	EmailReport,
+	GlobalTPSConfig,
+	NAddressesConfig,
 	ReportSubscription,
 	ReportDeliveryLog,
 	CampaignProgressReport,
@@ -76,6 +79,8 @@ from .serializers import (
 	DeliveryRecordUpdateSerializer,
 	EmailConfigSerializer,
 	EmailConfigCreateUpdateSerializer,
+	GlobalTPSConfigSerializer,
+	NAddressesConfigSerializer,
 	EmailConfigTestParamsSerializer,
 	EmailReportSerializer,
 	CampaignEmailReportCreateSerializer,
@@ -108,7 +113,11 @@ from .services.audience_service import AudienceService, AudienceBuildService
 from .services.sent_tracker_service import SentTrackerService
 from .services.message_builder import MessageBuilder
 from .services.campaign_progress_reports import build_campaigns_report_content
-from .services.email_reports import send_campaign_report
+from .services.email_reports import (
+	next_subscription_run_at,
+	send_campaign_report,
+	send_subscription_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +473,13 @@ class SenderIDListCreateView(ListCreateAPIView):
 	queryset = SenderID.objects.all()
 	serializer_class = SenderIDSerializer
 
+	def get_queryset(self):
+		queryset = super().get_queryset()
+		active = self.request.query_params.get('is_active')
+		if active is not None and active.lower() in {'true', 'false'}:
+			queryset = queryset.filter(is_active=(active.lower() == 'true'))
+		return queryset
+
 	@extend_schema(tags=['Sender IDs'], summary='List sender IDs', responses={200: SenderIDSerializer(many=True)})
 	def get(self, request, *args, **kwargs):
 		return super().get(request, *args, **kwargs)
@@ -492,6 +508,78 @@ class SenderIDDetailView(RetrieveUpdateDestroyAPIView):
 	@extend_schema(tags=['Sender IDs'], summary='Delete sender ID', responses={200: OpenApiResponse(description='Deleted.')})
 	def delete(self, request, *args, **kwargs):
 		return super().delete(request, *args, **kwargs)
+
+
+class GlobalTPSConfigListCreateView(ListCreateAPIView):
+	queryset = GlobalTPSConfig.objects.all()
+	serializer_class = GlobalTPSConfigSerializer
+
+	def perform_create(self, serializer):
+		user = self.request.user
+		serializer.save(created_by=user if user.is_authenticated else None)
+
+	@extend_schema(tags=['Global TPS Config'], summary='List global TPS configurations', responses={200: GlobalTPSConfigSerializer(many=True)})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['Global TPS Config'], summary='Create global TPS configuration', request=GlobalTPSConfigSerializer, responses={201: GlobalTPSConfigSerializer})
+	def post(self, request, *args, **kwargs):
+		return super().post(request, *args, **kwargs)
+
+
+class GlobalTPSConfigDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = GlobalTPSConfig.objects.all()
+	serializer_class = GlobalTPSConfigSerializer
+
+
+class GlobalTPSConfigActiveView(APIView):
+	@extend_schema(tags=['Global TPS Config'], summary='Get active global TPS configuration')
+	def get(self, request):
+		config = GlobalTPSConfig.get_active()
+		if config is None:
+			return Response({'success': False, 'detail': 'No active global TPS config.'}, status=status.HTTP_404_NOT_FOUND)
+		return Response({'success': True, 'data': {
+			'id': config.id,
+			'name': config.name,
+			'global_tps': config.global_tps,
+			'updated_at': config.updated_at,
+		}})
+
+
+class NAddressesConfigListCreateView(ListCreateAPIView):
+	queryset = NAddressesConfig.objects.all()
+	serializer_class = NAddressesConfigSerializer
+
+	def perform_create(self, serializer):
+		user = self.request.user
+		serializer.save(created_by=user if user.is_authenticated else None)
+
+	@extend_schema(tags=['N-Addresses Config'], summary='List N-addresses configurations', responses={200: NAddressesConfigSerializer(many=True)})
+	def get(self, request, *args, **kwargs):
+		return super().get(request, *args, **kwargs)
+
+	@extend_schema(tags=['N-Addresses Config'], summary='Create N-addresses configuration', request=NAddressesConfigSerializer, responses={201: NAddressesConfigSerializer})
+	def post(self, request, *args, **kwargs):
+		return super().post(request, *args, **kwargs)
+
+
+class NAddressesConfigDetailView(RetrieveUpdateDestroyAPIView):
+	queryset = NAddressesConfig.objects.all()
+	serializer_class = NAddressesConfigSerializer
+
+
+class NAddressesConfigActiveView(APIView):
+	@extend_schema(tags=['N-Addresses Config'], summary='Get active N-addresses configuration')
+	def get(self, request):
+		config = NAddressesConfig.get_active()
+		if config is None:
+			return Response({'success': False, 'detail': 'No active N-addresses config.'}, status=status.HTTP_404_NOT_FOUND)
+		return Response({'success': True, 'data': {
+			'id': config.id,
+			'name': config.name,
+			'max_addresses_per_request': config.max_addresses_per_request,
+			'updated_at': config.updated_at,
+		}})
 
 
 class SMSCConfigListCreateView(ListCreateAPIView):
@@ -722,29 +810,171 @@ class CampaignEmailReportHistoryView(APIView):
 		return paginator.get_paginated_response(ReportDeliveryLogSerializer(page, many=True).data)
 
 
-class ReportSubscriptionListCreateView(ListCreateAPIView):
-	queryset = ReportSubscription.objects.select_related('campaign').all()
-	serializer_class = ReportSubscriptionSerializer
+class ReportSubscriptionListCreateView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='List report subscriptions')
+	def get(self, request):
+		queryset = ReportSubscription.objects.select_related('email_config').prefetch_related('campaigns').all()
+		active_filter = request.query_params.get('is_active')
+		if active_filter is not None:
+			if active_filter.lower() not in {'true', 'false'}:
+				return Response({'success': False, 'errors': {'is_active': ['Use true or false.']}}, status=status.HTTP_400_BAD_REQUEST)
+			queryset = queryset.filter(is_active=(active_filter.lower() == 'true'))
+		if frequency := request.query_params.get('frequency'):
+			queryset = queryset.filter(frequency=frequency)
+		try:
+			limit = min(max(int(request.query_params.get('limit', 20)), 1), 100)
+			offset = max(int(request.query_params.get('offset', 0)), 0)
+		except (TypeError, ValueError):
+			return Response({'success': False, 'errors': {'pagination': ['limit and offset must be integers.']}}, status=status.HTTP_400_BAD_REQUEST)
+		count = queryset.count()
+		rows = queryset.order_by('-created_at', '-id')[offset:offset + limit]
+		return Response({
+			'success': True,
+			'count': count,
+			'results': ReportSubscriptionSerializer(rows, many=True).data,
+		})
 
-	@extend_schema(tags=['Email Reports'], summary='List report subscriptions', responses={200: ReportSubscriptionSerializer(many=True)})
-	def get(self, request, *args, **kwargs):
-		return super().get(request, *args, **kwargs)
-
-	@extend_schema(tags=['Email Reports'], summary='Create a report subscription', request=ReportSubscriptionSerializer, responses={201: ReportSubscriptionSerializer})
-	def post(self, request, *args, **kwargs):
-		serializer = self.get_serializer(data=request.data)
+	@extend_schema(tags=['Email Reports'], summary='Create a report subscription', request=ReportSubscriptionSerializer)
+	def post(self, request):
+		serializer = ReportSubscriptionSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		user = getattr(request, 'user', None)
 		instance = serializer.save(created_by=user if getattr(user, 'is_authenticated', False) else None)
-		if instance.frequency in {'daily', 'weekly', 'monthly'} and instance.next_run_at is None:
-			instance.next_run_at = timezone.now()
-			instance.save(update_fields=['next_run_at', 'updated_at'])
-		return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED)
+		instance.next_run_at = next_subscription_run_at(instance.frequency, timezone.now())
+		instance.save(update_fields=['next_run_at', 'updated_at'])
+		return Response(ReportSubscriptionSerializer(instance).data, status=status.HTTP_201_CREATED)
 
 
 class ReportSubscriptionDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = ReportSubscription.objects.select_related('campaign').all()
+	queryset = ReportSubscription.objects.select_related('campaign', 'email_config').prefetch_related('campaigns').all()
 	serializer_class = ReportSubscriptionSerializer
+
+	def update(self, request, *args, **kwargs):
+		partial = kwargs.pop('partial', False)
+		instance = self.get_object()
+		old_frequency = instance.frequency
+		serializer = self.get_serializer(instance, data=request.data, partial=partial)
+		serializer.is_valid(raise_exception=True)
+		instance = serializer.save()
+		if instance.frequency != old_frequency:
+			instance.next_run_at = next_subscription_run_at(instance.frequency, timezone.now())
+			instance.save(update_fields=['next_run_at', 'updated_at'])
+		return Response(self.get_serializer(instance).data)
+
+
+class ReportSubscriptionDueNowView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='List due scheduled report subscriptions')
+	def get(self, request):
+		now = timezone.now()
+		subscriptions = ReportSubscription.objects.filter(
+			is_active=True,
+			frequency__in=['10min', '1hr', '1day'],
+			next_run_at__isnull=False,
+			next_run_at__lte=now,
+		).order_by('next_run_at', 'id')
+		data = [{
+			'id': subscription.id,
+			'name': subscription.name,
+			'frequency': subscription.frequency,
+			'next_run_at': subscription.next_run_at.isoformat(),
+		} for subscription in subscriptions]
+		return Response({'success': True, 'data': data})
+
+
+class ReportSubscriptionSendNowView(APIView):
+	@extend_schema(tags=['Email Reports'], summary='Render and send a report subscription now')
+	def post(self, request, pk):
+		with transaction.atomic():
+			subscription = ReportSubscription.objects.select_for_update().select_related('email_config').prefetch_related('campaigns').filter(pk=pk).first()
+			if subscription is None:
+				return Response({'success': False, 'error': 'Subscription not found.'}, status=status.HTTP_404_NOT_FOUND)
+			if not subscription.is_active:
+				return Response({'success': False, 'error': 'Subscription is inactive.'}, status=status.HTTP_400_BAD_REQUEST)
+
+			now = timezone.now()
+			scheduled_value = request.data.get('scheduled', False)
+			scheduled_send = scheduled_value is True or str(scheduled_value).strip().lower() in {'true', '1', 'yes'}
+			scheduled_slot = subscription.next_run_at
+
+			campaigns_by_id = {
+				campaign.id: campaign
+				for campaign in subscription.campaigns.filter(
+					is_deleted=False,
+					status__in=['active', 'in_progress', 'paused'],
+				).order_by('id')
+			}
+			if subscription.campaign_id and not subscription.campaign.is_deleted:
+				campaigns_by_id[subscription.campaign_id] = subscription.campaign
+			campaigns = [campaigns_by_id[campaign_id] for campaign_id in sorted(campaigns_by_id)]
+			if not campaigns:
+				return Response({'success': False, 'error': 'Subscription has no campaigns.'}, status=status.HTTP_400_BAD_REQUEST)
+
+			recipients = {
+				email.strip().lower()
+				for email in (subscription.recipients or [])
+				if isinstance(email, str) and email.strip()
+			}
+			if subscription.include_campaign_owners:
+				for campaign in campaigns:
+					recipients.update(
+						email.strip().lower()
+						for email in (campaign.owner_emails or [])
+						if isinstance(email, str) and email.strip()
+					)
+			recipients = sorted(recipients)
+			if not recipients:
+				return Response({'success': False, 'error': 'Subscription has no recipients.'}, status=status.HTTP_400_BAD_REQUEST)
+
+			if scheduled_send and subscription.next_run_at and subscription.next_run_at > now:
+				previous = subscription.delivery_logs.filter(
+					status='sent',
+					sent_at__gte=now - timedelta(minutes=5),
+				).order_by('-sent_at').first()
+				if previous:
+					return Response({
+						'success': True,
+						'log_id': previous.id,
+						'recipients_count': len(recipients),
+						'sent_at': previous.sent_at.isoformat() if previous.sent_at else None,
+					})
+
+			previous_successes = []
+			recipients_to_send = recipients
+			if scheduled_send and scheduled_slot:
+				previous_successes = list(subscription.delivery_logs.filter(
+					status='sent',
+					sent_at__gte=scheduled_slot,
+				).order_by('sent_at'))
+			already_sent = {
+				recipient
+				for delivery in previous_successes
+				for recipient in (delivery.recipients or [])
+			}
+			recipients_to_send = [recipient for recipient in recipients if recipient not in already_sent]
+			logs = send_subscription_report(subscription, campaigns, recipients_to_send) if recipients_to_send else []
+			failed_logs = [delivery for delivery in logs if delivery.status != 'sent']
+			if failed_logs:
+				return Response({
+					'success': False,
+					'log_id': failed_logs[0].id,
+					'recipients_count': len(recipients),
+					'error': '; '.join(delivery.error_message for delivery in failed_logs),
+				})
+
+			success_logs = previous_successes + [delivery for delivery in logs if delivery.status == 'sent']
+			sent_at = max((delivery.sent_at for delivery in success_logs if delivery.sent_at), default=now)
+			subscription.last_sent_at = sent_at
+			update_fields = ['last_sent_at', 'updated_at']
+			if scheduled_send and subscription.frequency != 'manual':
+				subscription.next_run_at = next_subscription_run_at(subscription.frequency, now)
+				update_fields.append('next_run_at')
+			subscription.save(update_fields=update_fields)
+			return Response({
+				'success': True,
+				'log_id': logs[0].id if logs else (previous_successes[0].id if previous_successes else None),
+				'recipients_count': len(recipients),
+				'sent_at': sent_at.isoformat(),
+			})
 
 
 class ReportDeliveryLogDetailView(APIView):
@@ -1135,16 +1365,23 @@ class AudienceBuildView(APIView):
 				).exists():
 					logger.warning('Audience build already active config_id=%s campaign_id=%s', config.pk, config.campaign_id)
 					return Response({'success': False, 'detail': 'A build is already running.'}, status=status.HTTP_409_CONFLICT)
-				job = AudienceBuildJob.objects.create(audience_config=config, round_number=target_round)
+				build_id = uuid.uuid4().hex
+				job = AudienceBuildJob.objects.create(
+					audience_config=config,
+					round_number=target_round,
+					result={'build_id': build_id},
+				)
 				config.last_rebuild_status = 'running'
 				config.last_rebuild_phase = 'starting'
+				config.round_number = target_round
+				config.last_build_id = build_id
 				config.last_rebuild_processed = 0
 				config.last_rebuild_total = 0
 				config.last_rebuild_percent = 0
 				config.last_rebuild_started_at = timezone.now()
 				config.last_rebuild_error = ''
 				config.save(update_fields=[
-					'last_rebuild_status', 'last_rebuild_phase', 'last_rebuild_processed',
+					'last_rebuild_status', 'last_rebuild_phase', 'round_number', 'last_build_id', 'last_rebuild_processed',
 					'last_rebuild_total', 'last_rebuild_percent', 'last_rebuild_started_at',
 					'last_rebuild_error', 'updated_at',
 				])
@@ -1156,16 +1393,24 @@ class AudienceBuildView(APIView):
 			'Audience build queued job_id=%s config_id=%s campaign_id=%s round=%s',
 			job.pk, config.pk, config.campaign_id, target_round,
 		)
-		return Response({'success': True, 'message': 'Build queued.', 'config_id': config.id, 'job_id': job.id, 'round_number': target_round}, status=status.HTTP_202_ACCEPTED)
+		return Response({
+			'success': True,
+			'message': 'Build queued.',
+			'config_id': config.id,
+			'job_id': job.id,
+			'target_round': target_round,
+			'round_number': target_round,
+		}, status=status.HTTP_202_ACCEPTED)
 
 
 class AudienceConfigProgressView(APIView):
 	@extend_schema(tags=['Audience Management'], summary='Get audience build progress', responses={200: OpenApiResponse(description='Progress snapshot.')})
 	def get(self, request, pk):
 		config = get_object_or_404(AudienceConfig, id=pk)
+		active_job = config.build_jobs.filter(status__in=['PENDING', 'RUNNING']).order_by('-created_at').first()
 		return Response({'success': True, 'data': {
 			'config_id': config.id,
-			'round_number': config.round_number,
+			'round_number': active_job.round_number if active_job else config.round_number,
 			'build_id': config.last_build_id,
 			'status': config.last_rebuild_status,
 			'phase': config.last_rebuild_phase,
@@ -1321,10 +1566,23 @@ class CampaignActivateView(APIView):
 	@extend_schema(tags=['Campaign Actions'], summary='Activate campaign', request=None, responses={200: OpenApiResponse(description='Activation result.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status in {'active', 'in_progress'}:
+			return Response({
+				'success': True,
+				'message': 'Campaign is already active.',
+				'data': {
+					'campaign_id': campaign.id,
+					'status': campaign.status,
+					'messages_built': 0,
+				},
+			})
 		build = request.data.get('build_messages', True)
 		if isinstance(build, str):
 			build = build.lower() not in ('false', '0', 'no')
 		result = CampaignActionsService(campaign).activate_campaign(bool(build))
+		if result['success'] and getattr(request.user, 'is_authenticated', False):
+			campaign.activated_by = request.user
+			campaign.save(update_fields=['activated_by', 'updated_at'])
 		return Response(result, status=status.HTTP_200_OK if result['success'] else status.HTTP_400_BAD_REQUEST)
 
 
@@ -1684,6 +1942,13 @@ class CustomerProfilePreviewView(APIView):
 class ChannelListCreateView(ListCreateAPIView):
 	queryset = Channel.objects.all()
 	serializer_class = ChannelSerializer
+
+	def get_queryset(self):
+		queryset = super().get_queryset()
+		active = self.request.query_params.get('is_active')
+		if active is not None and active.lower() in {'true', 'false'}:
+			queryset = queryset.filter(is_active=(active.lower() == 'true'))
+		return queryset
 
 
 @extend_schema_view(
@@ -2238,6 +2503,127 @@ class ScheduleDetailView(APIView):
 		return Response({'success': True, 'message': 'Schedule deleted successfully.'})
 
 
+def _schedule_window_is_open(schedule, now=None):
+	from datetime import time as time_value
+	from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+	now = now or timezone.now()
+	try:
+		local_now = timezone.localtime(now, ZoneInfo(schedule.timezone))
+	except (ZoneInfoNotFoundError, ValueError):
+		logger.exception('Invalid schedule timezone schedule_id=%s timezone=%s', schedule.pk, schedule.timezone)
+		return False, None
+
+	local_date = local_now.date()
+	if not schedule.is_active or schedule.schedule_status != 'active':
+		return False, local_date
+	if local_date < schedule.start_date or (schedule.end_date and local_date > schedule.end_date):
+		return False, local_date
+	if schedule.schedule_type == 'once' and local_date != schedule.start_date:
+		return False, local_date
+	if schedule.schedule_type == 'weekly' and local_date.weekday() not in (schedule.run_days or []):
+		return False, local_date
+	if schedule.schedule_type == 'monthly' and local_date.day != schedule.start_date.day:
+		return False, local_date
+
+	for window in schedule.time_windows or []:
+		try:
+			start = time_value.fromisoformat(window['start'])
+			end = time_value.fromisoformat(window['end'])
+		except (KeyError, TypeError, ValueError):
+			logger.warning('Invalid time window schedule_id=%s window=%r', schedule.pk, window)
+			continue
+		if start <= local_now.time().replace(tzinfo=None) < end:
+			return True, local_date
+	return False, local_date
+
+
+def _scheduler_round_number(schedule, campaign, audience_config, should_run, local_date):
+	from zoneinfo import ZoneInfo
+
+	latest_message_build = MessageBuildJob.objects.filter(campaign=campaign).order_by('-created_at').first()
+	latest_message = MessageObject.objects.filter(campaign=campaign).aggregate(
+		latest_round=Max('round_number'),
+		latest_built_at=Max('built_at'),
+	)
+	round_candidates = [schedule.current_round, latest_message['latest_round'] or 0]
+	if latest_message_build:
+		round_candidates.append(latest_message_build.round_number)
+	if audience_config:
+		round_candidates.append(audience_config.last_rebuild_round)
+	current_round = max(round_candidates)
+	if current_round < 1:
+		return 1
+	if not should_run:
+		return current_round
+
+	latest_build = MessageBuildJob.objects.filter(
+		campaign=campaign,
+		round_number=current_round,
+	).order_by('-created_at').first()
+	build_at = latest_build.created_at if latest_build else None
+	if latest_message['latest_round'] == current_round:
+		build_at = max(filter(None, (build_at, latest_message['latest_built_at'])), default=None)
+	if audience_config and audience_config.last_rebuild_round == current_round:
+		build_at = max(filter(None, (build_at, audience_config.last_rebuild_completed_at)), default=None)
+	if build_at and timezone.localtime(build_at, timezone=ZoneInfo(schedule.timezone)).date() == local_date:
+		return current_round
+	return current_round + 1
+
+
+class ScheduleDueNowView(APIView):
+	@extend_schema(tags=['Schedule Management'], summary='List campaign schedules due now')
+	def get(self, request):
+		rows = []
+		schedules = Schedule.objects.filter(
+			is_active=True,
+			campaign__is_deleted=False,
+	).select_related('campaign', 'campaign__audience_config').order_by('campaign_id')
+		for schedule in schedules:
+			campaign = schedule.campaign
+			should_run, local_date = _schedule_window_is_open(schedule)
+			try:
+				audience_config = campaign.audience_config
+			except AudienceConfig.DoesNotExist:
+				audience_config = None
+			round_number = _scheduler_round_number(
+				schedule, campaign, audience_config, should_run, local_date,
+			)
+			active_build = audience_config and AudienceBuildJob.objects.filter(
+				audience_config=audience_config,
+				status__in=['PENDING', 'RUNNING'],
+			).exists()
+			audience_exists = AudienceMember.objects.filter(
+				campaign=campaign,
+				round_number=round_number,
+				is_valid=True,
+			).exists()
+			batch_id = f'campaign-{campaign.id}-round-{round_number}'
+			reusable_audience_exists = audience_exists or AudienceMember.objects.filter(
+				campaign=campaign,
+				round_number__lt=round_number,
+				is_valid=True,
+			).exists()
+			rows.append({
+				'campaign_id': campaign.id,
+				'round_number': round_number,
+				'should_run': should_run,
+				'is_ready': campaign.is_ready_to_execute,
+				'audience_needs_rebuild': bool(
+					audience_config
+					and audience_config.rebuild_on_each_round
+					and audience_config.last_rebuild_round < round_number
+					and not active_build
+				),
+				'messages_need_build': bool(
+					reusable_audience_exists
+					and not MessageObject.objects.filter(campaign=campaign, batch_id=batch_id).exists()
+				),
+				'audience_config_id': audience_config.id if audience_config else None,
+			})
+		return Response({'success': True, 'data': rows})
+
+
 class ScheduleCollectionView(APIView):
 	@extend_schema(tags=['Schedule Management'], summary='List schedules')
 	def get(self, request):
@@ -2356,10 +2742,22 @@ class CampaignBuildMessagesView(APIView):
 	@extend_schema(tags=['Campaign Messages'], summary='Build MessageObject rows for a campaign', responses={201: OpenApiResponse(description='Build result.')})
 	def post(self, request, pk):
 		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
-		round_number = int(request.data.get('round_number', 1))
-		batch_id = request.data.get('batch_id')
+		try:
+			round_number = int(request.data.get('round_number', 1))
+		except (TypeError, ValueError):
+			return Response({'success': False, 'message': 'round_number must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+		if round_number < 1:
+			return Response({'success': False, 'message': 'round_number must be at least 1.'}, status=status.HTTP_400_BAD_REQUEST)
+		batch_id = request.data.get('batch_id') or f'campaign-{campaign.id}-round-{round_number}'
+		if not isinstance(batch_id, str) or len(batch_id) > 50:
+			return Response({'success': False, 'message': 'batch_id must be a string of at most 50 characters.'}, status=status.HTTP_400_BAD_REQUEST)
 		try:
 			result = MessageBuilder(campaign=campaign, round_number=round_number, batch_id=batch_id).build()
+			result['is_ready_to_execute'] = (
+				campaign.refresh_readiness_flag()
+				if campaign.status == 'draft'
+				else campaign.is_ready_to_execute
+			)
 		except ValueError as exc:
 			return Response({'success': False, 'message': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 		except Exception as exc:

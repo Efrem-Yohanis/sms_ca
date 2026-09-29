@@ -1,18 +1,23 @@
 import asyncio
+import base64
+import binascii
+import hmac
 import json
 import logging
 import os
 import random
 import sqlite3
 import time
-import uuid
+from contextlib import contextmanager
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from pydantic import AliasChoices, AnyHttpUrl, BaseModel, Field
+from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger('smsc_mock')
 
@@ -20,78 +25,45 @@ DATABASE_PATH = os.getenv(
     'SMSC_MOCK_DATABASE',
     os.path.join(os.path.dirname(__file__), 'smsc_mock.sqlite3'),
 )
-QUEUE_MAX_SIZE = int(os.getenv('SMSC_QUEUE_MAX_SIZE', '50000'))
-BATCH_SIZE = int(os.getenv('SMSC_BATCH_SIZE', '1000'))
-FLUSH_INTERVAL_SECONDS = float(os.getenv('SMSC_FLUSH_INTERVAL_SECONDS', '0.01'))
+QUEUE_MAX_SIZE = int(os.getenv('SMSC_MOCK_QUEUE_MAX', '50000'))
+BATCH_SIZE = int(os.getenv('SMSC_MOCK_BATCH_SIZE', '1000'))
+FLUSH_INTERVAL_SECONDS = float(os.getenv('SMSC_MOCK_FLUSH_INTERVAL', '0.01'))
 
-# --- Delivery simulation -----------------------------------------------
-# Real SMSCs don't deliver instantly or uniformly: transit time varies, and
-# a slice of traffic always ends up UNDELIV/EXPIRED/REJECTD rather than
-# DELIVRD. These settings let you tune how "real" the mock behaves.
-MIN_DELIVERY_DELAY_SECONDS = float(os.getenv('SMSC_MIN_DELIVERY_DELAY_SECONDS', '1.0'))
-MAX_DELIVERY_DELAY_SECONDS = float(os.getenv('SMSC_MAX_DELIVERY_DELAY_SECONDS', '5.0'))
+MIN_DELAY_SECONDS = float(os.getenv('SMSC_MOCK_MIN_DELAY_SECONDS', '1.0'))
+MAX_DELAY_SECONDS = float(os.getenv('SMSC_MOCK_MAX_DELAY_SECONDS', '5.0'))
+DELIVRD_WEIGHT = float(os.getenv('SMSC_MOCK_DELIVRD_WEIGHT', '0.92'))
+UNDELIV_WEIGHT = float(os.getenv('SMSC_MOCK_UNDELIV_WEIGHT', '0.04'))
+EXPIRED_WEIGHT = float(os.getenv('SMSC_MOCK_EXPIRED_WEIGHT', '0.02'))
+REJECTD_WEIGHT = float(os.getenv('SMSC_MOCK_REJECTD_WEIGHT', '0.02'))
+MAX_TPS = float(os.getenv('SMSC_MOCK_MAX_TPS', '5000'))
+TPS_BURST = float(os.getenv('SMSC_MOCK_TPS_BURST', '5000'))
+DLR_CALLBACK_URL = os.getenv('SMSC_MOCK_DLR_CALLBACK_URL', '').strip()
+MOCK_USERNAME = os.getenv('SMSC_MOCK_USERNAME', '')
+MOCK_PASSWORD = os.getenv('SMSC_MOCK_PASSWORD', '')
+DLR_RETRIES = int(os.getenv('SMSC_MOCK_DLR_RETRIES', '3'))
+DLR_RETRY_BACKOFF = float(os.getenv('SMSC_MOCK_DLR_RETRY_BACKOFF', '2.0'))
+LOG_LEVEL = os.getenv('SMSC_MOCK_LOG_LEVEL', 'INFO').upper()
 
-# Final-status weights. Don't need to sum to 1 — they're normalized.
-DELIVRD_WEIGHT = float(os.getenv('SMSC_DELIVRD_WEIGHT', '0.92'))
-UNDELIV_WEIGHT = float(os.getenv('SMSC_UNDELIV_WEIGHT', '0.04'))
-EXPIRED_WEIGHT = float(os.getenv('SMSC_EXPIRED_WEIGHT', '0.02'))
-REJECTD_WEIGHT = float(os.getenv('SMSC_REJECTD_WEIGHT', '0.02'))
+logging.basicConfig(level=LOG_LEVEL)
 
-# Throughput throttling, like a real SMSC enforcing a negotiated TPS
-# (transactions per second) cap on a bind/system_id.
-MAX_TPS = float(os.getenv('SMSC_MAX_TPS', '5000'))
-TPS_BURST_CAPACITY = float(os.getenv('SMSC_TPS_BURST_CAPACITY', str(MAX_TPS)))
-
-KAFKA_ENABLED = os.getenv('SMSC_KAFKA_ENABLED', 'false').lower() in {'1', 'true', 'yes'}
-KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'localhost:9092')
-KAFKA_SEND_RESPONSE_TOPIC = os.getenv('KAFKA_SEND_RESPONSE_TOPIC', 'smsc-send-response')
-KAFKA_DELIVERY_TOPIC = os.getenv('KAFKA_DELIVERY_TOPIC', 'smsc-delivery-report')
-
-# Webhook (DLR) delivery
-DLR_TIMEOUT_SECONDS = float(os.getenv('SMSC_DLR_TIMEOUT_SECONDS', '5.0'))
-DLR_MAX_ATTEMPTS = int(os.getenv('SMSC_DLR_MAX_ATTEMPTS', '3'))
-DLR_RETRY_BACKOFF_SECONDS = float(os.getenv('SMSC_DLR_RETRY_BACKOFF_SECONDS', '2.0'))
-
-FinalStatus = Literal['DELIVRD', 'UNDELIV', 'EXPIRED', 'REJECTD']
-
-# (err_code, human reason) options per final status — mirrors how a real
-# network returns a handful of distinct reasons per outcome, not just one.
-REASON_CODES: dict[FinalStatus, list[tuple[str, str]]] = {
-    'DELIVRD': [('000', 'Delivered')],
-    'UNDELIV': [
-        ('008', 'Absent Subscriber'),
-        ('006', 'Handset Memory Full'),
-        ('020', 'Network Error'),
-        ('028', 'Unknown Subscriber'),
-    ],
-    'EXPIRED': [('001', 'Validity Period Expired')],
-    'REJECTD': [
-        ('002', 'Rejected by Network'),
-        ('017', 'Destination Blocked'),
-    ],
-}
+FinalStatus = Literal['DELIVRD', 'UNDELIV', 'EXPIRED', 'REJECTD', 'UNKNOWN']
 
 
-class SmsRequest(BaseModel):
-    message_id: str | None = Field(default=None, max_length=100)
-    campaign_id: int = Field(gt=0)
-    sender_id: str = Field(min_length=1, max_length=11)
-    receiver: str = Field(
-        min_length=1,
-        max_length=20,
-        validation_alias=AliasChoices('receiver', 'recipient'),
-    )
-    message_content: str = Field(min_length=1)
-    # Where to POST the delivery report once the simulated delivery completes.
-    callback_url: AnyHttpUrl | None = Field(default=None)
+class Destination(BaseModel):
+    id: str = Field(min_length=7, max_length=20, pattern=r'^\d+$')
 
 
-class AcceptedResponse(BaseModel):
-    success: bool
-    status: str
-    provider_message_id: str
-    message_id: str
-    segment_count: int
+class NamedValue(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+
+
+class OnionSubmitRequest(BaseModel):
+    shortMessage: str = Field(min_length=1)
+    messageType: Literal['TEXT', 'BIN'] = 'TEXT'
+    destAddr: list[Destination] = Field(min_length=1, max_length=10000)
+    sourceAddr: NamedValue
+    servicetag: NamedValue | None = None
+    servicetype: NamedValue | None = None
 
 
 def now_iso() -> str:
@@ -114,10 +86,8 @@ def compute_segments(message_content: str) -> int:
     return -(-length // 67)
 
 
-def smpp_date(iso_timestamp: str) -> str:
-    """Format an ISO timestamp as an SMPP-style YYMMDDhhmm string."""
-    dt = datetime.fromisoformat(iso_timestamp)
-    return dt.strftime('%y%m%d%H%M')
+def done_date() -> str:
+    return datetime.now(timezone.utc).strftime('%y%m%d%H%M%S')
 
 
 def pick_final_status() -> FinalStatus:
@@ -127,101 +97,142 @@ def pick_final_status() -> FinalStatus:
 
 
 class TokenBucket:
-    """Simulates a real SMSC's per-account TPS (throughput) limit."""
+    """A file-locked token bucket shared by all Uvicorn worker processes."""
 
-    def __init__(self, rate: float, capacity: float):
+    def __init__(self, rate: float, capacity: float, state_path: str):
         self.rate = rate
         self.capacity = capacity
-        self.tokens = capacity
-        self.updated_at = time.monotonic()
-        self.lock = asyncio.Lock()
+        self.state_path = state_path
 
     async def try_acquire(self, amount: float = 1.0) -> bool:
-        async with self.lock:
-            now = time.monotonic()
-            elapsed = now - self.updated_at
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            self.updated_at = now
-            if self.tokens >= amount:
-                self.tokens -= amount
-                return True
-            return False
+        return await asyncio.to_thread(self._try_acquire, amount)
+
+    def _try_acquire(self, amount: float) -> bool:
+        os.makedirs(os.path.dirname(self.state_path) or '.', exist_ok=True)
+        with open(self.state_path, 'a+', encoding='utf-8') as state_file:
+            if os.name == 'nt':
+                import msvcrt
+
+                state_file.seek(0, os.SEEK_END)
+                if state_file.tell() == 0:
+                    state_file.write(' ')
+                    state_file.flush()
+                state_file.seek(0)
+                msvcrt.locking(state_file.fileno(), msvcrt.LK_LOCK, 1)
+                def unlock():
+                    state_file.seek(0)
+                    msvcrt.locking(state_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(state_file.fileno(), fcntl.LOCK_EX)
+                unlock = lambda: fcntl.flock(state_file.fileno(), fcntl.LOCK_UN)
+            try:
+                state_file.seek(0)
+                try:
+                    state = json.load(state_file)
+                    tokens = float(state['tokens'])
+                    updated_at = float(state['updated_at'])
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    tokens = self.capacity
+                    updated_at = time.time()
+
+                now = time.time()
+                tokens = min(self.capacity, tokens + max(now - updated_at, 0) * self.rate)
+                if tokens < amount:
+                    allowed = False
+                else:
+                    tokens -= amount
+                    allowed = True
+
+                state_file.seek(0)
+                state_file.truncate()
+                json.dump({'tokens': tokens, 'updated_at': now}, state_file)
+                state_file.flush()
+                return allowed
+            finally:
+                unlock()
+
+    def available(self) -> float:
+        try:
+            with open(self.state_path, encoding='utf-8') as state_file:
+                state = json.load(state_file)
+            tokens = float(state['tokens'])
+            elapsed = max(time.time() - float(state['updated_at']), 0)
+            return min(self.capacity, tokens + elapsed * self.rate)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return self.capacity
 
 
 class SmsStore:
-    """
-    Owns the single SQLite writer connection. All writes (the initial
-    ACCEPTED insert and the later final-status update) flow through one
-    asyncio.Queue and are drained sequentially by _writer(), so there is
-    never more than one writer touching the database at a time.
-    """
+    """Batches queued message inserts and DLR updates through SQLite WAL."""
 
     def __init__(self, path: str):
         self.path = path
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
         self.writer_task: asyncio.Task | None = None
         self.stop_event = asyncio.Event()
-        self.inserted = 0
-        self.updated = 0
+        self.accepted_total = 0
+        self.delivered_total = 0
         self.http_client: httpx.AsyncClient | None = None
-        self.kafka_producer: Any | None = None
-        self.kafka_publish_failures = 0
         self._delivery_tasks: set[asyncio.Task] = set()
-        self.tps_bucket = TokenBucket(rate=MAX_TPS, capacity=TPS_BURST_CAPACITY)
+        self.tps_bucket = TokenBucket(
+            rate=MAX_TPS,
+            capacity=TPS_BURST,
+            state_path=f'{path}.rate-limit',
+        )
 
     def initialize(self) -> None:
         os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
         with sqlite3.connect(self.path) as connection:
             connection.execute('PRAGMA journal_mode=WAL')
             connection.execute('PRAGMA synchronous=NORMAL')
+            connection.execute('PRAGMA busy_timeout=30000')
             connection.execute('''
-                CREATE TABLE IF NOT EXISTS accepted_messages (
+                CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id TEXT NOT NULL UNIQUE,
-                    provider_message_id TEXT NOT NULL UNIQUE,
-                    campaign_id INTEGER,
-                    sender_id TEXT NOT NULL,
-                    recipient TEXT NOT NULL,
-                    message_content TEXT NOT NULL,
-                    segment_count INTEGER NOT NULL DEFAULT 1,
-                    callback_url TEXT,
-                    status TEXT NOT NULL DEFAULT 'ACCEPTED',
-                    err_code TEXT,
-                    error_reason TEXT,
+                    msisdn TEXT NOT NULL,
+                    short_message TEXT NOT NULL,
+                    source_addr TEXT NOT NULL,
+                    servicetag TEXT,
+                    servicetype TEXT,
+                    status TEXT NOT NULL DEFAULT 'submitted',
                     received_at TEXT NOT NULL,
                     delivered_at TEXT,
+                    done_date TEXT,
+                    callback_url TEXT,
                     dlr_sent INTEGER NOT NULL DEFAULT 0,
                     dlr_attempts INTEGER NOT NULL DEFAULT 0,
                     dlr_last_error TEXT
                 )
             ''')
             connection.execute('''
-                CREATE INDEX IF NOT EXISTS accepted_messages_campaign_idx
-                ON accepted_messages (campaign_id)
+                CREATE INDEX IF NOT EXISTS messages_message_id_idx ON messages (message_id)
             ''')
+            connection.execute('''
+                CREATE INDEX IF NOT EXISTS messages_msisdn_idx ON messages (msisdn)
+            ''')
+            connection.execute('''
+                CREATE INDEX IF NOT EXISTS messages_status_idx ON messages (status)
+            ''')
+        connection.close()
 
     async def start(self) -> None:
         self.initialize()
         self.stop_event.clear()
-        self.http_client = httpx.AsyncClient(timeout=DLR_TIMEOUT_SECONDS)
-        if KAFKA_ENABLED:
-            from aiokafka import AIOKafkaProducer
-
-            self.kafka_producer = AIOKafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP,
-                acks='all',
-                linger_ms=10,
-                compression_type='gzip',
-                value_serializer=lambda value: json.dumps(value).encode('utf-8'),
-                key_serializer=lambda key: key.encode('utf-8'),
-            )
-            await self.kafka_producer.start()
+        self.http_client = httpx.AsyncClient(
+            timeout=5.0,
+            limits=httpx.Limits(max_connections=100),
+        )
         self.writer_task = asyncio.create_task(self._writer())
 
     async def stop(self) -> None:
+        for task in list(self._delivery_tasks):
+            task.cancel()
         if self._delivery_tasks:
-            await asyncio.gather(*list(self._delivery_tasks), return_exceptions=True)
-
+            await asyncio.gather(*self._delivery_tasks, return_exceptions=True)
+        await self.queue.join()
         self.stop_event.set()
         if self.writer_task:
             await self.writer_task
@@ -230,144 +241,89 @@ class SmsStore:
         if self.http_client:
             await self.http_client.aclose()
             self.http_client = None
-        if self.kafka_producer:
-            await self.kafka_producer.stop()
-            self.kafka_producer = None
 
     async def _enqueue(self, item: dict[str, Any]) -> None:
-        try:
-            self.queue.put_nowait(item)
-        except asyncio.QueueFull as exc:
-            raise RuntimeError('SMSC mock queue is full') from exc
+        await self.queue.put(item)
 
     async def accept(self, row: dict[str, Any]) -> None:
-        """Enqueue the initial ACCEPTED insert and schedule delivery simulation."""
+        """Queue one accepted destination and schedule its independent DLR."""
         await self._enqueue({'op': 'insert', **row})
-        await self._publish_event(KAFKA_SEND_RESPONSE_TOPIC, {
-            'event_type': 'SEND_RESPONSE',
-            'message_id': row['message_id'],
-            'provider_message_id': row['provider_message_id'],
-            'campaign_id': row['campaign_id'],
-            'recipient': row['recipient'],
-            'sender_id': row['sender_id'],
-            'status': 'ACCEPTED',
-            'segment_count': row['segment_count'],
-            'received_at': row['received_at'],
-        }, key=row['message_id'])
         task = asyncio.create_task(self._simulate_delivery(row))
         self._delivery_tasks.add(task)
         task.add_done_callback(self._delivery_tasks.discard)
 
     async def _simulate_delivery(self, row: dict[str, Any]) -> None:
-        # Longer messages (more segments) realistically take a little
-        # longer to fully transit the network than a single-segment SMS.
-        base_delay = random.uniform(MIN_DELIVERY_DELAY_SECONDS, MAX_DELIVERY_DELAY_SECONDS)
-        segment_jitter = (row['segment_count'] - 1) * random.uniform(0.1, 0.4)
-        await asyncio.sleep(base_delay + segment_jitter)
-
+        await asyncio.sleep(random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS))
         status = pick_final_status()
-        err_code, reason = random.choice(REASON_CODES[status])
         delivered_at = now_iso()
+        report_done_date = done_date()
 
         dlr_sent = 0
         dlr_attempts = 0
         dlr_last_error: str | None = None
 
-        callback_url = row.get('callback_url')
-        if callback_url:
+        if DLR_CALLBACK_URL:
             dlr_sent, dlr_attempts, dlr_last_error = await self._post_dlr(
-                callback_url=callback_url,
                 row=row,
                 status=status,
-                err_code=err_code,
-                reason=reason,
-                delivered_at=delivered_at,
+                report_done_date=report_done_date,
             )
+        else:
+            dlr_last_error = 'SMSC_MOCK_DLR_CALLBACK_URL is not configured'
 
-        await self._publish_event(KAFKA_DELIVERY_TOPIC, {
-            'event_type': 'DELIVERY_REPORT',
+        await self._enqueue({
+            'op': 'update',
             'message_id': row['message_id'],
-            'provider_message_id': row['provider_message_id'],
-            'campaign_id': row['campaign_id'],
-            'recipient': row['recipient'],
             'status': status,
-            'err_code': err_code,
-            'error_reason': reason,
-            'segment_count': row['segment_count'],
             'delivered_at': delivered_at,
-        }, key=row['message_id'])
-
-        try:
-            await self._enqueue({
-                'op': 'update',
-                'message_id': row['message_id'],
-                'status': status,
-                'err_code': err_code,
-                'error_reason': reason,
-                'delivered_at': delivered_at,
-                'dlr_sent': dlr_sent,
-                'dlr_attempts': dlr_attempts,
-                'dlr_last_error': dlr_last_error,
-            })
-        except RuntimeError:
-            logger.error('Queue full: could not persist final status for %s', row['message_id'])
-
-    async def _publish_event(self, topic: str, event: dict[str, Any], key: str) -> None:
-        if self.kafka_producer is None:
-            return
-        try:
-            await self.kafka_producer.send_and_wait(topic, event, key=key)
-        except Exception:
-            self.kafka_publish_failures += 1
-            logger.exception(
-                'Kafka publish failed topic=%s message_id=%s failures=%s',
-                topic, key, self.kafka_publish_failures,
-            )
+            'done_date': report_done_date,
+            'dlr_sent': dlr_sent,
+            'dlr_attempts': dlr_attempts,
+            'dlr_last_error': dlr_last_error,
+        })
+        if dlr_sent:
+            self.delivered_total += 1
 
     async def _post_dlr(
-        self, callback_url: str, row: dict[str, Any], status: FinalStatus,
-        err_code: str, reason: str, delivered_at: str,
+        self,
+        row: dict[str, Any],
+        status: FinalStatus,
+        report_done_date: str,
     ) -> tuple[int, int, str | None]:
-        dlr_text = (
-            f"id:{row['message_id']} sub:001 dlvrd:{'001' if status == 'DELIVRD' else '000'} "
-            f"submit date:{smpp_date(row['received_at'])} done date:{smpp_date(delivered_at)} "
-            f"stat:{status} err:{err_code} text:{row['message_content'][:20]}"
-        )
         payload = {
-            'message_id': row['message_id'],
-            'provider_message_id': row['provider_message_id'],
-            'campaign_id': row['campaign_id'],
-            'receiver': row['recipient'],
+            'event': 'Delivery receipt received',
+            'msisdn': row['msisdn'],
+            'messageId': row['message_id'],
             'status': status,
-            'err_code': err_code,
-            'error_reason': reason,
-            'segment_count': row['segment_count'],
-            'delivered_at': delivered_at,
-            'dlr_text': dlr_text,
+            'doneDate': report_done_date,
         }
 
         assert self.http_client is not None
         last_error: str | None = None
-        for attempt in range(1, DLR_MAX_ATTEMPTS + 1):
+        for attempt in range(1, DLR_RETRIES + 1):
             try:
-                response = await self.http_client.post(callback_url, json=payload)
-                response.raise_for_status()
+                response = await self.http_client.post(DLR_CALLBACK_URL, json=payload)
+                if response.status_code != 200:
+                    raise httpx.HTTPStatusError(
+                        f'DLR receiver returned HTTP {response.status_code}',
+                        request=response.request,
+                        response=response,
+                    )
                 return 1, attempt, None
             except httpx.HTTPError as exc:
                 last_error = str(exc)
-                logger.warning(
-                    'DLR webhook attempt %s/%s failed for %s: %s',
-                    attempt, DLR_MAX_ATTEMPTS, row['message_id'], exc,
-                )
-                if attempt < DLR_MAX_ATTEMPTS:
-                    await asyncio.sleep(DLR_RETRY_BACKOFF_SECONDS * attempt)
+                logger.warning('DLR attempt %s/%s failed for %s: %s', attempt, DLR_RETRIES, row['message_id'], exc)
+                if attempt < DLR_RETRIES:
+                    await asyncio.sleep(DLR_RETRY_BACKOFF * attempt)
 
-        return 0, DLR_MAX_ATTEMPTS, last_error
+        logger.error('DLR delivery exhausted retries for %s: %s', row['message_id'], last_error)
+        return 0, DLR_RETRIES, last_error
 
     async def _writer(self) -> None:
         connection = sqlite3.connect(self.path)
         connection.execute('PRAGMA journal_mode=WAL')
         connection.execute('PRAGMA synchronous=NORMAL')
+        connection.execute('PRAGMA busy_timeout=30000')
         try:
             while not self.stop_event.is_set() or not self.queue.empty():
                 batch = await self._next_batch()
@@ -376,44 +332,44 @@ class SmsStore:
 
                 inserts = [item for item in batch if item['op'] == 'insert']
                 updates = [item for item in batch if item['op'] == 'update']
-
-                if inserts:
-                    cursor = connection.executemany('''
-                        INSERT OR IGNORE INTO accepted_messages (
-                            message_id, provider_message_id, campaign_id,
-                            sender_id, recipient, message_content, segment_count,
-                            callback_url, status, received_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?)
-                    ''', [
-                        (
-                            row['message_id'], row['provider_message_id'],
-                            row['campaign_id'], row['sender_id'], row['recipient'],
-                            row['message_content'], row['segment_count'],
-                            row.get('callback_url'), row['received_at'],
-                        )
-                        for row in inserts
-                    ])
+                try:
+                    connection.execute('BEGIN IMMEDIATE')
+                    if inserts:
+                        cursor = connection.executemany('''
+                            INSERT OR IGNORE INTO messages (
+                                message_id, msisdn, short_message, source_addr,
+                                servicetag, servicetype, status, received_at, callback_url
+                            ) VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
+                        ''', [
+                            (
+                                row['message_id'], row['msisdn'], row['short_message'],
+                                row['source_addr'], row['servicetag'], row['servicetype'],
+                                row['received_at'], row['callback_url'],
+                            )
+                            for row in inserts
+                        ])
+                        self.accepted_total += cursor.rowcount
+                    if updates:
+                        connection.executemany('''
+                            UPDATE messages
+                            SET status = ?, delivered_at = ?, done_date = ?,
+                                dlr_sent = ?, dlr_attempts = ?, dlr_last_error = ?
+                            WHERE message_id = ?
+                        ''', [
+                            (
+                                item['status'], item['delivered_at'], item['done_date'],
+                                item['dlr_sent'], item['dlr_attempts'],
+                                item['dlr_last_error'], item['message_id'],
+                            )
+                            for item in updates
+                        ])
                     connection.commit()
-                    self.inserted += cursor.rowcount
-
-                if updates:
-                    connection.executemany('''
-                        UPDATE accepted_messages
-                        SET status = ?, err_code = ?, error_reason = ?,
-                            delivered_at = ?, dlr_sent = ?,
-                            dlr_attempts = ?, dlr_last_error = ?
-                        WHERE message_id = ?
-                    ''', [
-                        (
-                            item['status'], item['err_code'], item['error_reason'],
-                            item['delivered_at'], item['dlr_sent'],
-                            item['dlr_attempts'], item['dlr_last_error'],
-                            item['message_id'],
-                        )
-                        for item in updates
-                    ])
-                    connection.commit()
-                    self.updated += len(updates)
+                except Exception:
+                    connection.rollback()
+                    logger.exception('Failed to persist an SMSC mock write batch')
+                finally:
+                    for _ in batch:
+                        self.queue.task_done()
         finally:
             connection.close()
 
@@ -426,22 +382,43 @@ class SmsStore:
             return []
 
         batch = [first]
+        deadline = asyncio.get_running_loop().time() + FLUSH_INTERVAL_SECONDS
         while len(batch) < BATCH_SIZE:
             try:
-                batch.append(self.queue.get_nowait())
-            except asyncio.QueueEmpty:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                batch.append(await asyncio.wait_for(self.queue.get(), timeout=remaining))
+            except asyncio.TimeoutError:
                 break
         return batch
 
     def get_message(self, message_id: str) -> dict[str, Any] | None:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.execute('PRAGMA busy_timeout=30000')
         try:
             cursor = connection.execute(
-                'SELECT * FROM accepted_messages WHERE message_id = ?', (message_id,),
+                'SELECT * FROM messages WHERE message_id = ?', (message_id,),
             )
             row = cursor.fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            return {
+                'messageId': row['message_id'],
+                'msisdn': row['msisdn'],
+                'shortMessage': row['short_message'],
+                'sourceAddr': row['source_addr'],
+                'servicetag': row['servicetag'],
+                'servicetype': row['servicetype'],
+                'status': row['status'],
+                'received_at': row['received_at'],
+                'delivered_at': row['delivered_at'],
+                'done_date': row['done_date'],
+                'dlr_sent': row['dlr_sent'],
+                'dlr_attempts': row['dlr_attempts'],
+                'dlr_last_error': row['dlr_last_error'],
+            }
         finally:
             connection.close()
 
@@ -457,16 +434,73 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title='Local SMSC Mock',
-    version='2.0.0',
-    description=(
-        'Simulates a real SMPP-style SMSC: submit acceptance, TPS throttling, '
-        'randomized transit delay, realistic final delivery statuses '
-        '(DELIVRD/UNDELIV/EXPIRED/REJECTD) with SMPP-style error codes, '
-        'and webhook delivery reports (DLRs).'
-    ),
+    title='Onion SMSC Mock',
+    version='3.0.0',
+    description='Development mock for the Onion SMSC submission and DLR contract.',
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
+    if any(error.get('type') == 'json_invalid' for error in exc.errors()):
+        message = 'Invalid JSON'
+    else:
+        message = 'Invalid request body'
+    return JSONResponse(
+        status_code=400,
+        content={'error': 'Bad request', 'message': message},
+    )
+
+
+def _unauthorized() -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={'error': 'Unauthorized', 'message': 'Basic authentication required'},
+        headers={'WWW-Authenticate': 'Basic'},
+    )
+
+
+def _authorized(authorization: str | None) -> bool:
+    if not authorization:
+        return False
+    scheme, separator, token = authorization.partition(' ')
+    if not separator or scheme.lower() != 'basic' or not token.strip():
+        return False
+    try:
+        decoded = base64.b64decode(token.strip(), validate=True).decode('utf-8')
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return False
+    if ':' not in decoded:
+        return False
+    username, password = decoded.split(':', 1)
+    if not username and not password:
+        return False
+    if MOCK_USERNAME and MOCK_PASSWORD:
+        return hmac.compare_digest(username, MOCK_USERNAME) and hmac.compare_digest(password, MOCK_PASSWORD)
+    return True
+
+
+def _new_message_id() -> str:
+    return f'{int(time.time() * 1000)}{random.randint(0, 999999):06d}'
+
+
+async def _build_row(
+    payload: OnionSubmitRequest,
+    msisdn: str,
+    message_id: str,
+) -> dict[str, Any]:
+    return {
+        'message_id': message_id,
+        'msisdn': msisdn,
+        'short_message': payload.shortMessage,
+        'source_addr': payload.sourceAddr.name,
+        'servicetag': payload.servicetag.name if payload.servicetag else None,
+        'servicetype': payload.servicetype.name if payload.servicetype else None,
+        'status': 'submitted',
+        'received_at': now_iso(),
+        'callback_url': DLR_CALLBACK_URL or None,
+    }
 
 
 @app.get('/health')
@@ -475,84 +509,68 @@ async def health() -> dict[str, Any]:
         'success': True,
         'status': 'ok',
         'queue_depth': store.queue.qsize(),
-        'inserted': store.inserted,
-        'updated': store.updated,
+        'accepted_total': store.accepted_total,
+        'delivered_total': store.delivered_total,
         'pending_deliveries': len(store._delivery_tasks),
-        'tps_tokens_available': round(store.tps_bucket.tokens, 1),
-        'kafka_enabled': KAFKA_ENABLED,
-        'kafka_connected': store.kafka_producer is not None,
-        'kafka_publish_failures': store.kafka_publish_failures,
+        'tps_tokens_available': round(store.tps_bucket.available(), 1),
+        'dlr_callback_url': DLR_CALLBACK_URL,
     }
 
 
-async def _build_row(payload: SmsRequest) -> dict[str, Any]:
-    message_id = payload.message_id or f'msg_{uuid.uuid4().hex}'
-    provider_message_id = f'smsc_{uuid.uuid4().hex}'
-    return {
-        'message_id': message_id,
-        'provider_message_id': provider_message_id,
-        'campaign_id': payload.campaign_id,
-        'sender_id': payload.sender_id,
-        'recipient': payload.receiver,
-        'message_content': payload.message_content,
-        'segment_count': compute_segments(payload.message_content),
-        'callback_url': str(payload.callback_url) if payload.callback_url else None,
-        'received_at': now_iso(),
-    }
+@app.post('/onion/swift/duos', status_code=200)
+async def submit_messages(request: Request) -> Any:
+    if not _authorized(request.headers.get('authorization')):
+        return _unauthorized()
 
-
-@app.post('/api/send', response_model=AcceptedResponse, status_code=200)
-async def send_sms(payload: SmsRequest) -> AcceptedResponse:
-    if not await store.tps_bucket.try_acquire(1):
-        raise HTTPException(
-            status_code=429,
-            detail='ESME_RTHROTTLED: submit throughput exceeded, retry shortly',
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/json':
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'Bad request', 'message': 'Content-Type must be application/json'},
         )
-
-    row = await _build_row(payload)
     try:
-        await store.accept(row)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    return AcceptedResponse(
-        success=True,
-        status='ACCEPTED',
-        provider_message_id=row['provider_message_id'],
-        message_id=row['message_id'],
-        segment_count=row['segment_count'],
-    )
-
-
-@app.post('/api/send/batch', status_code=200)
-async def send_batch(payloads: list[SmsRequest]) -> dict[str, Any]:
-    if not payloads:
-        raise HTTPException(status_code=400, detail='At least one message is required')
-    if len(payloads) > BATCH_SIZE * 10:
-        raise HTTPException(status_code=413, detail='Batch is too large')
-
-    if not await store.tps_bucket.try_acquire(len(payloads)):
-        raise HTTPException(
-            status_code=429,
-            detail='ESME_RTHROTTLED: submit throughput exceeded, retry shortly',
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'Bad request', 'message': 'Invalid JSON'},
+        )
+    try:
+        payload = OnionSubmitRequest.model_validate(body)
+    except ValidationError:
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'Bad request', 'message': 'Invalid request body'},
         )
 
-    accepted = []
-    for payload in payloads:
-        row = await _build_row(payload)
+    amount = len(payload.destAddr)
+    if not await store.tps_bucket.try_acquire(amount):
+        return JSONResponse(
+            status_code=503,
+            content={
+                'error': 'Service Unavailable',
+                'message': 'Rate limit exceeded. Retry shortly.',
+            },
+        )
+
+    response = []
+    for destination in payload.destAddr:
+        message_id = _new_message_id()
+        row = await _build_row(payload, destination.id, message_id)
         await store.accept(row)
-        accepted.append({
-            'message_id': row['message_id'],
-            'provider_message_id': row['provider_message_id'],
-            'status': 'ACCEPTED',
-            'segment_count': row['segment_count'],
+        response.append({
+            'messageId': message_id,
+            'msisdn': destination.id,
+            'status': 'submitted',
         })
-    return {'success': True, 'accepted': len(accepted), 'messages': accepted}
+    return response
 
 
 @app.get('/api/messages/{message_id}')
-async def get_message(message_id: str) -> dict[str, Any]:
+async def get_message(message_id: str) -> Any:
     row = store.get_message(message_id)
     if row is None:
-        raise HTTPException(status_code=404, detail='Unknown message_id')
-    return {'success': True, 'message': row}
+        return JSONResponse(
+            status_code=404,
+            content={'error': 'Not Found', 'message': 'Unknown messageId'},
+        )
+    return row
