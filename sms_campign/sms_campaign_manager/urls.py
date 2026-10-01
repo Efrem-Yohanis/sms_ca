@@ -11,6 +11,7 @@ from .views import (
 	CampaignDetailView,
 	CampaignHardDeleteView,
 	CampaignListCreateView,
+	DashboardView,
 	ChannelDetailView,
 	ChannelListCreateView,
 	LanguageDetailView,
@@ -147,6 +148,7 @@ urlpatterns = [
 	path('audiences/<int:pk>/recipients_preview/', AudienceRecipientsPreviewView.as_view(), name='audience-recipients-preview'),
 	path('audiences/<int:pk>/', AudienceResourceView.as_view(), name='audience-detail'),
 	path('campaigns/', CampaignListCreateView.as_view(), name='campaign-list-create'),
+	path('dashboard/', DashboardView.as_view(), name='campaign-dashboard'),
 	path(
 		'campaigns/<int:campaign_id>/',
 		CampaignDetailView.as_view(),

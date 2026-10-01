@@ -3,16 +3,17 @@
 import logging
 import os
 import uuid
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.core.files.storage import default_storage
 from django.core.mail import EmailMessage, get_connection
-from django.db.models import Count, Exists, Max, Min, Q, OuterRef, Subquery
+from django.db.models import Case, CharField, Count, Exists, F, IntegerField, Max, Min, OuterRef, Q, Subquery, Value, When
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import status
 from rest_framework.generics import CreateAPIView, ListCreateAPIView, RetrieveUpdateDestroyAPIView, UpdateAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -26,6 +27,7 @@ from .constants import SUPPORTED_LANGUAGES
 from .models import (
 	AudienceConfig,
 	AudienceBuildJob,
+	Audience,
 	AudienceMember,
 	Campaign,
 	Channel,
@@ -34,6 +36,8 @@ from .models import (
 	DeliveryRecord,
 	EmailConfig,
 	EmailReport,
+	FailedDelivery,
+	FailedSent,
 	GlobalTPSConfig,
 	NAddressesConfig,
 	ReportSubscription,
@@ -45,6 +49,8 @@ from .models import (
 	MessageBuildJob,
 	Schedule,
 	SentRecord,
+	SuccessDelivery,
+	SuccessSent,
 	SenderID,
 	SMSCConfig,
 )
@@ -885,7 +891,7 @@ class ReportSubscriptionSendNowView(APIView):
 	@extend_schema(tags=['Email Reports'], summary='Render and send a report subscription now')
 	def post(self, request, pk):
 		with transaction.atomic():
-			subscription = ReportSubscription.objects.select_for_update().select_related('email_config').prefetch_related('campaigns').filter(pk=pk).first()
+			subscription = ReportSubscription.objects.select_for_update(of=('self',)).select_related('email_config').prefetch_related('campaigns').filter(pk=pk).first()
 			if subscription is None:
 				return Response({'success': False, 'error': 'Subscription not found.'}, status=status.HTTP_404_NOT_FOUND)
 			if not subscription.is_active:
@@ -1963,7 +1969,10 @@ class ChannelDetailView(RetrieveUpdateDestroyAPIView):
 
 	def destroy(self, request, *args, **kwargs):
 		channel = self.get_object()
-		if Campaign.objects.filter(channels__contains=[channel.code]).exists():
+		if any(
+			channel.pk in (campaign.channels_id or [])
+			for campaign in Campaign.objects.only('channels_id').iterator()
+		):
 			return Response(
 				{'detail': 'Cannot delete a channel used by a campaign.'},
 				status=status.HTTP_409_CONFLICT,
@@ -1992,17 +2001,242 @@ class ChannelDetailView(RetrieveUpdateDestroyAPIView):
 		responses={201: CampaignDetailSerializer, 400: OpenApiResponse(description='Validation error.')},
 	),
 )
+class DashboardView(APIView):
+	permission_classes = [IsAuthenticated]
+
+	@extend_schema(
+		tags=['Campaigns Manager'],
+		summary='Get filtered campaign dashboard data',
+		parameters=[
+			OpenApiParameter('campaign_id', OpenApiTypes.INT),
+			OpenApiParameter('status', OpenApiTypes.STR),
+			OpenApiParameter('date_range', OpenApiTypes.STR),
+			OpenApiParameter('date_from', OpenApiTypes.DATE),
+			OpenApiParameter('date_to', OpenApiTypes.DATE),
+			OpenApiParameter('page', OpenApiTypes.INT),
+			OpenApiParameter('page_size', OpenApiTypes.INT),
+			OpenApiParameter('sort', OpenApiTypes.STR),
+		],
+		responses={200: OpenApiResponse(description='Dashboard metrics and campaign page.')},
+	)
+	def get(self, request):
+		campaigns = Campaign.objects.filter(is_deleted=False)
+		if not request.user.is_superuser:
+			campaigns = campaigns.filter(created_by=request.user)
+
+		campaign_options = list(campaigns.order_by('name').values('id', 'name'))
+		campaign_id = request.query_params.get('campaign_id')
+		if campaign_id:
+			try:
+				campaign_id = int(campaign_id)
+				campaigns = campaigns.filter(pk=campaign_id)
+			except (TypeError, ValueError):
+				return Response({'success': False, 'error': 'campaign_id must be an integer.'}, status=400)
+
+		status_filter = request.query_params.get('status', '').strip().lower()
+		allowed_statuses = {'active', 'in_progress', 'draft', 'paused', 'completed', 'cancelled', 'stopped', 'archived'}
+		if status_filter and status_filter not in allowed_statuses:
+			return Response({'success': False, 'error': 'Unsupported campaign status.'}, status=400)
+		if status_filter == 'active':
+			campaigns = campaigns.filter(status__in=['active', 'in_progress'])
+		elif status_filter == 'completed':
+			campaigns = campaigns.filter(status__in=['completed', 'archived'])
+		elif status_filter:
+			campaigns = campaigns.filter(status=status_filter)
+
+		date_range = request.query_params.get('date_range', 'last_30_days')
+		today = timezone.localdate()
+		if date_range == 'today':
+			date_from, date_to = today, today
+		elif date_range == 'last_7_days':
+			date_from, date_to = today - timedelta(days=6), today
+		elif date_range == 'last_30_days':
+			date_from, date_to = today - timedelta(days=29), today
+		elif date_range == 'last_90_days':
+			date_from, date_to = today - timedelta(days=89), today
+		elif date_range == 'all_time':
+			date_from = date_to = None
+		elif date_range == 'custom':
+			date_from = parse_date(request.query_params.get('date_from', ''))
+			date_to = parse_date(request.query_params.get('date_to', ''))
+			if not date_from or not date_to or date_from > date_to:
+				return Response({'success': False, 'error': 'Custom date range requires valid date_from and date_to values.'}, status=400)
+		else:
+			return Response({'success': False, 'error': 'Unsupported date_range.'}, status=400)
+
+		start_at = timezone.make_aware(datetime.combine(date_from, time.min)) if date_from else None
+		end_at = timezone.make_aware(datetime.combine(date_to + timedelta(days=1), time.min)) if date_to else None
+
+		def history_queryset(model, timestamp_field):
+			queryset = model.objects.filter(campaign_id__in=campaigns.values('id'))
+			if start_at:
+				queryset = queryset.filter(**{f'{timestamp_field}__gte': start_at})
+			if end_at:
+				queryset = queryset.filter(**{f'{timestamp_field}__lt': end_at})
+			return queryset
+
+		metric_models = {
+			'success_sent': (SuccessSent, 'sent_at'),
+			'failed_sent': (FailedSent, 'final_attempt_at'),
+			'success_delivery': (SuccessDelivery, 'delivered_at'),
+			'failed_delivery': (FailedDelivery, 'failed_at'),
+		}
+		metrics = {
+			key: queryset.count()
+			for key, (model, timestamp_field) in metric_models.items()
+			for queryset in [history_queryset(model, timestamp_field)]
+		}
+
+		status_base = Campaign.objects.filter(is_deleted=False)
+		if not request.user.is_superuser:
+			status_base = status_base.filter(created_by=request.user)
+		if campaign_id:
+			status_base = status_base.filter(pk=campaign_id)
+		if status_filter == 'active':
+			status_base = status_base.filter(status__in=['active', 'in_progress'])
+		elif status_filter == 'completed':
+			status_base = status_base.filter(status__in=['completed', 'archived'])
+		elif status_filter:
+			status_base = status_base.filter(status=status_filter)
+		status_counts = dict(status_base.values('status').annotate(total=Count('id')).values_list('status', 'total'))
+		active_count = status_counts.get('active', 0) + status_counts.get('in_progress', 0)
+		completed_count = status_counts.get('completed', 0) + status_counts.get('archived', 0)
+		status_distribution = {
+			'active': active_count,
+			'draft': status_counts.get('draft', 0),
+			'paused': status_counts.get('paused', 0),
+			'completed': completed_count,
+			'cancelled': status_counts.get('cancelled', 0),
+		}
+
+		latest_audience_round = Audience.objects.filter(campaign_id=OuterRef('pk')).order_by().values('campaign_id').annotate(round_number=Max('round_number')).values('round_number')[:1]
+		rows = campaigns.select_related('created_by', 'schedule').annotate(
+			audience_round=Subquery(latest_audience_round),
+			target_audience=Coalesce(
+				Subquery(
+					Audience.objects.filter(campaign_id=OuterRef('pk'), round_number=OuterRef('audience_round'))
+					.order_by().values('campaign_id').annotate(total=Count('id')).values('total')[:1],
+					output_field=IntegerField(),
+				), Value(0), output_field=IntegerField(),
+			),
+		)
+		for key, (model, timestamp_field) in metric_models.items():
+			filtered = model.objects.filter(campaign_id=OuterRef('pk'))
+			if start_at:
+				filtered = filtered.filter(**{f'{timestamp_field}__gte': start_at})
+			if end_at:
+				filtered = filtered.filter(**{f'{timestamp_field}__lt': end_at})
+			rows = rows.annotate(**{
+				key: Coalesce(
+					Subquery(filtered.order_by().values('campaign_id').annotate(total=Count('id')).values('total')[:1], output_field=IntegerField()),
+					Value(0), output_field=IntegerField(),
+				)
+			})
+
+		sort = request.query_params.get('sort', '-updated_at')
+		descending = sort.startswith('-')
+		sort_key = sort[1:] if descending else sort
+		sort_fields = {
+			'id': 'id', 'name': 'name', 'owner': 'created_by__username',
+			'type': 'schedule__schedule_type', 'schedule_type': 'schedule__schedule_type',
+			'sender_id': 'sender_id', 'channels': 'channels_id', 'status': 'status',
+			'execution_status': Case(
+				When(status='active', then=Value('PENDING')),
+				When(status='in_progress', then=Value('PROCESSING')),
+				When(status='paused', then=Value('PAUSED')),
+				When(status='completed', then=Value('COMPLETED')),
+				When(status='stopped', then=Value('STOPPED')),
+				default=Value('PENDING'), output_field=CharField(),
+			),
+			'target_audience': 'target_audience', 'success_sent': 'success_sent',
+			'failed_sent': 'failed_sent', 'success_delivery': 'success_delivery',
+			'failed_delivery': 'failed_delivery', 'updated_at': 'updated_at',
+		}
+		if sort_key not in sort_fields:
+			sort_key = 'updated_at'
+		ordering = sort_fields[sort_key]
+		if isinstance(ordering, str):
+			ordering = f'-{ordering}' if descending else ordering
+		rows = rows.order_by(ordering, '-pk' if sort_key != 'id' else ordering)
+
+		try:
+			page = max(1, int(request.query_params.get('page', 1)))
+			page_size = min(200, max(1, int(request.query_params.get('page_size', 50))))
+		except (TypeError, ValueError):
+			return Response({'success': False, 'error': 'page and page_size must be integers.'}, status=400)
+		count = rows.count()
+		page_rows = list(rows[(page - 1) * page_size:page * page_size])
+		channel_ids = {channel_id for campaign in page_rows for channel_id in (campaign.channels_id or [])}
+		channel_names = dict(Channel.objects.filter(pk__in=channel_ids).values_list('id', 'name'))
+		results = [{
+			'id': campaign.id,
+			'name': campaign.name,
+			'owner': (campaign.created_by.email or campaign.created_by.username) if campaign.created_by else '',
+			'schedule_type': campaign.schedule.schedule_type if hasattr(campaign, 'schedule') else None,
+			'sender_id': campaign.sender_id,
+			'channels': [channel_names[channel_id] for channel_id in (campaign.channels_id or []) if channel_id in channel_names],
+			'status': campaign.status,
+			'execution_status': campaign.execution_status,
+			'target_audience': campaign.target_audience,
+			'success_sent': campaign.success_sent,
+			'failed_sent': campaign.failed_sent,
+			'success_delivery': campaign.success_delivery,
+			'failed_delivery': campaign.failed_delivery,
+		} for campaign in page_rows]
+
+		return Response({
+			'success': True,
+			'data': {
+				'viewer': {
+					'first_name': request.user.first_name,
+					'is_superuser': request.user.is_superuser,
+				},
+				'kpis': {
+					'total_campaigns': status_base.count(),
+					'active_campaigns': active_count,
+					'draft_campaigns': status_counts.get('draft', 0),
+					'paused_campaigns': status_counts.get('paused', 0),
+					'completed_campaigns': completed_count,
+				},
+				'sent_vs_delivery': metrics,
+				'status_distribution': status_distribution,
+				'campaign_options': campaign_options,
+				'campaigns': {
+					'count': count,
+					'page': page,
+					'page_size': page_size,
+					'next': page + 1 if page * page_size < count else None,
+					'previous': page - 1 if page > 1 and count else None,
+					'results': results,
+				},
+			},
+		})
+
+
 class CampaignListCreateView(ListCreateAPIView):
 	pagination_class = StandardPagination
 
 	def get_queryset(self):
 		queryset = Campaign.objects.filter(is_deleted=False).select_related('schedule', 'audience_config').annotate(
-			total_messages=Count('messages', distinct=True),
-			total_processed=Count(
+			queue_total=Count('messages', distinct=True),
+			queue_processed=Count(
 				'messages',
-				filter=Q(messages__sent_status='SENT'),
+				filter=Q(messages__sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED', 'REJECTED', 'FAILED']),
 				distinct=True,
 			),
+			successful_sent=Count('success_sent_messages', distinct=True),
+			failed_sent=Count('failed_sent_messages', distinct=True),
+			successful_delivery=Count('success_delivery_messages', distinct=True),
+			failed_delivery=Count('failed_delivery_messages', distinct=True),
+			queue_success_sent=Count('messages', filter=Q(messages__sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED']), distinct=True),
+			queue_failed_sent=Count('messages', filter=Q(messages__sent_status__in=['REJECTED', 'FAILED']), distinct=True),
+		).annotate(
+			total_messages=F('queue_total') + F('successful_sent') + F('failed_sent'),
+			total_processed=F('queue_processed') + F('successful_sent') + F('failed_sent'),
+			success_sent_count=F('successful_sent') + F('queue_success_sent'),
+			failed_sent_count=F('failed_sent') + F('queue_failed_sent'),
+			success_delivery_count=F('successful_delivery'),
+			failed_delivery_count=F('failed_delivery'),
 		)
 
 		status_param = self.request.query_params.get('status')
@@ -2145,8 +2379,11 @@ class CampaignHardDeleteView(APIView):
 		responses={200: OpenApiResponse(description='Campaign permanently deleted.')},
 	)
 	def delete(self, request, campaign_id):
-		campaign = get_object_or_404(Campaign, id=campaign_id)
-		campaign.delete()
+		with transaction.atomic():
+			campaign = get_object_or_404(Campaign.objects.select_for_update(), id=campaign_id)
+			for model in (SuccessDelivery, FailedDelivery, DeliveryRecord, SuccessSent, FailedSent, SentRecord):
+				model.objects.filter(campaign=campaign).delete()
+			campaign.delete()
 		return Response({
 			'success': True,
 			'message': 'Campaign permanently deleted successfully.',
@@ -2799,9 +3036,6 @@ class CampaignMessagesListView(APIView):
 		status_filter = request.query_params.get('status')
 		if status_filter:
 			qs = qs.filter(sent_status=status_filter)
-		# The project model stores the queue lifecycle on `sent_status` and
-		# `delivery_status`, not on a separate `status` attribute. Keep list
-		# serialization against the live field names.
 		paginator = StandardPagination()
 		page = paginator.paginate_queryset(qs, request)
 		data = [
@@ -2812,7 +3046,7 @@ class CampaignMessagesListView(APIView):
 				'sender_id': m.sender_id,
 				'language_code': m.language.code if m.language else None,
 				'message_content': m.message_content,
-				'message_parts': m.message_parts,
+				'message_parts': MessageBuilder._calculate_parts(m.message_content),
 				'status': m.sent_status,
 				'batch_id': m.batch_id,
 				'built_at': m.built_at,
@@ -2847,26 +3081,49 @@ class CampaignMessagesStatsView(APIView):
 		})
 
 
-def _campaign_message_batches(messages):
+def _campaign_message_batches(messages, campaign_id=None):
 	batch_rows = messages.exclude(batch_id='').values('batch_id').annotate(
 		total_messages=Count('id'),
-		success_count=Count('id', filter=Q(sent_status='ACCEPTED')),
-		failed_count=Count('id', filter=(
-			Q(sent_status__in=['REJECTED', 'FAILED'])
-			| Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])
-		)),
+		success_count=Count('id', filter=Q(sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED'])),
+		failed_count=Count('id', filter=Q(sent_status__in=['REJECTED', 'FAILED'])),
 		pending_count=Count('id', filter=Q(sent_status='PENDING')),
 		created_at=Min('built_at'),
-	).order_by('-created_at')
+	)
+	result_by_id = {row['batch_id']: row for row in batch_rows}
+
+	if campaign_id is not None:
+		for model, count_key in (
+			(SuccessSent, 'success_count'),
+			(FailedSent, 'failed_count'),
+		):
+			rows = model.objects.filter(campaign_id=campaign_id).exclude(batch_id='').values('batch_id').annotate(
+				count=Count('id'),
+				created_at=Min('created_at'),
+			)
+			for row in rows:
+				batch = result_by_id.setdefault(row['batch_id'], {
+					'batch_id': row['batch_id'],
+					'total_messages': 0,
+					'success_count': 0,
+					'failed_count': 0,
+					'pending_count': 0,
+					'delivered_count': 0,
+					'failed_delivery_count': 0,
+					'created_at': row['created_at'],
+				})
+				batch[count_key] = batch.get(count_key, 0) + row['count']
+				batch['total_messages'] += row['count']
+				if batch['created_at'] is None or row['created_at'] < batch['created_at']:
+					batch['created_at'] = row['created_at']
 
 	result = []
-	for batch in batch_rows:
+	for batch in result_by_id.values():
 		if batch['pending_count']:
 			batch_status = 'PROCESSING' if batch['success_count'] or batch['failed_count'] else 'PENDING'
 		else:
 			batch_status = 'FAILED' if batch['failed_count'] else 'COMPLETED'
 		result.append({**batch, 'status': batch_status})
-	return result
+	return sorted(result, key=lambda row: row['created_at'] or timezone.now(), reverse=True)
 
 
 class CampaignProgressView(APIView):
@@ -2874,23 +3131,24 @@ class CampaignProgressView(APIView):
 	def get(self, request, pk):
 		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
 		messages = MessageObject.objects.filter(campaign=campaign)
-		counts = messages.aggregate(
+		queue_counts = messages.aggregate(
 			total=Count('id'),
-			sent=Count('id', filter=Q(sent_status__in=['SUBMITTED', 'ACCEPTED'])),
-			delivered=Count('id', filter=Q(delivery_status='DELIVERED')),
-			failed=Count('id', filter=(
-				Q(sent_status__in=['REJECTED', 'FAILED'])
-				| Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])
-			)),
+			sent=Count('id', filter=Q(sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED'])),
+			failed=Count('id', filter=Q(sent_status__in=['REJECTED', 'FAILED'])),
 			pending=Count('id', filter=Q(sent_status='PENDING')),
-			processed=Count('id', filter=(
-				Q(sent_status__in=['SUBMITTED', 'ACCEPTED', 'REJECTED', 'FAILED'])
-				| Q(delivery_status__in=['DELIVERED', 'UNDELIVERABLE', 'EXPIRED', 'REJECTED'])
-			)),
+			processed=Count('id', filter=Q(sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED', 'REJECTED', 'FAILED'])),
 		)
-		total = counts['total'] or 0
-		processed = counts['processed'] or 0
-		batches = _campaign_message_batches(messages)
+		successful_sent = SuccessSent.objects.filter(campaign=campaign).count()
+		failed_sent = FailedSent.objects.filter(campaign=campaign).count()
+		successful_delivery = SuccessDelivery.objects.filter(campaign=campaign).count()
+		failed_delivery = FailedDelivery.objects.filter(campaign=campaign).count()
+		total = (queue_counts['total'] or 0) + successful_sent + failed_sent
+		sent = (queue_counts['sent'] or 0) + successful_sent
+		failed = (queue_counts['failed'] or 0) + failed_sent
+		delivered = successful_delivery
+		failed_delivery_total = failed_delivery
+		processed = (queue_counts['processed'] or 0) + successful_sent + failed_sent
+		batches = _campaign_message_batches(messages, campaign_id=campaign.pk)
 		batch_counts = {
 			'total_batches': len(batches),
 			'completed_batches': sum(batch['status'] == 'COMPLETED' for batch in batches),
@@ -2902,10 +3160,11 @@ class CampaignProgressView(APIView):
 			'campaign_name': campaign.name,
 			'progress': {
 				'total_messages': total,
-				'sent_count': counts['sent'] or 0,
-				'delivered_count': counts['delivered'] or 0,
-				'failed_count': counts['failed'] or 0,
-				'pending_count': counts['pending'] or 0,
+				'sent_count': sent,
+				'delivered_count': delivered,
+				'failed_count': failed,
+				'failed_delivery_count': failed_delivery_total,
+				'pending_count': queue_counts['pending'] or 0,
 				'progress_percent': round(processed / total * 100, 2) if total else 0,
 				'status': campaign.status,
 			},
@@ -2918,7 +3177,7 @@ class CampaignMessagesBatchesView(APIView):
 	@extend_schema(tags=['Campaign Messages'], summary='List campaign message batches', responses={200: OpenApiResponse(description='Campaign message batches.')})
 	def get(self, request, pk):
 		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
-		batches = _campaign_message_batches(MessageObject.objects.filter(campaign=campaign))
+		batches = _campaign_message_batches(MessageObject.objects.filter(campaign=campaign), campaign_id=campaign.pk)
 		status_filter = request.query_params.get('status')
 		if status_filter:
 			batches = [batch for batch in batches if batch['status'] == status_filter.upper()]

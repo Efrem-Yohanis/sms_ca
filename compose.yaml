@@ -51,10 +51,11 @@ services:
       kafka:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-ec"]
-    command: |
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sent-response --partitions 20 --replication-factor 1
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic delivery-report --partitions 20 --replication-factor 1
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sent-response --partitions 20 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic delivery-report --partitions 20 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
     restart: "no"
 
   pgadmin:
@@ -134,6 +135,7 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
+      PYTHONPATH: /app
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_SENT_TOPIC: sent-response
       KAFKA_DELIVERY_TOPIC: delivery-report

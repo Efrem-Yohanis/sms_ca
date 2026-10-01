@@ -237,6 +237,7 @@ REPORT_COLUMNS = [
     ('campaign_id', 'Campaign ID'),
     ('owner_email', 'Owner Email'),
     ('total_audience', 'Total Audience'),
+    ('pending', 'Pending'),
     ('sent_started_at', 'Sent Started At'),
     ('sent_completed_at', 'Sent Completed At'),
     ('sent_success', 'Sent Success'),
@@ -246,7 +247,7 @@ REPORT_COLUMNS = [
     ('delivery_started_at', 'Delivery Started At'),
     ('last_delivery_at', 'Last Delivery At'),
 ]
-TOTAL_KEYS = ('total_audience', 'sent_success', 'sent_failed', 'delivery_success', 'delivery_failed')
+TOTAL_KEYS = ('total_audience', 'pending', 'sent_success', 'sent_failed', 'delivery_success', 'delivery_failed')
 
 
 def _format_datetime(value):
@@ -262,14 +263,14 @@ def _campaign_report_row(campaign, owner_email):
     if current_round is None:
         current_round = audience_rows.aggregate(round_number=Max('round_number'))['round_number'] or 1
 
-    sent_stats = SuccessSent.objects.filter(campaign=campaign).aggregate(
+    sent_stats = SuccessSent.objects.filter(campaign=campaign, round_number=current_round).aggregate(
         started=Min('sent_at'),
         completed=Max('sent_at'),
         count=Count('id'),
     )
-    sent_failed = FailedSent.objects.filter(campaign=campaign).count()
-    delivery_success = SuccessDelivery.objects.filter(campaign=campaign)
-    delivery_failed = FailedDelivery.objects.filter(campaign=campaign)
+    sent_failed = FailedSent.objects.filter(campaign=campaign, round_number=current_round).count()
+    delivery_success = SuccessDelivery.objects.filter(campaign=campaign, round_number=current_round)
+    delivery_failed = FailedDelivery.objects.filter(campaign=campaign, round_number=current_round)
     delivery_started_values = [
         value for value in (
             delivery_success.aggregate(value=Min('delivered_at'))['value'],
@@ -287,6 +288,11 @@ def _campaign_report_row(campaign, owner_email):
         'campaign_id': campaign.id,
         'owner_email': owner_email,
         'total_audience': audience_rows.filter(round_number=current_round).count(),
+        'pending': MessageObject.objects.filter(
+            campaign=campaign,
+            round_number=current_round,
+            sent_status__in=['PENDING', 'SUBMITTED', 'ACCEPTED'],
+        ).count(),
         'sent_started_at': _format_datetime(sent_stats['started']),
         'sent_completed_at': _format_datetime(sent_stats['completed']),
         'sent_success': sent_stats['count'] or 0,
@@ -312,6 +318,7 @@ def build_subscription_report_data(subscription, campaigns, recipient):
         'summary_total_sent': sent_total,
         'summary_total_delivered': delivered_total,
         'summary_total_failed': failed_total,
+        'summary_total_pending': totals['pending'],
         'campaigns': rows,
         'totals': totals,
     }
@@ -342,7 +349,7 @@ def render_subscription_report(report_data, report_format):
         lines = [
             report_data['report_name'],
             f"Generated {report_data['generated_at_display']}",
-            f"Campaigns: {report_data['summary_total_campaigns']} | Sent: {report_data['summary_total_sent']} | Delivered: {report_data['summary_total_delivered']} | Failed: {report_data['summary_total_failed']}",
+            f"Campaigns: {report_data['summary_total_campaigns']} | Sent: {report_data['summary_total_sent']} | Delivered: {report_data['summary_total_delivered']} | Failed: {report_data['summary_total_failed']} | Pending: {report_data['summary_total_pending']}",
             '',
             ' | '.join(label for _, label in REPORT_COLUMNS),
         ]

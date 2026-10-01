@@ -374,13 +374,13 @@ class MessageContentApiContractTests(TestCase):
 
 class CampaignDeleteContractTests(TestCase):
     def test_soft_delete_is_available_for_non_draft_campaigns(self):
-        Channel.objects.create(code='sms', name='SMS')
+        channel = Channel.objects.create(code='sms', name='SMS')
         SenderID.objects.create(sender_id='SMSINFO', name='SMS Info', is_active=True, is_default=True)
 
         campaign = Campaign.objects.create(
             name='Launch campaign',
             sender_id='SMSINFO',
-            channels_id=[1],
+            channels_id=[channel.pk],
             status='paused',
             is_ready_to_execute=False,
         )
@@ -395,6 +395,46 @@ class CampaignDeleteContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         campaign.refresh_from_db()
         self.assertTrue(campaign.is_deleted)
+
+    def test_hard_delete_removes_protected_send_history(self):
+        channel = Channel.objects.create(code='sms', name='SMS')
+        SenderID.objects.create(sender_id='SMSINFO', name='SMS Info', is_active=True)
+        campaign = Campaign.objects.create(
+            name='Hard delete campaign',
+            sender_id='SMSINFO',
+            channels_id=[channel.pk],
+        )
+        sent = SuccessSent.objects.create(
+            message_id='hard-delete-sent-message',
+            campaign=campaign,
+            channel=channel,
+            recipient='251700000001',
+            sender_id='SMSINFO',
+        )
+
+        response = self.client.delete(f'/api/v1/campaigns/{campaign.pk}/hard-delete/')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(Campaign.objects.filter(pk=campaign.pk).exists())
+        self.assertFalse(SuccessSent.objects.filter(pk=sent.pk).exists())
+
+    def test_channel_delete_checks_campaign_channel_ids(self):
+        channel = Channel.objects.create(code='sms', name='SMS')
+        SenderID.objects.create(sender_id='SMSINFO', name='SMS Info', is_active=True)
+        campaign = Campaign.objects.create(
+            name='Channel usage campaign',
+            sender_id='SMSINFO',
+            channels_id=[channel.pk],
+        )
+
+        used_response = self.client.delete(f'/api/v1/channels/{channel.pk}/')
+        self.assertEqual(used_response.status_code, 409, used_response.content)
+        self.assertTrue(Channel.objects.filter(pk=channel.pk).exists())
+
+        campaign.delete()
+        unused_response = self.client.delete(f'/api/v1/channels/{channel.pk}/')
+        self.assertEqual(unused_response.status_code, 204, unused_response.content)
+        self.assertFalse(Channel.objects.filter(pk=channel.pk).exists())
 
 
 class EmailConfigAndReportTests(TestCase):
@@ -565,6 +605,14 @@ class EmailConfigAndReportTests(TestCase):
             channels_id=[self.channel.id],
             status='paused',
         )
+        MessageObject.objects.create(
+            campaign=self.campaign,
+            message_id='scheduled-report-pending-message',
+            recipient='251700000001',
+            sender_id=self.sender.sender_id,
+            message_content='Still queued',
+            batch_id='scheduled-report-batch',
+        )
         scheduled_at = timezone.now() - timedelta(hours=2)
         subscription = ReportSubscription.objects.create(
             name='Operations report',
@@ -603,7 +651,11 @@ class EmailConfigAndReportTests(TestCase):
         self.assertEqual(sorted(log.recipients[0] for log in deliveries), ['director@example.com', 'ops@example.com', 'reports@example.com'])
         self.assertTrue(all(len(log.report_data['campaigns']) == 2 for log in deliveries))
         self.assertTrue(all(log.report_data['campaigns'][0]['owner_email'] == log.recipients[0] for log in deliveries))
-        self.assertEqual(len(deliveries.first().report_data['campaigns'][0]), 12)
+        report_rows = deliveries.first().report_data['campaigns']
+        self.assertEqual(report_rows[0]['pending'], 1)
+        self.assertEqual(report_rows[1]['pending'], 0)
+        self.assertEqual(deliveries.first().report_data['totals']['pending'], 1)
+        self.assertEqual(len(report_rows[0]), 13)
         subscription.refresh_from_db()
         self.assertGreater(subscription.next_run_at, timezone.now())
         self.assertIsNotNone(subscription.last_sent_at)
@@ -759,15 +811,22 @@ class CampaignWorkflowStepTests(TestCase):
 
     def test_campaign_progress_and_batch_endpoints_aggregate_message_states(self):
         campaign = self.create_campaign()
-        MessageObject.objects.create(
-            campaign=campaign,
+        SuccessSent.objects.create(
             message_id='progress-message-accepted',
-            recipient='+251700000001',
+            campaign=campaign,
+            channel=self.channel,
+            provider_message_id='progress-provider-accepted',
+            recipient='251700000001',
             sender_id=campaign.sender_id,
             message_content='Accepted message',
-            sent_status='ACCEPTED',
-            delivery_status='DELIVERED',
             batch_id='progress-batch-1',
+        )
+        SuccessDelivery.objects.create(
+            message_id='progress-message-accepted',
+            provider_message_id='progress-provider-accepted',
+            campaign=campaign,
+            channel=self.channel,
+            recipient='251700000001',
         )
         MessageObject.objects.create(
             campaign=campaign,
@@ -776,7 +835,6 @@ class CampaignWorkflowStepTests(TestCase):
             sender_id=campaign.sender_id,
             message_content='Pending message',
             sent_status='PENDING',
-            delivery_status='PENDING',
             batch_id='progress-batch-1',
         )
 
@@ -796,7 +854,22 @@ class CampaignWorkflowStepTests(TestCase):
         batch = batches_response.json()['results'][0]
         self.assertEqual(batch['batch_id'], 'progress-batch-1')
         self.assertEqual(batch['total_messages'], 2)
+        self.assertEqual(batch['success_count'], 1)
         self.assertEqual(batch['status'], 'PROCESSING')
+
+        campaign_list_response = self.client.get('/api/v1/campaigns/?page=1&page_size=20')
+        self.assertEqual(campaign_list_response.status_code, 200, campaign_list_response.content)
+        listed = campaign_list_response.json()['results'][0]
+        self.assertEqual(listed['total_messages'], 2)
+        self.assertEqual(listed['total_processed'], 1)
+        self.assertEqual(listed['success_sent_count'], 1)
+        self.assertEqual(listed['success_delivery_count'], 1)
+        self.assertEqual(listed['failed_sent_count'], 0)
+        self.assertEqual(listed['failed_delivery_count'], 0)
+
+        messages_response = self.client.get(f'/api/v1/campaigns/{campaign.id}/messages/?page=1&page_size=5')
+        self.assertEqual(messages_response.status_code, 200, messages_response.content)
+        self.assertEqual(messages_response.json()['results'][0]['message_parts'], 1)
 
     def test_step_2_configure_database_audience(self):
         campaign = self.create_campaign()

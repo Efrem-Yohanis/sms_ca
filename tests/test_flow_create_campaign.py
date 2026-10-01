@@ -23,7 +23,7 @@ def test_full_campaign_flow(api, ensure_sender_id, ensure_language):
         response = api.post(f"/campaigns/{campaign_id}/audience/manual/", json={
             "manual_msisdns": ["+251711111111", "+251722222222"],
             "manual_languages": ["en", "en"],
-            "default_language": ensure_language,
+            "default_language_id": ensure_language,
         })
         assert response.status_code in (200, 201), response.text
 

@@ -1092,6 +1092,10 @@ class CampaignListSerializer(serializers.ModelSerializer):
     progress_percent = serializers.SerializerMethodField()
     total_messages = serializers.IntegerField(read_only=True)
     total_processed = serializers.IntegerField(read_only=True)
+    success_sent_count = serializers.IntegerField(read_only=True)
+    failed_sent_count = serializers.IntegerField(read_only=True)
+    success_delivery_count = serializers.IntegerField(read_only=True)
+    failed_delivery_count = serializers.IntegerField(read_only=True)
     next_run = serializers.SerializerMethodField()
     has_schedule = serializers.SerializerMethodField()
     has_audience = serializers.SerializerMethodField()
@@ -1167,7 +1171,9 @@ class CampaignListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'sender_id', 'owner_emails', 'channels_id', 'channels',
             'status', 'status_display', 'execution_status', 'execution_status_display',
-            'progress_percent', 'total_messages', 'total_processed', 'next_run',
+            'progress_percent', 'total_messages', 'total_processed',
+            'success_sent_count', 'failed_sent_count',
+            'success_delivery_count', 'failed_delivery_count', 'next_run',
             'has_schedule', 'has_audience', 'has_content', 'is_ready_to_execute',
             'audience_id', 'message_content_id', 'schedule_id', 'schedule',
             'audience_rebuild', 'created_at', 'updated_at',
