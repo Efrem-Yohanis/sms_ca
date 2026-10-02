@@ -2,9 +2,11 @@
 
 import logging
 import os
+import requests
 import uuid
 from datetime import date, datetime, time, timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.core.files.storage import default_storage
@@ -1596,6 +1598,62 @@ class CampaignStartView(APIView):
 	@extend_schema(tags=['Campaign Actions'], summary='Start an active campaign', request=None, responses={200: OpenApiResponse(description='Start result.')})
 	def post(self, request, campaign_id):
 		return _campaign_action_response(campaign_id, 'start_campaign')
+
+
+class CampaignSendNowView(APIView):
+	@extend_schema(tags=['Campaign Actions'], summary='Start the SMS sender immediately', request=None, responses={202: OpenApiResponse(description='Sender started.')})
+	def post(self, request, campaign_id):
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status not in {'active', 'in_progress', 'paused', 'stopped'}:
+			return Response(
+				{'success': False, 'message': f"Cannot start sender for campaign in '{campaign.status}' status."},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+		if not campaign.is_ready_to_execute:
+			return Response(
+				{'success': False, 'message': 'Campaign is not ready to execute.'},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		if not campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
+			return Response(
+				{'success': False, 'message': 'Campaign has no queued messages to send.'},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		was_stopped = campaign.status == 'stopped'
+		if was_stopped:
+			campaign.status = 'active'
+			campaign.activated_at = timezone.now()
+			campaign.save(update_fields=['status', 'activated_at', 'updated_at'])
+
+		round_number = Schedule.objects.filter(campaign=campaign).values_list('current_round', flat=True).first() or 1
+		try:
+			sender_response = requests.post(
+				f'{settings.SMSC_SENDER_API}/sender/start',
+				json={'campaign_id': campaign.pk, 'round_number': round_number},
+				timeout=30,
+			)
+			body = sender_response.json()
+		except requests.RequestException as exc:
+			return Response(
+				{'success': False, 'message': f'SMS sender is unavailable: {exc}'},
+				status=status.HTTP_503_SERVICE_UNAVAILABLE,
+			)
+		except ValueError:
+			body = {'detail': sender_response.text[:500]}
+
+		if sender_response.status_code == 409:
+			return Response({'success': True, 'message': 'Campaign sender is already running.', 'data': body})
+		if sender_response.status_code != 202 or body.get('success') is False:
+			if was_stopped:
+				campaign.status = 'stopped'
+				campaign.save(update_fields=['status', 'updated_at'])
+			return Response(
+				{'success': False, 'message': body.get('detail') or 'SMS sender rejected the campaign.', 'data': body},
+				status=status.HTTP_502_BAD_GATEWAY,
+			)
+		return Response({'success': True, 'message': 'Campaign sender started.', 'data': body.get('data', body)}, status=status.HTTP_202_ACCEPTED)
 
 
 class CampaignPauseView(APIView):

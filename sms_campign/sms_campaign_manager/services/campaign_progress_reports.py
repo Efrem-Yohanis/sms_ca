@@ -3,11 +3,21 @@
 from datetime import timedelta
 
 from django.core.mail import EmailMultiAlternatives
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Min, Q
 from django.template.loader import render_to_string
 from django.utils import timezone
 
-from ..models import CampaignProgressReport, DeliveryRecord, EmailConfig, MessageObject, SentRecord
+from ..models import (
+    CampaignProgressReport,
+    DeliveryRecord,
+    EmailConfig,
+    FailedDelivery,
+    FailedSent,
+    MessageObject,
+    SentRecord,
+    SuccessDelivery,
+    SuccessSent,
+)
 from .email_delivery import get_active_email_config, get_email_connection
 
 
@@ -19,14 +29,60 @@ FREQUENCY_INTERVALS = {
 
 
 def get_campaign_progress(campaign):
-    sent = SentRecord.objects.filter(campaign=campaign).aggregate(
-        sent=Count('id', filter=Q(sent_status__in=['SUBMITTED', 'ACCEPTED'])),
-        failed_sent=Count('id', filter=Q(sent_status__in=['REJECTED', 'FAILED'])),
-    )
-    delivered = DeliveryRecord.objects.filter(campaign=campaign).aggregate(
-        delivered=Count('id', filter=Q(delivery_status='DELIVERED')),
-        failed_delivery=Count('id', filter=Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])),
-    )
+    success_sent_records = SuccessSent.objects.filter(campaign=campaign)
+    failed_sent_records = FailedSent.objects.filter(campaign=campaign)
+    success_sent_count = success_sent_records.count()
+    failed_sent_count = failed_sent_records.count()
+    if success_sent_count + failed_sent_count:
+        sent_count = success_sent_count + failed_sent_count
+        success_sent_times = success_sent_records.aggregate(
+            started=Min('sending_started_at'),
+            completed=Max('sent_at'),
+        )
+        failed_sent_times = failed_sent_records.aggregate(
+            started=Min('first_attempt_at'),
+            completed=Max('final_attempt_at'),
+        )
+        sent_started_at = min(
+            (value for value in (success_sent_times['started'], failed_sent_times['started']) if value is not None),
+            default=None,
+        )
+        sent_completed_at = max(
+            (value for value in (success_sent_times['completed'], failed_sent_times['completed']) if value is not None),
+            default=None,
+        )
+    else:
+        legacy_sent = SentRecord.objects.filter(campaign=campaign)
+        sent_counts = legacy_sent.aggregate(
+            sent=Count('id', filter=Q(sent_status__in=['SUBMITTED', 'ACCEPTED'])),
+            failed_sent=Count('id', filter=Q(sent_status__in=['REJECTED', 'FAILED'])),
+            started_at=Min('submitted_at'),
+            completed_at=Max('submitted_at'),
+        )
+        sent_count = (sent_counts['sent'] or 0) + (sent_counts['failed_sent'] or 0)
+        success_sent_count = legacy_sent.filter(sent_status='ACCEPTED').count()
+        failed_sent_count = sent_counts['failed_sent'] or 0
+        sent_started_at = sent_counts['started_at']
+        sent_completed_at = sent_counts['completed_at']
+
+    success_delivery_records = SuccessDelivery.objects.filter(campaign=campaign)
+    failed_delivery_records = FailedDelivery.objects.filter(campaign=campaign)
+    success_delivery_count = success_delivery_records.count()
+    failed_delivery_count = failed_delivery_records.count()
+    if success_delivery_count + failed_delivery_count:
+        delivery_counts = {
+            'delivered': success_delivery_count,
+            'failed_delivery': failed_delivery_count,
+        }
+    else:
+        legacy_delivery = DeliveryRecord.objects.filter(campaign=campaign)
+        delivery_counts = legacy_delivery.aggregate(
+            delivered=Count('id', filter=Q(delivery_status='DELIVERED')),
+            failed_delivery=Count('id', filter=Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])),
+        )
+        success_delivery_count = delivery_counts['delivered'] or 0
+        failed_delivery_count = delivery_counts['failed_delivery'] or 0
+
     pending = MessageObject.objects.filter(campaign=campaign).aggregate(
         pending=Count('id', filter=Q(sent_status__in=['PENDING', 'SUBMITTED', 'ACCEPTED'])),
     )
@@ -35,14 +91,15 @@ def get_campaign_progress(campaign):
         'campaign_name': campaign.name,
         'status': campaign.status,
         'owner': ', '.join(campaign.owner_emails or []),
-        'sent': sent['sent'] or 0,
-        'success_sent': SentRecord.objects.filter(campaign=campaign, sent_status='ACCEPTED').count(),
-        'failed_sent': sent['failed_sent'] or 0,
-        'delivered': delivered['delivered'] or 0,
-        'success_delivery': delivered['delivered'] or 0,
-        'failed_delivery': delivered['failed_delivery'] or 0,
+        'sent': sent_count,
+        'success_sent': success_sent_count,
+        'failed_sent': failed_sent_count,
+        'delivered': success_delivery_count,
+        'success_delivery': success_delivery_count,
+        'failed_delivery': failed_delivery_count,
         'pending': pending['pending'] or 0,
-        'started_at': campaign.activated_at,
+        'started_at': sent_started_at,
+        'sent_completed_at': sent_completed_at,
         'round_number': getattr(getattr(campaign, 'schedule', None), 'current_round', 0),
     }
 

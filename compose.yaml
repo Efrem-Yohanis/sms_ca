@@ -58,6 +58,18 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
     restart: "no"
 
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8081:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
   pgadmin:
     image: dpage/pgadmin4:9
     environment:
@@ -87,6 +99,9 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
+      SMSC_SENDER_API: http://sms-sender:8001
+    volumes:
+      - audience_uploads:/app/sms_campign/audience
     ports:
       - "${DJANGO_HOST_PORT:-8000}:8000"
     healthcheck:
@@ -115,6 +130,8 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},django"
+    volumes:
+      - audience_uploads:/app/sms_campign/audience
     depends_on:
       db:
         condition: service_healthy
@@ -237,6 +254,8 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__WEBSERVER__WEB_SERVER_WORKERS: "1"
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300"
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-campaign_manager}:${POSTGRES_PASSWORD:-campaign_manager_dev}@db:5432/${POSTGRES_DB:-campaign_manager}
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-sms-airflow-local-secret-change-before-deploy}
@@ -305,6 +324,9 @@ services:
 
 volumes:
   postgres_data:
+  audience_uploads:
+    external: true
+    name: sms_audience_uploads
   pgadmin_data:
   kafka_data:
   smsc_mock_data:

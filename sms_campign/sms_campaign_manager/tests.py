@@ -52,6 +52,8 @@ from .services.database_connector import DatabaseConnector
 from .services.audience_service import AudienceBuildService
 from .services.campaign_actions import CampaignActionsService
 from .services.campaign_activation_email import send_campaign_activation_email
+from .services.campaign_progress_reports import get_campaign_progress
+from .services.email_reports import build_subscription_report_data, collect_campaign_report_data
 from .services.message_builder import MessageBuilder
 from .services.smsc_sender import SmsSenderService
 from sms_status_updater.app import process_delivery_batch, process_send_batch
@@ -451,6 +453,88 @@ class EmailConfigAndReportTests(TestCase):
             status='draft',
         )
 
+    def test_progress_report_uses_kafka_history_instead_of_double_counting_legacy_rows(self):
+        now = timezone.now()
+        SuccessSent.objects.create(
+            message_id='event-success',
+            provider_message_id='provider-success',
+            campaign=self.campaign,
+            channel=self.channel,
+            round_number=1,
+            recipient='251700000001',
+            sender_id=self.sender.sender_id,
+            sending_started_at=now - timedelta(minutes=1),
+            sent_at=now,
+        )
+        FailedSent.objects.create(
+            message_id='event-failed',
+            provider_message_id='provider-failed',
+            campaign=self.campaign,
+            channel=self.channel,
+            round_number=1,
+            recipient='251700000002',
+            sender_id=self.sender.sender_id,
+            first_attempt_at=now - timedelta(minutes=2),
+            final_attempt_at=now,
+        )
+        SuccessDelivery.objects.create(
+            message_id='event-success',
+            provider_message_id='provider-success',
+            campaign=self.campaign,
+            channel=self.channel,
+            round_number=1,
+            recipient='251700000001',
+        )
+        FailedDelivery.objects.create(
+            message_id='event-failed',
+            provider_message_id='provider-failed',
+            campaign=self.campaign,
+            channel=self.channel,
+            round_number=1,
+            recipient='251700000002',
+            delivery_status='UNDELIVERABLE',
+        )
+        SentRecord.objects.create(
+            campaign=self.campaign,
+            channel=self.channel,
+            msisdn='251700000001',
+            sent_status='ACCEPTED',
+        )
+        DeliveryRecord.objects.create(
+            campaign=self.campaign,
+            channel=self.channel,
+            msisdn='251700000001',
+            delivery_status='DELIVERED',
+        )
+
+        progress = get_campaign_progress(self.campaign)
+
+        self.assertEqual(progress['sent'], 2)
+        self.assertEqual(progress['success_sent'], 1)
+        self.assertEqual(progress['failed_sent'], 1)
+        self.assertEqual(progress['success_delivery'], 1)
+        self.assertEqual(progress['failed_delivery'], 1)
+        self.assertEqual(progress['started_at'], now - timedelta(minutes=2))
+        self.assertEqual(progress['sent_completed_at'], now)
+
+        report_data = collect_campaign_report_data(self.campaign)
+
+        self.assertEqual(report_data['sent']['total'], 2)
+        self.assertEqual(report_data['sent']['accepted'], 1)
+        self.assertEqual(report_data['sent']['failed'], 1)
+        self.assertEqual(report_data['delivery']['total'], 2)
+        self.assertEqual(report_data['delivery']['delivered'], 1)
+        self.assertEqual(report_data['delivery']['failed'], 1)
+        subscription_data = build_subscription_report_data(
+            ReportSubscription(name='Event-backed report'),
+            [self.campaign],
+            'reports@example.test',
+        )
+        self.assertEqual(subscription_data['campaigns'][0]['sent_success'], 1)
+        self.assertEqual(subscription_data['campaigns'][0]['sent_failed'], 1)
+        self.assertEqual(subscription_data['campaigns'][0]['delivery_success'], 1)
+        self.assertEqual(subscription_data['campaigns'][0]['delivery_failed'], 1)
+
     @patch('sms_campaign_manager.services.email_reports.EmailMultiAlternatives.send', return_value=1)
     def test_email_config_can_be_created_and_campaign_report_is_sent(self, mock_send):
         config_response = self.client.post(
@@ -743,6 +827,48 @@ class EmailConfigAndReportTests(TestCase):
 
         delete_response = self.client.delete(f'/api/v1/email-reports/{report_id}/')
         self.assertEqual(delete_response.status_code, 204)
+
+
+class CampaignManualDispatchTests(TestCase):
+    @patch('sms_campaign_manager.views.requests.post')
+    def test_send_now_dispatches_active_queued_campaign_to_sender(self, mock_post):
+        channel = Channel.objects.create(code='sms', name='SMS')
+        sender = SenderID.objects.create(sender_id='SMSINFO', name='SMS Info', is_active=True)
+        campaign = Campaign.objects.create(
+            name='Manual dispatch campaign',
+            sender_id=sender.sender_id,
+            channels_id=[channel.id],
+            status='stopped',
+            is_ready_to_execute=True,
+        )
+        MessageObject.objects.create(
+            campaign=campaign,
+            message_id='manual-dispatch-message',
+            recipient='251700000001',
+            sender_id=sender.sender_id,
+            message_content='Hello',
+        )
+        sender_response = Mock(status_code=202)
+        sender_response.json.return_value = {
+            'success': True,
+            'data': {'campaign_id': campaign.id, 'status': 'active'},
+        }
+        mock_post.return_value = sender_response
+
+        response = self.client.post(
+            f'/api/v1/campaigns/{campaign.id}/send-now/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 202, response.content)
+        self.assertTrue(response.json()['success'])
+        self.assertEqual(Campaign.objects.get(pk=campaign.pk).status, 'active')
+        mock_post.assert_called_once_with(
+            'http://sms-sender:8001/sender/start',
+            json={'campaign_id': campaign.id, 'round_number': 1},
+            timeout=30,
+        )
 
 
 class CampaignWorkflowStepTests(TestCase):

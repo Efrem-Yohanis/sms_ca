@@ -5,7 +5,7 @@ from html import escape
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
-from django.db.models import Count, Max, Min, Q
+from django.db.models import Count, F, Max, Min, Q
 from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.safestring import mark_safe
@@ -42,35 +42,68 @@ def collect_campaign_report_data(
     }
 
     if include_sent_stats:
-        sent_records = SentRecord.objects.filter(campaign=campaign)
-        sent_counts = sent_records.aggregate(
-            total=Count('id'),
-            accepted=Count('id', filter=Q(sent_status__in=['SUBMITTED', 'ACCEPTED'])),
-            rejected=Count('id', filter=Q(sent_status='REJECTED')),
-            failed=Count('id', filter=Q(sent_status='FAILED')),
-        )
-        data['sent'] = {key: value or 0 for key, value in sent_counts.items()}
-        data['sent']['rejection_reasons'] = list(
-            sent_records.filter(sent_status='REJECTED').exclude(error_message='')
-            .values('error_message').annotate(count=Count('id'))
-            .order_by('-count', 'error_message')[:5]
-        )
+        success_sent = SuccessSent.objects.filter(campaign=campaign)
+        failed_sent = FailedSent.objects.filter(campaign=campaign)
+        if success_sent.exists() or failed_sent.exists():
+            rejected = failed_sent.filter(provider_status__iexact='REJECTED').count()
+            failed = failed_sent.count() - rejected
+            data['sent'] = {
+                'total': success_sent.count() + failed_sent.count(),
+                'accepted': success_sent.count(),
+                'rejected': rejected,
+                'failed': failed,
+                'rejection_reasons': list(
+                    failed_sent.exclude(last_error='')
+                    .values(error_message=F('last_error'))
+                    .annotate(count=Count('id'))
+                    .order_by('-count', 'error_message')[:5]
+                ),
+            }
+        else:
+            sent_records = SentRecord.objects.filter(campaign=campaign)
+            sent_counts = sent_records.aggregate(
+                total=Count('id'),
+                accepted=Count('id', filter=Q(sent_status__in=['SUBMITTED', 'ACCEPTED'])),
+                rejected=Count('id', filter=Q(sent_status='REJECTED')),
+                failed=Count('id', filter=Q(sent_status='FAILED')),
+            )
+            data['sent'] = {key: value or 0 for key, value in sent_counts.items()}
+            data['sent']['rejection_reasons'] = list(
+                sent_records.filter(sent_status='REJECTED').exclude(error_message='')
+                .values('error_message').annotate(count=Count('id'))
+                .order_by('-count', 'error_message')[:5]
+            )
 
     if include_delivery_stats:
-        delivery_records = DeliveryRecord.objects.filter(campaign=campaign)
-        delivery_counts = delivery_records.aggregate(
-            total=Count('id'),
-            delivered=Count('id', filter=Q(delivery_status='DELIVERED')),
-            failed=Count('id', filter=Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])),
-        )
-        accepted = (data.get('sent') or {}).get('accepted', 0)
-        data['delivery'] = {
-            **{key: value or 0 for key, value in delivery_counts.items()},
-            'failure_by_status': list(
+        success_delivery = SuccessDelivery.objects.filter(campaign=campaign)
+        failed_delivery = FailedDelivery.objects.filter(campaign=campaign)
+        if success_delivery.exists() or failed_delivery.exists():
+            delivery_counts = {
+                'total': success_delivery.count() + failed_delivery.count(),
+                'delivered': success_delivery.count(),
+                'failed': failed_delivery.count(),
+            }
+            failure_by_status = list(
+                failed_delivery.values('delivery_status')
+                .annotate(count=Count('id'))
+                .order_by('delivery_status')
+            )
+        else:
+            delivery_records = DeliveryRecord.objects.filter(campaign=campaign)
+            delivery_counts = delivery_records.aggregate(
+                total=Count('id'),
+                delivered=Count('id', filter=Q(delivery_status='DELIVERED')),
+                failed=Count('id', filter=Q(delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'])),
+            )
+            failure_by_status = list(
                 delivery_records.filter(
                     delivery_status__in=['UNDELIVERABLE', 'EXPIRED', 'REJECTED'],
                 ).values('delivery_status').annotate(count=Count('id')).order_by('delivery_status')
-            ),
+            )
+        accepted = (data.get('sent') or {}).get('accepted', 0)
+        data['delivery'] = {
+            **{key: value or 0 for key, value in delivery_counts.items()},
+            'failure_by_status': failure_by_status,
             'delivery_rate': (delivery_counts['delivered'] or 0) / accepted if accepted else 0,
         }
 
