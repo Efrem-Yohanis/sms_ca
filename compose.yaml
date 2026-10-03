@@ -115,6 +115,38 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  admin-backend:
+    build:
+      context: .
+      dockerfile: admin_backend/Dockerfile
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8002"
+    environment:
+      DB_ENGINE: postgresql
+      DB_NAME: ${POSTGRES_DB:-campaign_manager}
+      DB_USER: ${POSTGRES_USER:-campaign_manager}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
+      DB_HOST: db
+      DB_PORT: 5432
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},admin-backend"
+      ADMIN_BACKEND_CORS_ORIGINS: "${ADMIN_BACKEND_CORS_ORIGINS:-http://localhost:5173,http://localhost:4173,http://localhost:5123,http://localhost:3000}"
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-SPPzmCFeMC2o0d3B4yaC094nDeE2ryKvKLR60OkUJC0=}
+    ports:
+      - "${ADMIN_BACKEND_HOST_PORT:-8002}:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/api/v1/health/', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+      django:
+        condition: service_healthy
+    restart: unless-stopped
+
   audience-worker:
     build:
       context: .
@@ -316,16 +348,45 @@ services:
     build:
       context: ./sms_ui
       dockerfile: Dockerfile
+      args:
+        VITE_ADMIN_API_BASE_URL: ${VITE_ADMIN_API_BASE_URL:-http://localhost:8002}
     ports:
       - "3000:80"
     depends_on:
-      - django
+      django:
+        condition: service_healthy
+      admin-backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  admin-ui:
+    build:
+      context: ./admin-ui
+      dockerfile: Dockerfile
+      args:
+        VITE_ADMIN_API_URL: ${VITE_ADMIN_API_URL:-http://localhost:8002/api/v1}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      NITRO_HOST: 0.0.0.0
+      NITRO_PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "${ADMIN_UI_HOST_PORT:-4173}:3000"
+    depends_on:
+      admin-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
   postgres_data:
   audience_uploads:
-    external: true
     name: sms_audience_uploads
   pgadmin_data:
   kafka_data:

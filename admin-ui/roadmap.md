@@ -1,0 +1,2 @@
+- [ ] Build a UI-only admin console covering the specified screens and navigation.
+- [ ] Verify desktop and mobile preview and interaction states.

@@ -1,0 +1,115 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "DM Sans", sans-serif;
+  --font-display: "Plus Jakarta Sans", sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted: var(--sidebar-muted);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger-soft: var(--danger-soft);
+  --color-surface: var(--surface);
+  --color-chart-grid: var(--chart-grid);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+:root {
+  --background: oklch(0.973 0.006 170);
+  --foreground: oklch(0.225 0.025 180);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.225 0.025 180);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.225 0.025 180);
+  --primary: oklch(0.42 0.105 170);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.94 0.012 170);
+  --secondary-foreground: oklch(0.3 0.045 170);
+  --muted: oklch(0.955 0.006 175);
+  --muted-foreground: oklch(0.54 0.018 180);
+  --accent: oklch(0.925 0.024 170);
+  --accent-foreground: oklch(0.32 0.07 170);
+  --destructive: oklch(0.56 0.19 28);
+  --destructive-foreground: oklch(0.99 0 0);
+  --border: oklch(0.905 0.01 175);
+  --input: oklch(0.88 0.012 175);
+  --ring: oklch(0.58 0.105 170);
+  --sidebar: oklch(0.205 0.028 185);
+  --sidebar-foreground: oklch(0.95 0.008 170);
+  --sidebar-muted: oklch(0.68 0.016 180);
+  --sidebar-active: oklch(0.31 0.045 177);
+  --success: oklch(0.43 0.13 155);
+  --success-soft: oklch(0.94 0.045 155);
+  --warning: oklch(0.58 0.13 62);
+  --warning-soft: oklch(0.963 0.035 75);
+  --danger-soft: oklch(0.955 0.03 25);
+  --surface: oklch(0.984 0.003 170);
+  --chart-grid: oklch(0.94 0.01 175);
+}
+
+.dark {
+  --background: oklch(0.17 0.017 185);
+  --foreground: oklch(0.96 0.005 175);
+  --card: oklch(0.23 0.022 185);
+  --card-foreground: oklch(0.96 0.005 175);
+  --popover: oklch(0.23 0.022 185);
+  --popover-foreground: oklch(0.96 0.005 175);
+  --primary: oklch(0.72 0.11 165);
+  --primary-foreground: oklch(0.17 0.025 185);
+  --secondary: oklch(0.29 0.03 180);
+  --secondary-foreground: oklch(0.96 0.005 175);
+  --muted: oklch(0.29 0.03 180);
+  --muted-foreground: oklch(0.73 0.012 175);
+  --accent: oklch(0.32 0.04 175);
+  --accent-foreground: oklch(0.95 0.005 175);
+  --destructive: oklch(0.68 0.18 28);
+  --destructive-foreground: oklch(0.15 0 0);
+  --border: oklch(0.36 0.015 180);
+  --input: oklch(0.42 0.015 180);
+  --ring: oklch(0.72 0.11 165);
+  --surface: oklch(0.26 0.025 180);
+  --success: oklch(0.75 0.11 155);
+  --success-soft: oklch(0.27 0.055 155);
+  --warning: oklch(0.78 0.13 75);
+  --warning-soft: oklch(0.31 0.055 75);
+  --danger-soft: oklch(0.3 0.055 25);
+  --chart-grid: oklch(0.35 0.012 180);
+}
+
+@layer base {
+  * { border-color: var(--color-border); }
+  body { margin: 0; background: var(--color-background); color: var(--color-foreground); font-family: var(--font-sans); }
+  button, input, select, textarea { font: inherit; }
+}
+
+.admin-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.admin-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+.chart-bars { background-image: linear-gradient(to top, var(--chart-grid) 1px, transparent 1px); background-size: 100% 25%; }
