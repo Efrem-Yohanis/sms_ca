@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY admin_backend/ ./admin_backend/
+COPY . ./admin_backend/
 WORKDIR /app/admin_backend
 
 EXPOSE 8002

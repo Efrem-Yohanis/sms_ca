@@ -405,6 +405,23 @@ def annotate_campaign_child_ids(queryset):
         ),
     )
 
+
+def _campaign_record_count(model, **filters):
+	queryset = (
+		model.objects
+		.filter(campaign_id=OuterRef('pk'), **filters)
+		.order_by()
+		.values('campaign_id')
+		.annotate(total=Count('pk'))
+		.values('total')[:1]
+	)
+	return Coalesce(
+		Subquery(queryset, output_field=IntegerField()),
+		Value(0),
+		output_field=IntegerField(),
+	)
+
+
 class UserRegistrationView(CreateAPIView):
 	serializer_class = UserRegistrationSerializer
 	permission_classes = [AllowAny]
@@ -2276,18 +2293,26 @@ class CampaignListCreateView(ListCreateAPIView):
 
 	def get_queryset(self):
 		queryset = Campaign.objects.filter(is_deleted=False).select_related('schedule', 'audience_config').annotate(
-			queue_total=Count('messages', distinct=True),
-			queue_processed=Count(
-				'messages',
-				filter=Q(messages__sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED', 'REJECTED', 'FAILED']),
-				distinct=True,
+			queue_total=_campaign_record_count(MessageObject),
+			queue_processed=_campaign_record_count(
+				MessageObject,
+				sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED', 'REJECTED', 'FAILED'],
 			),
-			successful_sent=Count('success_sent_messages', distinct=True),
-			failed_sent=Count('failed_sent_messages', distinct=True),
-			successful_delivery=Count('success_delivery_messages', distinct=True),
-			failed_delivery=Count('failed_delivery_messages', distinct=True),
-			queue_success_sent=Count('messages', filter=Q(messages__sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED']), distinct=True),
-			queue_failed_sent=Count('messages', filter=Q(messages__sent_status__in=['REJECTED', 'FAILED']), distinct=True),
+			successful_sent=_campaign_record_count(SuccessSent),
+			failed_sent=_campaign_record_count(FailedSent),
+			successful_delivery=_campaign_record_count(SuccessDelivery),
+			failed_delivery=_campaign_record_count(FailedDelivery),
+			queue_success_sent=_campaign_record_count(
+				MessageObject,
+				sent_status__in=['SENT', 'SUBMITTED', 'ACCEPTED'],
+			),
+			queue_failed_sent=_campaign_record_count(
+				MessageObject,
+				sent_status__in=['REJECTED', 'FAILED'],
+			),
+			has_audience_members=Exists(
+				AudienceMember.objects.filter(campaign_id=OuterRef('pk'), is_valid=True)
+			),
 		).annotate(
 			total_messages=F('queue_total') + F('successful_sent') + F('failed_sent'),
 			total_processed=F('queue_processed') + F('successful_sent') + F('failed_sent'),
@@ -2319,6 +2344,14 @@ class CampaignListCreateView(ListCreateAPIView):
 			queryset = queryset.filter(created_by=self.request.user)
 
 		return annotate_campaign_child_ids(queryset).order_by('-created_at')
+
+	def get_serializer_context(self):
+		context = super().get_serializer_context()
+		if self.request.method == 'GET':
+			context['channel_names_by_id'] = dict(
+				Channel.objects.values_list('id', 'name')
+			)
+		return context
 
 	def get_serializer_class(self):
 		if self.request.method == 'POST':

@@ -865,7 +865,7 @@ class CampaignManualDispatchTests(TestCase):
         self.assertTrue(response.json()['success'])
         self.assertEqual(Campaign.objects.get(pk=campaign.pk).status, 'active')
         mock_post.assert_called_once_with(
-            'http://sms-sender:8001/sender/start',
+            'http://sms_sender_app:8001/sender/start',
             json={'campaign_id': campaign.id, 'round_number': 1},
             timeout=30,
         )
@@ -1467,6 +1467,38 @@ class CampaignWorkflowStepTests(TestCase):
         cancel_result = CampaignActionsService(cancelled).cancel_campaign()
         self.assertTrue(cancel_result['success'])
         self.assertEqual(cancel_result['data']['status'], 'stopped')
+
+    @patch('sms_campaign_manager.services.campaign_activation_email.EmailMultiAlternatives')
+    def test_campaign_start_emails_owner_once(self, email_message):
+        campaign = self.create_campaign()
+        campaign.status = 'active'
+        campaign.is_ready_to_execute = True
+        campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        MessageObject.objects.create(
+            campaign=campaign,
+            message_id='msg_start_notification',
+            recipient='+251700000001',
+            sender_id=campaign.sender_id,
+            message_content='Hello customer',
+            channel=self.channel,
+            language=self.language,
+        )
+        email_message.return_value.send.return_value = 1
+
+        response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
+        retry_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(response.json()['data']['owner_notification_sent'])
+        self.assertEqual(retry_response.status_code, 200, retry_response.content)
+        email_message.assert_called_once()
+        email_kwargs = email_message.call_args.kwargs
+        self.assertEqual(email_kwargs['subject'], f'Campaign started: {campaign.name}')
+        self.assertEqual(email_kwargs['to'], ['owner@example.com'])
+        self.assertIn('The following campaign has started sending messages.', email_kwargs['body'])
+        email_html, content_type = email_message.return_value.attach_alternative.call_args.args
+        self.assertEqual(content_type, 'text/html')
+        self.assertIn(f'{campaign.name} is now sending', email_html)
 
     def test_campaign_message_queue_endpoints_build_list_stats_and_clear(self):
         campaign = self.create_campaign()

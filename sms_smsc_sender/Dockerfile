@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY sms_smsc_sender/requirements.txt /tmp/requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir \
         --trusted-host pypi.org \
         --trusted-host pypi.python.org \
@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir \
         --retries 5 --timeout 120 \
         -r /tmp/requirements.txt
 
-COPY sms_smsc_sender /app/sms_smsc_sender
+COPY . /app/sms_smsc_sender
 
 ENV PYTHONPATH=/app
 EXPOSE 8001

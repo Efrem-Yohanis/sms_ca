@@ -8,9 +8,7 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY sms_campign/ ./sms_campign/
-COPY sms_campaign_scheduler/ ./sms_campign/sms_campaign_scheduler/
-COPY sms_status_updater/ ./sms_status_updater/
+COPY . ./sms_campign/
 WORKDIR /app/sms_campign
 
 EXPOSE 8000

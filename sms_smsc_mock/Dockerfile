@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY sms_smsc_mock/requirements.txt /tmp/requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir \
         --trusted-host pypi.org \
         --trusted-host pypi.python.org \
@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir \
         --timeout 120 \
         -r /tmp/requirements.txt
 
-COPY sms_smsc_mock /app/sms_smsc_mock
+COPY . /app/sms_smsc_mock
 
 EXPOSE 8090
 

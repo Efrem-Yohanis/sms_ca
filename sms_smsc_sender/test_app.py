@@ -140,7 +140,7 @@ class SenderSMSCRequestTests(unittest.IsolatedAsyncioTestCase):
         ]
         chunk = {'language_id': 1, 'message_content': 'Hello', 'messages': messages}
         config = {
-            'base_url': 'http://mock-smsc:8090',
+            'base_url': 'http://mock_app:8090',
             'send_endpoint': '/onion/swift/duos',
             'http_method': 'POST',
             'request_timeout_seconds': 30,
@@ -157,7 +157,7 @@ class SenderSMSCRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcomes[1]['accepted'])
         self.assertEqual(outcomes[1]['error_type'], 'SMSC')
         url, request = sender.http.calls[0]
-        self.assertEqual(url, 'http://mock-smsc:8090/onion/swift/duos')
+        self.assertEqual(url, 'http://mock_app:8090/onion/swift/duos')
         self.assertEqual(request['json']['destAddr'], [{'id': '251799120001'}, {'id': '251799120002'}])
         self.assertEqual(request['json']['servicetype'], {'name': 'normal'})
         token = base64.b64encode(b'test-user:test-pass').decode()

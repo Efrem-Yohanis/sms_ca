@@ -11,8 +11,8 @@ from airflow.operators.python import PythonOperator
 
 
 log = logging.getLogger(__name__)
-DJANGO_API = os.getenv('AIRFLOW_DJANGO_API', 'http://django:8000/api/v1').rstrip('/')
-SENDER_API = os.getenv('AIRFLOW_SENDER_API', 'http://sms-sender:8001').rstrip('/')
+DJANGO_API = os.getenv('AIRFLOW_DJANGO_API', 'http://camaping_manager_backend_app:8000/api/v1').rstrip('/')
+SENDER_API = os.getenv('AIRFLOW_SENDER_API', 'http://sms_sender_app:8001').rstrip('/')
 AUDIENCE_BUILD_TIMEOUT_SECONDS = int(os.getenv('AIRFLOW_AUDIENCE_BUILD_TIMEOUT', '1800'))
 AUDIENCE_POLL_INTERVAL_SECONDS = int(os.getenv('AIRFLOW_AUDIENCE_POLL_INTERVAL', '5'))
 

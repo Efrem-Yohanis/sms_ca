@@ -4,7 +4,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .campaign_readiness import CampaignReadinessService
-from .campaign_activation_email import send_campaign_activation_email
+from .campaign_activation_email import send_campaign_activation_email, send_campaign_started_email
 from .message_builder import MessageBuilder
 
 
@@ -105,7 +105,16 @@ class CampaignActionsService:
             return {'success': False, 'message': 'Campaign has no queued messages to send.'}
         self.campaign.status = 'in_progress'
         self.campaign.save(update_fields=['status', 'updated_at'])
-        return {'success': True, 'message': 'Campaign sending started.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
+        owner_notification_sent = send_campaign_started_email(self.campaign)
+        return {
+            'success': True,
+            'message': 'Campaign sending started.',
+            'data': {
+                'campaign_id': self.campaign.id,
+                'status': self.campaign.status,
+                'owner_notification_sent': owner_notification_sent,
+            },
+        }
 
     def resume_campaign(self):
         if self.campaign.status != 'paused':

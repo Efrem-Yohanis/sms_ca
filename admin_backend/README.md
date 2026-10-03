@@ -42,13 +42,13 @@ the full stack, including the campaign UI, admin backend, and admin UI:
 
 ```powershell
 docker compose up --build -d
-docker compose exec admin-backend python manage.py createsuperuser
+docker compose exec admin_backend_app python manage.py createsuperuser
 ```
 
 The campaign UI is at `http://localhost:3000`, the admin UI is at
 `http://localhost:4173`, and the admin API and Django admin are at
 `http://localhost:8002/api/v1/` and `http://localhost:8002/admin/`. The
-admin-backend container applies migrations on startup after
+admin_backend_app container applies migrations on startup after
 the campaign service is healthy. Use the same Django signing secret across
 the campaign and admin services so campaign users created here can sign in to
 the campaign UI with their admin-assigned credentials. The browser-facing

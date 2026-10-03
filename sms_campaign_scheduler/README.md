@@ -2,6 +2,16 @@
 
 Standalone FastAPI service that checks campaign schedules and changes campaign state.
 
+## Compose profile
+
+The optional Compose service uses the `standalone-scheduler` profile:
+
+```powershell
+docker compose --profile standalone-scheduler up --build -d standalone_scheduler_api
+```
+
+The profile starts the API on port `8093`. Its background worker is disabled by default because the main stack uses the Airflow `scduler_app` for automatic dispatch. Do not enable `SMSC_SCHEDULER_RUN_WORKER` while Airflow is dispatching campaigns.
+
 ## Start
 
 From `C:\Users\efrem\Desktop\sms`:

@@ -156,7 +156,7 @@ class DeliveryReportTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch('sms_smsc_mock.app.MIN_DELAY_SECONDS', 0),
                 patch('sms_smsc_mock.app.MAX_DELAY_SECONDS', 0),
-                patch('sms_smsc_mock.app.DLR_CALLBACK_URL', 'http://dlr-receiver:8003/callback'),
+                patch('sms_smsc_mock.app.DLR_CALLBACK_URL', 'http://dlr_app:8003/callback'),
                 patch('sms_smsc_mock.app.pick_final_status', return_value='DELIVRD'),
                 patch('sms_smsc_mock.app.httpx.AsyncClient', return_value=fake_client),
             ):
@@ -170,7 +170,7 @@ class DeliveryReportTests(unittest.IsolatedAsyncioTestCase):
                     'servicetype': 'normal',
                     'status': 'submitted',
                     'received_at': '2026-09-28T08:04:01.234Z',
-                    'callback_url': 'http://dlr-receiver:8003/callback',
+                    'callback_url': 'http://dlr_app:8003/callback',
                 }
                 await store.accept(row)
                 await asyncio.gather(*list(store._delivery_tasks))
@@ -178,7 +178,7 @@ class DeliveryReportTests(unittest.IsolatedAsyncioTestCase):
                 stored = store.get_message(row['message_id'])
                 await store.stop()
 
-        self.assertEqual(fake_client.posts[0][0], 'http://dlr-receiver:8003/callback')
+        self.assertEqual(fake_client.posts[0][0], 'http://dlr_app:8003/callback')
         dlr = fake_client.posts[0][1]
         self.assertEqual(set(dlr), {'event', 'msisdn', 'messageId', 'status', 'doneDate'})
         self.assertEqual(dlr['event'], 'Delivery receipt received')

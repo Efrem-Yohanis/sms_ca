@@ -1117,6 +1117,13 @@ class CampaignListSerializer(serializers.ModelSerializer):
         }.get(obj.execution_status, obj.execution_status.title())
 
     def get_channels(self, obj):
+        channel_names_by_id = self.context.get('channel_names_by_id')
+        if channel_names_by_id is not None:
+            return sorted({
+                channel_names_by_id[channel_id]
+                for channel_id in (obj.channels_id or [])
+                if channel_id in channel_names_by_id
+            })
         return list(obj.channels.order_by('name').values_list('name', flat=True))
 
     def get_progress_percent(self, obj):
@@ -1132,6 +1139,8 @@ class CampaignListSerializer(serializers.ModelSerializer):
         return obj.schedule_id is not None
 
     def get_has_audience(self, obj):
+        if hasattr(obj, 'has_audience_members'):
+            return obj.has_audience_members
         return obj.has_audience
 
     def get_has_content(self, obj):
@@ -1525,4 +1534,3 @@ class ScheduleCreateUpdateSerializer(serializers.ModelSerializer):
         if not time_windows:
             raise serializers.ValidationError({'time_windows': 'At least one time window is required.'})
         return attrs
-

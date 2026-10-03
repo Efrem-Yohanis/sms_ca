@@ -10,7 +10,7 @@ from airflow.operators.python import PythonOperator
 
 
 log = logging.getLogger(__name__)
-DJANGO_API = os.getenv('AIRFLOW_DJANGO_API', 'http://django:8000/api/v1').rstrip('/')
+DJANGO_API = os.getenv('AIRFLOW_DJANGO_API', 'http://camaping_manager_backend_app:8000/api/v1').rstrip('/')
 
 
 def dispatch(**context):

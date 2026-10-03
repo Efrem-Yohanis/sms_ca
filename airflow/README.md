@@ -15,6 +15,6 @@ docker compose up --build -d
 
 Open the Airflow UI at `http://localhost:8080`. The local default login is `admin` / `change-this-local-password`; set `AIRFLOW_ADMIN_USERNAME`, `AIRFLOW_ADMIN_PASSWORD`, `AIRFLOW_FERNET_KEY`, and `AIRFLOW_WEBSERVER_SECRET_KEY` in `.env` before starting the stack anywhere shared or production-like. `AIRFLOW_WEBSERVER_PORT` changes the host port.
 
-The DAGs call Django at `http://django:8000/api/v1` and the FastAPI SMS sender at `http://sms-sender:8001` over the Compose network. The sender service uses the shared campaign PostgreSQL database and Kafka broker.
+The DAGs call the campaign API at `http://camaping_manager_backend_app:8000/api/v1` and the FastAPI SMS sender at `http://sms_sender_app:8001` over the Compose network. The sender service uses the shared campaign PostgreSQL database and Kafka broker.
 
 The local Compose configuration stores Airflow metadata in the same PostgreSQL database as Django. Use a dedicated database and stronger secret management for production deployments.

@@ -27,7 +27,7 @@ npm run dev
 
 ## Docker Compose
 
-The root `compose.yaml` builds and runs this admin UI alongside the admin
+The root `docker-compose.yml` builds and runs this admin UI alongside the admin
 backend and campaign UI. By default, the UI connects to
 `http://localhost:8002/api/v1`; set `VITE_ADMIN_API_URL` to the browser-
 reachable admin API URL when deploying elsewhere.

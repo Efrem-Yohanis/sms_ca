@@ -85,6 +85,8 @@ def build_activation_email_context(campaign):
 
     return {
         'campaign_name': campaign.name,
+        'notification_heading': f'{campaign.name} is active',
+        'notification_message': 'The following campaign is now active and ready to send.',
         'campaign_info_rows': campaign_info_rows,
         'default_language': content.default_language.name if content else '—',
         'languages_available': ', '.join(item['name'] for item in language_content) or '—',
@@ -99,11 +101,15 @@ def build_activation_email_context(campaign):
     }
 
 
-def _build_activation_email_text(context, owner_email=None):
+def _build_activation_email_text(
+    context,
+    owner_email=None,
+    notification_message='The following campaign is now active and ready to send.',
+):
     lines = [
         f'Hello {owner_email},' if owner_email else 'Hello,',
         '',
-        'The following campaign is now active and ready to send.',
+        notification_message,
         '',
         '═' * 67,
         ' 1. CAMPAIGN INFO',
@@ -184,6 +190,26 @@ def build_activation_email_html(campaign, owner_email=None):
 
 
 def send_campaign_activation_email(campaign):
+    return _send_campaign_owner_email(
+        campaign,
+        subject=f'Campaign activated: {campaign.name}',
+        notification_heading=f'{campaign.name} is active',
+        notification_message='The following campaign is now active and ready to send.',
+        notification_type='activation',
+    )
+
+
+def send_campaign_started_email(campaign):
+    return _send_campaign_owner_email(
+        campaign,
+        subject=f'Campaign started: {campaign.name}',
+        notification_heading=f'{campaign.name} is now sending',
+        notification_message='The following campaign has started sending messages.',
+        notification_type='started',
+    )
+
+
+def _send_campaign_owner_email(campaign, subject, notification_heading, notification_message, notification_type):
     recipients = list(dict.fromkeys(
         email.strip().lower()
         for email in (campaign.owner_emails or [])
@@ -192,15 +218,18 @@ def send_campaign_activation_email(campaign):
     if not recipients:
         return None
 
-    subject = f'Campaign activated: {campaign.name}'
-    context = build_activation_email_context(campaign)
+    context = {
+        **build_activation_email_context(campaign),
+        'notification_heading': notification_heading,
+        'notification_message': notification_message,
+    }
     config = get_active_email_config()
     sent_to_all = True
     for recipient in recipients:
         try:
             message = EmailMultiAlternatives(
                 subject=subject,
-                body=_build_activation_email_text(context, recipient),
+                body=_build_activation_email_text(context, recipient, notification_message),
                 from_email=config.default_from_email if config else settings.DEFAULT_FROM_EMAIL,
                 to=[recipient],
                 connection=get_email_connection(config),
@@ -215,6 +244,6 @@ def send_campaign_activation_email(campaign):
             if message.send(fail_silently=False) != 1:
                 sent_to_all = False
         except Exception:
-            logger.exception('Failed to send activation notification for campaign %s', campaign.pk)
+            logger.exception('Failed to send %s notification for campaign %s', notification_type, campaign.pk)
             sent_to_all = False
     return sent_to_all

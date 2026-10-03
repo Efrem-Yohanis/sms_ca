@@ -6,10 +6,10 @@ The mock implements the real SMSC's HTTP contract for local development. It acce
 
 | Property | Value |
 |---|---|
-| Compose service | `smsc-mock` |
-| Container | `sms-mock-smsc` |
+| Compose service | `mock_app` |
+| Container | `mock_app` |
 | Port | `8090` |
-| Internal URLs | `http://mock-smsc:8090`, `http://mock-smsc.local:8090` |
+| Internal URL | `http://mock_app:8090` |
 | Network | `sms-network` |
 | Runtime | Python 3.11, FastAPI, Uvicorn (4 workers) |
 
@@ -93,4 +93,4 @@ SQLite stores message rows in `/data/smsc_mock.sqlite3` in Compose, using WAL mo
 | `SMSC_MOCK_FLUSH_INTERVAL` | `0.01` | Partial-batch flush interval in seconds |
 | `SMSC_MOCK_LOG_LEVEL` | `INFO` | Logging level |
 
-Configure the sender's SMSC entry with `base_url=http://mock-smsc:8090`, `send_endpoint=/onion/swift/duos`, `auth_type=basic`, and the same username and password. The callback service must be reachable at the configured callback URL; Compose defaults it to `http://dlr-receiver:8003/api/v1/delivery-reports/callback/`.
+Configure the sender's SMSC entry with `base_url=http://mock_app:8090`, `send_endpoint=/onion/swift/duos`, `auth_type=basic`, and the same username and password. The callback service must be reachable at the configured callback URL; Compose defaults it to `http://dlr_app:8003/api/v1/delivery-reports/callback/`.
