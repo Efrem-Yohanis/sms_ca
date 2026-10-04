@@ -13,6 +13,7 @@ from .models import (
     AdminEmailConfig,
     NAddress,
     NAddressesConfig,
+    PasswordResetChallenge,
     SenderID,
     SMSCConfig,
     UserProfile,
@@ -39,9 +40,9 @@ class AdminBackendApiTests(TransactionTestCase):
         super().tearDownClass()
 
     def setUp(self):
-        self.email_sender = patch("admin_control.views.send_admin_email")
-        self.email_sender.start()
-        self.addCleanup(self.email_sender.stop)
+        email_sender_patcher = patch("admin_control.views.send_admin_email")
+        self.email_sender = email_sender_patcher.start()
+        self.addCleanup(email_sender_patcher.stop)
         self.client = APIClient()
         self.admin = User.objects.create_user(
             username="platform-admin",
@@ -99,7 +100,7 @@ class AdminBackendApiTests(TransactionTestCase):
         self.assertEqual(self.email_sender.call_args.args[0], "new-manager@example.test")
         self.assertIn("http://localhost:3000/login", self.email_sender.call_args.args[2])
         self.assertIn('href="http://localhost:3000/login"', self.email_sender.call_args.args[3])
-        self.assertIn("Temporary password:", self.email_sender.call_args.args[3])
+        self.assertIn("TEMPORARY PASSWORD", self.email_sender.call_args.args[3])
 
         self.client.force_authenticate(self.manager)
         denied = self.client.get("/api/v1/admin/users/")
@@ -147,27 +148,42 @@ class AdminBackendApiTests(TransactionTestCase):
         self.assertEqual(login.status_code, 200)
         self.assertIn("access", login.data)
 
-    def test_password_reset_pin_is_emailed_and_can_reset_a_manager_password(self):
+    def test_password_reset_link_is_emailed_and_can_reset_a_manager_password_once(self):
         requested = self.client.post(
             "/api/v1/admin/auth/password-reset/request/",
             {"email": self.manager.email},
         )
         self.assertEqual(requested.status_code, 200)
         self.assertEqual(self.email_sender.call_args.args[0], self.manager.email)
-        pin = self.email_sender.call_args.args[2].split(" is ")[1].split(".")[0]
-        self.assertIn(pin, self.email_sender.call_args.args[3])
-        self.assertIn('href="http://localhost:3000/login"', self.email_sender.call_args.args[3])
+        email_body, html_body = self.email_sender.call_args.args[2:4]
+        reset_link = next(line for line in email_body.splitlines() if "/reset-password#" in line)
+        self.assertIn('href="http://localhost:3000/reset-password#', html_body)
+        self.assertIn("10 minutes", html_body)
+        challenge_id, token_fragment = reset_link.split("#", 1)[1].split("&")
+        challenge_id = challenge_id.removeprefix("challenge=")
+        token = token_fragment.removeprefix("token=")
+        challenge = PasswordResetChallenge.objects.get(pk=challenge_id)
+        self.assertNotEqual(challenge.token_hash, token)
 
         confirmed = self.client.post(
             "/api/v1/admin/auth/password-reset/confirm/",
             {
-                "email": self.manager.email,
-                "pin": pin,
+                "challenge": challenge_id,
+                "token": token,
                 "new_password": "Manager-reset-4912!",
             },
         )
         self.assertEqual(confirmed.status_code, 200, confirmed.data)
         self.assertTrue(User.objects.get(pk=self.manager.pk).check_password("Manager-reset-4912!"))
+        replayed = self.client.post(
+            "/api/v1/admin/auth/password-reset/confirm/",
+            {
+                "challenge": challenge_id,
+                "token": token,
+                "new_password": "Manager-reset-4912!",
+            },
+        )
+        self.assertEqual(replayed.status_code, 400)
 
     def test_user_creation_rejects_duplicate_identity_and_weak_password(self):
         self.client.force_authenticate(self.admin)

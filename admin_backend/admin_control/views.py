@@ -3,6 +3,7 @@ import os
 import secrets
 import smtplib
 from datetime import timedelta
+from urllib.parse import urlencode
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
@@ -78,13 +79,21 @@ def _serialize_manager_configs(serializer_class, queryset):
     ]
 
 
-def _user_login_url(profile):
-    portal_url = (
+def _user_portal_url(profile):
+    return (
         os.environ.get("ADMIN_PORTAL_URL", "http://localhost:4173")
         if profile.role == UserProfile.Role.ADMIN
         else os.environ.get("CAMPAIGN_MANAGER_URL", "http://localhost:3000")
     ).rstrip("/")
-    return f"{portal_url}/login"
+
+
+def _user_login_url(profile):
+    return f"{_user_portal_url(profile)}/login"
+
+
+def _user_password_reset_url(profile, challenge, token):
+    fragment = urlencode({"challenge": challenge.pk, "token": token})
+    return f"{_user_portal_url(profile)}/reset-password#{fragment}"
 
 
 class AdminLoginView(APIView):
@@ -367,7 +376,7 @@ class InitialPasswordChangeView(APIView):
         return Response({"success": True})
 
 
-class PasswordResetPinRequestView(APIView):
+class PasswordResetRequestView(APIView):
     permission_classes = []
     authentication_classes = []
 
@@ -382,78 +391,98 @@ class PasswordResetPinRequestView(APIView):
                 user=user, created_at__gte=timezone.now() - timedelta(minutes=1)
             ).exists()
             if not recent:
-                pin = f"{secrets.randbelow(1_000_000):06d}"
+                token = secrets.token_urlsafe(32)
                 PasswordResetChallenge.objects.filter(
                     user=user, consumed_at__isnull=True
                 ).delete()
                 challenge = PasswordResetChallenge.objects.create(
                     user=user,
-                    pin_hash=make_password(pin),
+                    token_hash=make_password(token),
                     expires_at=timezone.now() + timedelta(minutes=10),
                 )
-                login_url = _user_login_url(profile)
+                reset_url = _user_password_reset_url(profile, challenge, token)
                 try:
                     send_admin_email(
                         user.email,
-                        "Your SMS platform password reset PIN",
+                        "Reset your SMS platform password",
                         (
                             f"Hello {user.get_full_name() or user.username},\n\n"
-                            f"Your password reset PIN is {pin}. It expires in 10 minutes.\n\n"
-                            f"Sign in here: {login_url}"
+                            "We received a request to reset your SMS platform password.\n"
+                            "Use the secure link below within 10 minutes to choose a new password:\n\n"
+                            f"{reset_url}\n\n"
+                            "If you did not request this reset, you can ignore this email."
                         ),
                         render_to_string(
-                            "admin_control/emails/password_reset_pin.html",
+                            "admin_control/emails/password_reset_link.html",
                             {
                                 "full_name": user.get_full_name() or user.username,
-                                "pin": pin,
-                                "login_url": login_url,
+                                "reset_url": reset_url,
                             },
                         ),
                     )
                 except (AdminEmailNotConfigured, smtplib.SMTPException, OSError) as error:
                     challenge.delete()
-                    logger.exception("Could not send the password reset PIN.")
+                    logger.exception("Could not send the password reset link.")
                     return Response(
                         {"detail": "Password reset email could not be sent. Check admin email settings."},
                         status=status.HTTP_503_SERVICE_UNAVAILABLE,
                     )
         return Response(
-            {"detail": "If an active account matches that email, a reset PIN has been sent."}
+            {"detail": "If an active account matches that email, a password reset link has been sent."}
         )
 
 
-class PasswordResetPinConfirmView(APIView):
+class PasswordResetConfirmView(APIView):
     permission_classes = []
     authentication_classes = []
 
     def post(self, request):
-        email = request.data.get("email", "")
-        pin = request.data.get("pin", "")
+        challenge_id = request.data.get("challenge")
+        token = request.data.get("token", "")
         new_password = request.data.get("new_password", "")
-        if not all(isinstance(value, str) and value for value in (email, pin, new_password)):
+        try:
+            challenge_id = int(challenge_id)
+        except (TypeError, ValueError):
+            challenge_id = 0
+        if not challenge_id or not all(
+            isinstance(value, str) and value for value in (token, new_password)
+        ):
             return Response(
-                {"detail": "Email, PIN, and new password are required."},
+                {"detail": "A valid reset link and new password are required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        user = User.objects.filter(email__iexact=email.strip(), is_active=True).first()
-        profile = getattr(user, "admin_profile", None) if user else None
-        challenge = (
-            PasswordResetChallenge.objects.filter(
-                user=user, consumed_at__isnull=True, expires_at__gt=timezone.now(), attempts__lt=5
-            ).first()
-            if user and profile and not profile.is_locked
-            else None
-        )
-        if not challenge or not check_password(pin, challenge.pin_hash):
-            if challenge:
-                challenge.attempts += 1
-                challenge.save(update_fields=["attempts"])
-            return Response({"pin": ["The PIN is invalid or expired."]}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            validate_password(new_password, user=user)
-        except DjangoValidationError as error:
-            return Response({"new_password": error.messages}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            challenge = (
+                PasswordResetChallenge.objects.select_for_update()
+                .select_related("user")
+                .filter(
+                    pk=challenge_id,
+                    consumed_at__isnull=True,
+                    expires_at__gt=timezone.now(),
+                    attempts__lt=5,
+                )
+                .first()
+            )
+            user = challenge.user if challenge else None
+            profile = getattr(user, "admin_profile", None) if user else None
+            if (
+                not challenge
+                or not user.is_active
+                or not profile
+                or profile.is_locked
+                or not check_password(token, challenge.token_hash)
+            ):
+                if challenge:
+                    challenge.attempts += 1
+                    challenge.save(update_fields=["attempts"])
+                return Response(
+                    {"token": ["This password reset link is invalid or expired."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                validate_password(new_password, user=user)
+            except DjangoValidationError as error:
+                return Response({"new_password": error.messages}, status=status.HTTP_400_BAD_REQUEST)
             user.set_password(new_password)
             user.save(update_fields=["password"])
             profile.require_password_change = False

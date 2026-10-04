@@ -349,7 +349,7 @@ class AdminEmailConfig(models.Model):
 
 class PasswordResetChallenge(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="admin_password_challenges")
-    pin_hash = models.CharField(max_length=128)
+    token_hash = models.CharField(max_length=128)
     expires_at = models.DateTimeField(db_index=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     consumed_at = models.DateTimeField(null=True, blank=True)

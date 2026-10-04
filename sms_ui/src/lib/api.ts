@@ -1,5 +1,11 @@
 // Re-export base utilities so existing imports from "@/lib/api" still work
-export { API_BASE, API_V1_BASE, authHeaders, authFetch, handleResponse } from "./api/base";
+export {
+  API_BASE,
+  API_V1_BASE,
+  authHeaders,
+  authFetch,
+  handleResponse,
+} from "./api/base";
 export type { PaginatedResponse } from "./api/base";
 
 // Re-export standalone resource APIs
@@ -9,22 +15,42 @@ export * from "./api/messages";
 export * from "./api/dashboard";
 
 // Keep local imports for functions that use the module-level variable
-import { API_BASE, API_V1_BASE, authFetch, authHeaders, handleResponse } from "./api/base";
+import {
+  API_BASE,
+  API_V1_BASE,
+  authFetch,
+  authHeaders,
+  handleResponse,
+} from "./api/base";
 import { fetchLanguages } from "./api/configurations";
-import { configureDatabaseAudience, configureFileAudience, fetchCampaignAudienceConfig, startAudienceBuild, waitForAudienceBuild } from "./api/audiences";
+import {
+  configureDatabaseAudience,
+  configureFileAudience,
+  fetchCampaignAudienceConfig,
+  startAudienceBuild,
+  waitForAudienceBuild,
+} from "./api/audiences";
 import type { AudienceBuildProgress } from "./api/audiences";
-import type { AudienceDatabaseSelection, AudienceSource } from "@/types/campaign";
+import type {
+  AudienceDatabaseSelection,
+  AudienceSource,
+} from "@/types/campaign";
 
 async function handleApiResponse<T>(res: Response): Promise<T> {
   const payload = await handleResponse<T | { data: T }>(res);
   return payload && typeof payload === "object" && "data" in payload
     ? payload.data
-    : payload as T;
+    : (payload as T);
 }
 
 /* -------- Auth -------- */
 
-export async function login(username: string, password: string): Promise<{ access: string; refresh: string } | { must_change_password: true }> {
+export async function login(
+  username: string,
+  password: string,
+): Promise<
+  { access: string; refresh: string } | { must_change_password: true }
+> {
   const res = await fetch(`${API_V1_BASE}/auth/login/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -35,7 +61,10 @@ export async function login(username: string, password: string): Promise<{ acces
 
 const ADMIN_API_BASE = `${(import.meta.env.VITE_ADMIN_API_BASE_URL || "http://localhost:8002").replace(/\/+$/, "")}/api/v1`;
 
-async function adminAuthRequest<T>(path: string, body: Record<string, string>): Promise<T> {
+async function adminAuthRequest<T>(
+  path: string,
+  body: Record<string, string>,
+): Promise<T> {
   const response = await fetch(`${ADMIN_API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -44,27 +73,47 @@ async function adminAuthRequest<T>(path: string, body: Record<string, string>): 
   return handleResponse(response);
 }
 
-export function changeTemporaryPassword(username: string, currentPassword: string, newPassword: string) {
+export function changeTemporaryPassword(
+  username: string,
+  currentPassword: string,
+  newPassword: string,
+) {
   return fetch(`${API_V1_BASE}/auth/initial-password/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, current_password: currentPassword, new_password: newPassword }),
+    body: JSON.stringify({
+      username,
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
   }).then((response) => handleResponse<{ success: true }>(response));
 }
 
-export function requestPasswordResetPin(email: string) {
-  return adminAuthRequest<{ detail: string }>("/admin/auth/password-reset/request/", { email });
+export function requestPasswordResetLink(email: string) {
+  return adminAuthRequest<{ detail: string }>(
+    "/admin/auth/password-reset/request/",
+    { email },
+  );
 }
 
-export function confirmPasswordResetPin(email: string, pin: string, newPassword: string) {
-  return adminAuthRequest<{ success: true }>("/admin/auth/password-reset/confirm/", {
-    email,
-    pin,
-    new_password: newPassword,
-  });
+export function confirmPasswordResetToken(
+  challenge: number,
+  token: string,
+  newPassword: string,
+) {
+  return adminAuthRequest<{ success: true }>(
+    "/admin/auth/password-reset/confirm/",
+    {
+      challenge: String(challenge),
+      token,
+      new_password: newPassword,
+    },
+  );
 }
 
-export async function refreshToken(refresh: string): Promise<{ access: string }> {
+export async function refreshToken(
+  refresh: string,
+): Promise<{ access: string }> {
   const res = await fetch(`${API_V1_BASE}/auth/refresh/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -192,8 +241,18 @@ export interface FetchCampaignsParams {
 }
 
 export async function fetchCampaigns(params: FetchCampaignsParams = {}) {
-  const { page = 1, pageSize = 10, status, execution_status, search, ordering } = params;
-  const qp = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  const {
+    page = 1,
+    pageSize = 10,
+    status,
+    execution_status,
+    search,
+    ordering,
+  } = params;
+  const qp = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
   if (status) qp.set("status", status);
   if (execution_status) qp.set("execution_status", execution_status);
   if (search) qp.set("search", search);
@@ -201,11 +260,15 @@ export async function fetchCampaigns(params: FetchCampaignsParams = {}) {
   const res = await authFetch(`${API_V1_BASE}/campaigns/?${qp.toString()}`, {
     headers: authHeaders(),
   });
-  return handleResponse<import("./api/base").PaginatedResponse<ApiCampaign>>(res);
+  return handleResponse<import("./api/base").PaginatedResponse<ApiCampaign>>(
+    res,
+  );
 }
 
 export async function fetchCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/`, { headers: authHeaders() });
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/`, {
+    headers: authHeaders(),
+  });
   return handleApiResponse<ApiCampaign>(res);
 }
 
@@ -225,7 +288,10 @@ export async function createCampaign(data: CreateCampaignPayload) {
   return handleApiResponse<{ id: number; [key: string]: unknown }>(res);
 }
 
-export async function updateCampaignApi(id: number, data: Partial<CreateCampaignPayload>) {
+export async function updateCampaignApi(
+  id: number,
+  data: Partial<CreateCampaignPayload>,
+) {
   const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/`, {
     method: "PATCH",
     headers: authHeaders(),
@@ -253,43 +319,97 @@ export async function softDeleteCampaign(id: number) {
 /* -------- Campaign Actions -------- */
 
 export async function startCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/send-now/`, { method: "POST", headers: authHeaders() });
-  return handleResponse<{ success: boolean; status?: string; message: string; campaign_id?: number }>(res);
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/send-now/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    success: boolean;
+    status?: string;
+    message: string;
+    campaign_id?: number;
+  }>(res);
 }
 
 export async function activateCampaign(id: number): Promise<{
   success: boolean;
   message: string;
-  data: { campaign_id: number; status: string; messages_built: number; owner_notification_sent: boolean | null };
+  data: {
+    campaign_id: number;
+    status: string;
+    messages_built: number;
+    owner_notification_sent: boolean | null;
+  };
   warnings: string[];
 }> {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/activate/`, { method: "POST", headers: authHeaders() });
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/activate/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
   return handleResponse(res);
 }
 
 export async function pauseCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/pause/`, { method: "POST", headers: authHeaders() });
-  return handleResponse<{ status: string; execution_status: string; message: string; campaign_id: number }>(res);
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/pause/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    status: string;
+    execution_status: string;
+    message: string;
+    campaign_id: number;
+  }>(res);
 }
 
 export async function resumeCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/send-now/`, { method: "POST", headers: authHeaders() });
-  return handleResponse<{ success: boolean; status?: string; message: string; campaign_id?: number }>(res);
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/send-now/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    success: boolean;
+    status?: string;
+    message: string;
+    campaign_id?: number;
+  }>(res);
 }
 
 export async function stopCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/cancel/`, { method: "POST", headers: authHeaders() });
-  return handleResponse<{ status: string; message: string; campaign_id: number }>(res);
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/cancel/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    status: string;
+    message: string;
+    campaign_id: number;
+  }>(res);
 }
 
 export async function completeCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/complete/`, { method: "POST", headers: authHeaders() });
-  return handleResponse<{ status: string; execution_status: string; message: string; campaign_id: number }>(res);
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/complete/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    status: string;
+    execution_status: string;
+    message: string;
+    campaign_id: number;
+  }>(res);
 }
 
 export async function archiveCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/archive/`, { method: "POST", headers: authHeaders() });
-  return handleResponse<{ status: string; message: string; campaign_id: number }>(res);
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/archive/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    status: string;
+    message: string;
+    campaign_id: number;
+  }>(res);
 }
 
 /* -------- Schedule (campaign-nested) -------- */
@@ -305,33 +425,51 @@ export interface SchedulePayload {
 }
 
 export async function fetchSchedule(campaignId: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/schedule/`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/schedule/`,
+    { headers: authHeaders() },
+  );
   return handleApiResponse(res);
 }
 
-export async function createSchedule(campaignId: number, data: SchedulePayload) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/schedule/`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(data),
-  });
+export async function createSchedule(
+  campaignId: number,
+  data: SchedulePayload,
+) {
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/schedule/`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(data),
+    },
+  );
   return handleApiResponse(res);
 }
 
-export async function updateSchedule(campaignId: number, data: Partial<SchedulePayload>) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/schedule/`, {
-    method: "PATCH",
-    headers: authHeaders(),
-    body: JSON.stringify(data),
-  });
+export async function updateSchedule(
+  campaignId: number,
+  data: Partial<SchedulePayload>,
+) {
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/schedule/`,
+    {
+      method: "PATCH",
+      headers: authHeaders(),
+      body: JSON.stringify(data),
+    },
+  );
   return handleApiResponse(res);
 }
 
 export async function deleteSchedule(campaignId: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/schedule/`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/schedule/`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
   return handleResponse<void>(res);
 }
 
@@ -349,45 +487,72 @@ function serializeMessageContent(data: MessageContentPayload) {
   };
 }
 
-export async function createCampaignMessageContent(campaignId: number, data: MessageContentPayload) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/content/`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(serializeMessageContent(data)),
-  });
+export async function createCampaignMessageContent(
+  campaignId: number,
+  data: MessageContentPayload,
+) {
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/content/`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(serializeMessageContent(data)),
+    },
+  );
   return handleApiResponse(res);
 }
 
 export async function fetchMessageContent(campaignId: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/content/`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/content/`,
+    { headers: authHeaders() },
+  );
   return handleApiResponse(res);
 }
 
-export async function updateMessageContent(campaignId: number, data: MessageContentPayload) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/content/`, {
-    method: "PUT",
-    headers: authHeaders(),
-    body: JSON.stringify(serializeMessageContent(data)),
-  });
+export async function updateMessageContent(
+  campaignId: number,
+  data: MessageContentPayload,
+) {
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/content/`,
+    {
+      method: "PUT",
+      headers: authHeaders(),
+      body: JSON.stringify(serializeMessageContent(data)),
+    },
+  );
   return handleApiResponse(res);
 }
 
-export async function patchMessageContent(campaignId: number, data: Partial<MessageContentPayload>) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/content/`, {
-    method: "PATCH",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      ...(data.content ?? {}),
-      ...(data.default_language !== undefined ? { default_language: data.default_language } : {}),
-    }),
-  });
+export async function patchMessageContent(
+  campaignId: number,
+  data: Partial<MessageContentPayload>,
+) {
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/content/`,
+    {
+      method: "PATCH",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        ...(data.content ?? {}),
+        ...(data.default_language !== undefined
+          ? { default_language: data.default_language }
+          : {}),
+      }),
+    },
+  );
   return handleApiResponse(res);
 }
 
 /* -------- Audience (campaign-nested) -------- */
 
 export interface AudiencePayload {
-  recipients: { msisdn: string; lang: string; variables?: Record<string, string> }[];
+  recipients: {
+    msisdn: string;
+    lang: string;
+    variables?: Record<string, string>;
+  }[];
   default_language: string;
   source_type: AudienceSource;
   database_config?: AudienceDatabaseSelection | null;
@@ -395,7 +560,10 @@ export interface AudiencePayload {
 }
 
 export async function fetchAudience(campaignId: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/audience/`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/audience/`,
+    { headers: authHeaders() },
+  );
   return handleApiResponse(res);
 }
 
@@ -405,12 +573,20 @@ export async function saveCampaignAudience(
   onProgress?: (progress: AudienceBuildProgress) => void,
 ) {
   const languages = await fetchLanguages();
-  const defaultLanguage = languages.results.find((language) => language.code === data.default_language);
-  if (!defaultLanguage) throw new Error(`Default language '${data.default_language}' is not configured`);
+  const defaultLanguage = languages.results.find(
+    (language) => language.code === data.default_language,
+  );
+  if (!defaultLanguage)
+    throw new Error(
+      `Default language '${data.default_language}' is not configured`,
+    );
 
   let configId: number;
   if (data.source_type === "database") {
-    if (!data.database_config) throw new Error("Choose and preview a database source before building the audience");
+    if (!data.database_config)
+      throw new Error(
+        "Choose and preview a database source before building the audience",
+      );
     const response = await configureDatabaseAudience(campaignId, {
       ...data.database_config,
       default_language_id: defaultLanguage.id,
@@ -432,29 +608,43 @@ export async function saveCampaignAudience(
     } else {
       const existingConfig = await fetchCampaignAudienceConfig(campaignId);
       if (!existingConfig || existingConfig.source_type !== "file_import") {
-        throw new Error("Upload a CSV or spreadsheet and select its MSISDN column");
+        throw new Error(
+          "Upload a CSV or spreadsheet and select its MSISDN column",
+        );
       }
       configId = existingConfig.id;
     }
   } else {
-    const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/audience-config/`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({
-        source_type: "manual",
-        manual_msisdns: data.recipients.map((recipient) => recipient.msisdn),
-        manual_languages: data.recipients.map((recipient) => recipient.lang ?? ""),
-        default_language_id: defaultLanguage.id,
-        mapper_enabled: false,
-      }),
-    });
+    const res = await authFetch(
+      `${API_V1_BASE}/campaigns/${campaignId}/audience-config/`,
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          source_type: "manual",
+          manual_msisdns: data.recipients.map((recipient) => recipient.msisdn),
+          manual_languages: data.recipients.map(
+            (recipient) => recipient.lang ?? "",
+          ),
+          default_language_id: defaultLanguage.id,
+          mapper_enabled: false,
+        }),
+      },
+    );
     const config = await handleApiResponse<{ id: number }>(res);
     configId = config.id;
   }
 
   const build = await startAudienceBuild(configId);
-  const result = await waitForAudienceBuild(build.job_id, configId, 30, onProgress);
-  const buildResult = result.result as { data?: { total_count?: number } } | null;
+  const result = await waitForAudienceBuild(
+    build.job_id,
+    configId,
+    30,
+    onProgress,
+  );
+  const buildResult = result.result as {
+    data?: { total_count?: number };
+  } | null;
   return {
     campaign_id: campaignId,
     audience_id: configId,
@@ -465,49 +655,76 @@ export async function saveCampaignAudience(
 }
 
 export async function deleteAudience(campaignId: number) {
-  const res = await authFetch(`${API_BASE}/api/campaigns/${campaignId}/audience/`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
+  const res = await authFetch(
+    `${API_BASE}/api/campaigns/${campaignId}/audience/`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
   return handleResponse<void>(res);
 }
 
 /* -------- Progress & Batches -------- */
 
 export async function fetchCampaignProgress(campaignId: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/progress/`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/progress/`,
+    { headers: authHeaders() },
+  );
   return handleResponse<{
     campaign_id: number;
     campaign_name: string;
     progress: ApiProgress;
-    batches: { total_batches: number; completed_batches: number; failed_batches: number; in_progress_batches: number };
+    batches: {
+      total_batches: number;
+      completed_batches: number;
+      failed_batches: number;
+      in_progress_batches: number;
+    };
   }>(res);
 }
 
-export async function fetchCampaignBatches(campaignId: number, status?: string) {
+export async function fetchCampaignBatches(
+  campaignId: number,
+  status?: string,
+) {
   const params = status ? `?status=${status}` : "";
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/messages/batches/${params}`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_V1_BASE}/campaigns/${campaignId}/messages/batches/${params}`,
+    { headers: authHeaders() },
+  );
   return handleResponse(res);
 }
 
 export async function fetchCampaignCheckpoint(campaignId: number) {
-  const res = await authFetch(`${API_BASE}/api/campaigns/${campaignId}/checkpoint/`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_BASE}/api/campaigns/${campaignId}/checkpoint/`,
+    { headers: authHeaders() },
+  );
   return handleResponse(res);
 }
 
 /* -------- Utility -------- */
 
 export async function fetchChannelChoices() {
-  const res = await authFetch(`${API_BASE}/api/campaigns/channel-choices/`, { headers: authHeaders() });
+  const res = await authFetch(`${API_BASE}/api/campaigns/channel-choices/`, {
+    headers: authHeaders(),
+  });
   return handleResponse<{ value: string; display: string }[]>(res);
 }
 
 export async function fetchExecutionStatusChoices() {
-  const res = await authFetch(`${API_BASE}/api/campaigns/execution-status-choices/`, { headers: authHeaders() });
+  const res = await authFetch(
+    `${API_BASE}/api/campaigns/execution-status-choices/`,
+    { headers: authHeaders() },
+  );
   return handleResponse<{ value: string; display: string }[]>(res);
 }
 
 export async function fetchCampaignSummary() {
-  const res = await authFetch(`${API_BASE}/api/campaigns/summary/`, { headers: authHeaders() });
+  const res = await authFetch(`${API_BASE}/api/campaigns/summary/`, {
+    headers: authHeaders(),
+  });
   return handleResponse(res);
 }

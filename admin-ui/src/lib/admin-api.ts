@@ -1,6 +1,7 @@
-const API_BASE = (
-  import.meta.env.VITE_ADMIN_API_URL || "http://localhost:8002/api/v1"
-).replace(/\/+$/, "");
+const API_BASE = (import.meta.env.VITE_ADMIN_API_URL || "http://localhost:8002/api/v1").replace(
+  /\/+$/,
+  "",
+);
 const ACCESS_TOKEN_KEY = "sms-admin-access-token";
 const REFRESH_TOKEN_KEY = "sms-admin-refresh-token";
 
@@ -158,12 +159,10 @@ export async function adminRequest<T>(
     window.dispatchEvent(new Event("admin-session-expired"));
   }
   const invalidatesWorkspace =
-    /^\/admin\/(users|smsc-configs|sender-ids|channels|tps-configs|n-address-configs|n-addresses)(?:\/|$)/.test(path);
-  if (
-    response.ok &&
-    (init.method ?? "GET").toUpperCase() !== "GET" &&
-    invalidatesWorkspace
-  ) {
+    /^\/admin\/(users|smsc-configs|sender-ids|channels|tps-configs|n-address-configs|n-addresses)(?:\/|$)/.test(
+      path,
+    );
+  if (response.ok && (init.method ?? "GET").toUpperCase() !== "GET" && invalidatesWorkspace) {
     window.dispatchEvent(new Event("admin-workspace-invalidated"));
   }
   if (response.status === 204) return undefined as T;
@@ -193,7 +192,11 @@ export async function adminLogin(username: string, password: string) {
   return { user: await adminRequest<ApiUser>("/admin/me/") };
 }
 
-export function changeInitialAdminPassword(username: string, currentPassword: string, newPassword: string) {
+export function changeInitialAdminPassword(
+  username: string,
+  currentPassword: string,
+  newPassword: string,
+) {
   return adminRequest<{ success: true }>(
     "/admin/auth/initial-password/",
     {
@@ -208,7 +211,7 @@ export function changeInitialAdminPassword(username: string, currentPassword: st
   );
 }
 
-export function requestAdminPasswordResetPin(email: string) {
+export function requestAdminPasswordResetLink(email: string) {
   return adminRequest<{ detail: string }>(
     "/admin/auth/password-reset/request/",
     { method: "POST", body: JSON.stringify({ email }) },
@@ -216,12 +219,16 @@ export function requestAdminPasswordResetPin(email: string) {
   );
 }
 
-export function confirmAdminPasswordResetPin(email: string, pin: string, newPassword: string) {
+export function confirmAdminPasswordResetToken(
+  challenge: number,
+  token: string,
+  newPassword: string,
+) {
   return adminRequest<{ success: true }>(
     "/admin/auth/password-reset/confirm/",
     {
       method: "POST",
-      body: JSON.stringify({ email, pin, new_password: newPassword }),
+      body: JSON.stringify({ challenge, token, new_password: newPassword }),
     },
     false,
   );

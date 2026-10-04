@@ -8,8 +8,7 @@ import {
   adminLogin,
   AdminApiError,
   changeInitialAdminPassword,
-  confirmAdminPasswordResetPin,
-  requestAdminPasswordResetPin,
+  requestAdminPasswordResetLink,
 } from "@/lib/admin-api";
 
 export const Route = createFileRoute("/login")({
@@ -32,14 +31,13 @@ export const Route = createFileRoute("/login")({
   component: LoginPage,
 });
 
-type View = "signin" | "force-change" | "forgot" | "reset-pin";
+type View = "signin" | "force-change" | "forgot" | "email-sent";
 
 function LoginPage() {
   const navigate = useNavigate();
   const [view, setView] = useState<View>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [pin, setPin] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
@@ -84,41 +82,25 @@ function LoginPage() {
       setConfirmPassword("");
       setView("signin");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not change the temporary password.");
+      setError(
+        reason instanceof Error ? reason.message : "Could not change the temporary password.",
+      );
     } finally {
       setSubmitting(false);
     }
   };
 
-  const requestPin = async (event: React.FormEvent<HTMLFormElement>) => {
+  const requestResetLink = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitting(true);
     setError("");
     try {
-      await requestAdminPasswordResetPin(email.trim());
-      setView("reset-pin");
+      await requestAdminPasswordResetLink(email.trim());
+      setView("email-sent");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not request a reset PIN.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const resetPassword = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (newPassword.length < 8) return setError("Password must be at least 8 characters.");
-    if (newPassword !== confirmPassword) return setError("Passwords do not match.");
-    setSubmitting(true);
-    setError("");
-    try {
-      await confirmAdminPasswordResetPin(email.trim(), pin.trim(), newPassword);
-      setPassword("");
-      setPin("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setView("signin");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not reset the password.");
+      setError(
+        reason instanceof Error ? reason.message : "Could not request a password reset link.",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -166,126 +148,136 @@ function LoginPage() {
         </header>
         <Card className="border-0 shadow-elevated">
           <CardContent className="p-6">
-        {view === "signin" && (
-          <form onSubmit={signIn} noValidate>
-            <div className="space-y-4">
-              <label className="block text-xs font-semibold">
-                Email or username
-                <div className="relative mt-2">
-                  <Mail className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    type="text"
-                    maxLength={255}
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Admin email or username"
-                    className="pl-9 font-normal"
-                  />
+            {view === "signin" && (
+              <form onSubmit={signIn} noValidate>
+                <div className="space-y-4">
+                  <label className="block text-xs font-semibold">
+                    Email or username
+                    <div className="relative mt-2">
+                      <Mail className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        type="text"
+                        maxLength={255}
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="Admin email or username"
+                        className="pl-9 font-normal"
+                      />
+                    </div>
+                  </label>
+                  <label className="block text-xs font-semibold">
+                    <span className="flex justify-between">
+                      Password
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setError("");
+                          setView("forgot");
+                        }}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        Forgot password?
+                      </button>
+                    </span>
+                    <div className="relative mt-2">
+                      <Lock className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        type="password"
+                        maxLength={128}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="pl-9 font-normal"
+                      />
+                    </div>
+                  </label>
+                  {error && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {error}
+                    </p>
+                  )}
+                  <Button type="submit" className="w-full" disabled={submitting}>
+                    <ShieldCheck /> {submitting ? "Signing in…" : "Sign in"}
+                  </Button>
                 </div>
-              </label>
-              <label className="block text-xs font-semibold">
-                <span className="flex justify-between">
-                  Password
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setError("");
-                      setView("forgot");
-                    }}
-                    className="font-medium text-primary hover:underline"
-                  >
-                    Forgot password?
-                  </button>
-                </span>
-                <div className="relative mt-2">
-                  <Lock className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    type="password"
-                    maxLength={128}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="pl-9 font-normal"
-                  />
-                </div>
-              </label>
-              {error && (
-                <p role="alert" className="text-xs text-destructive">
-                  {error}
+              </form>
+            )}
+            {view === "force-change" && (
+              <form onSubmit={changeTemporaryPassword}>
+                <h1 className="font-display text-3xl font-bold">Change your password</h1>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Your temporary password must be changed before you can continue.
                 </p>
-              )}
-              <Button type="submit" className="w-full" disabled={submitting}>
-                <ShieldCheck /> {submitting ? "Signing in…" : "Sign in"}
-              </Button>
-            </div>
-          </form>
-        )}
-        {view === "force-change" && (
-          <form onSubmit={changeTemporaryPassword}>
-            <h1 className="font-display text-3xl font-bold">Change your password</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Your temporary password must be changed before you can continue.
-            </p>
-            <div className="mt-8 space-y-4">
-              {passwordFields}
-              {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={submitting}>
-                {submitting ? "Changing…" : "Change password"}
-              </Button>
-            </div>
-          </form>
-        )}
-        {view === "forgot" && (
-          <form onSubmit={requestPin}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="-ml-3 mb-4 text-muted-foreground"
-              onClick={() => setView("signin")}
-            >
-              <ArrowLeft /> Back to sign in
-            </Button>
-            <h1 className="font-display text-3xl font-bold">Reset password</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              We’ll email a reset PIN if an active account matches this address.
-            </p>
-            <label className="mt-5 block text-xs font-semibold">
-              Email address
-              <Input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className="mt-2 font-normal" />
-            </label>
-            {error && <p role="alert" className="mt-3 text-xs text-destructive">{error}</p>}
-            <Button type="submit" className="mt-5 w-full" disabled={submitting}>
-              {submitting ? "Sending…" : "Send reset PIN"}
-            </Button>
-          </form>
-        )}
-        {view === "reset-pin" && (
-          <form onSubmit={resetPassword}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="-ml-3 mb-4 text-muted-foreground"
-              onClick={() => setView("forgot")}
-            >
-              <ArrowLeft /> Back
-            </Button>
-            <h1 className="font-display text-3xl font-bold">Enter reset PIN</h1>
-            <p className="mt-2 text-sm text-muted-foreground">The PIN was sent to {email} and expires in 10 minutes.</p>
-            <div className="mt-8 space-y-4">
-              <label className="block text-xs font-semibold">
-                Reset PIN
-                <Input inputMode="numeric" maxLength={6} required value={pin} onChange={(event) => setPin(event.target.value)} className="mt-2 font-normal" />
-              </label>
-              {passwordFields}
-              {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={submitting}>
-                {submitting ? "Resetting…" : "Reset password"}
-              </Button>
-            </div>
-          </form>
-        )}
+                <div className="mt-8 space-y-4">
+                  {passwordFields}
+                  {error && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {error}
+                    </p>
+                  )}
+                  <Button type="submit" className="w-full" disabled={submitting}>
+                    {submitting ? "Changing…" : "Change password"}
+                  </Button>
+                </div>
+              </form>
+            )}
+            {view === "forgot" && (
+              <form onSubmit={requestResetLink}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 mb-4 text-muted-foreground"
+                  onClick={() => setView("signin")}
+                >
+                  <ArrowLeft /> Back to sign in
+                </Button>
+                <h1 className="font-display text-3xl font-bold">Reset password</h1>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  We’ll email a secure password reset link if an active account matches this
+                  address.
+                </p>
+                <label className="mt-5 block text-xs font-semibold">
+                  Email address
+                  <Input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    className="mt-2 font-normal"
+                  />
+                </label>
+                {error && (
+                  <p role="alert" className="mt-3 text-xs text-destructive">
+                    {error}
+                  </p>
+                )}
+                <Button type="submit" className="mt-5 w-full" disabled={submitting}>
+                  {submitting ? "Sending…" : "Email me a reset link"}
+                </Button>
+              </form>
+            )}
+            {view === "email-sent" && (
+              <div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 mb-4 text-muted-foreground"
+                  onClick={() => setView("signin")}
+                >
+                  <ArrowLeft /> Back to sign in
+                </Button>
+                <h1 className="font-display text-3xl font-bold">Check your email</h1>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  If an active account matches <strong className="text-foreground">{email}</strong>,
+                  we’ve sent a secure password reset link. It expires in 10 minutes.
+                </p>
+                <p className="mt-4 text-xs text-muted-foreground">
+                  If it isn’t in your inbox, check your spam folder. You can safely close this page.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
         <p className="text-center text-xs text-muted-foreground">

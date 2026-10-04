@@ -15,6 +15,7 @@ import { Route as ChannelsRouteImport } from './routes/channels'
 import { Route as KafkaMonitorRouteImport } from './routes/kafka-monitor'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as NAddressesRouteImport } from './routes/n-addresses'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as SenderIdsRouteImport } from './routes/sender-ids'
 import { Route as SmscAccountsRouteImport } from './routes/smsc-accounts'
 import { Route as SmtpRouteImport } from './routes/smtp'
@@ -51,6 +52,11 @@ const LoginRoute = LoginRouteImport.update({
 const NAddressesRoute = NAddressesRouteImport.update({
   id: '/n-addresses',
   path: '/n-addresses',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SenderIdsRoute = SenderIdsRouteImport.update({
@@ -96,6 +102,7 @@ export interface FileRoutesByFullPath {
   '/kafka-monitor': typeof KafkaMonitorRoute
   '/login': typeof LoginRoute
   '/n-addresses': typeof NAddressesRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/sender-ids': typeof SenderIdsRoute
   '/smsc-accounts': typeof SmscAccountsRoute
   '/smtp': typeof SmtpRoute
@@ -111,6 +118,7 @@ export interface FileRoutesByTo {
   '/kafka-monitor': typeof KafkaMonitorRoute
   '/login': typeof LoginRoute
   '/n-addresses': typeof NAddressesRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/sender-ids': typeof SenderIdsRoute
   '/smsc-accounts': typeof SmscAccountsRoute
   '/smtp': typeof SmtpRoute
@@ -127,6 +135,7 @@ export interface FileRoutesById {
   '/kafka-monitor': typeof KafkaMonitorRoute
   '/login': typeof LoginRoute
   '/n-addresses': typeof NAddressesRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/sender-ids': typeof SenderIdsRoute
   '/smsc-accounts': typeof SmscAccountsRoute
   '/smtp': typeof SmtpRoute
@@ -144,6 +153,7 @@ export interface FileRouteTypes {
     | '/kafka-monitor'
     | '/login'
     | '/n-addresses'
+    | '/reset-password'
     | '/sender-ids'
     | '/smsc-accounts'
     | '/smtp'
@@ -159,6 +169,7 @@ export interface FileRouteTypes {
     | '/kafka-monitor'
     | '/login'
     | '/n-addresses'
+    | '/reset-password'
     | '/sender-ids'
     | '/smsc-accounts'
     | '/smtp'
@@ -174,6 +185,7 @@ export interface FileRouteTypes {
     | '/kafka-monitor'
     | '/login'
     | '/n-addresses'
+    | '/reset-password'
     | '/sender-ids'
     | '/smsc-accounts'
     | '/smtp'
@@ -190,6 +202,7 @@ export interface RootRouteChildren {
   KafkaMonitorRoute: typeof KafkaMonitorRoute
   LoginRoute: typeof LoginRoute
   NAddressesRoute: typeof NAddressesRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
   SenderIdsRoute: typeof SenderIdsRoute
   SmscAccountsRoute: typeof SmscAccountsRoute
   SmtpRoute: typeof SmtpRoute
@@ -241,6 +254,13 @@ declare module '@tanstack/react-router' {
       path: '/n-addresses'
       fullPath: '/n-addresses'
       preLoaderRoute: typeof NAddressesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sender-ids': {
@@ -302,6 +322,7 @@ const rootRouteChildren: RootRouteChildren = {
   KafkaMonitorRoute: KafkaMonitorRoute,
   LoginRoute: LoginRoute,
   NAddressesRoute: NAddressesRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
   SenderIdsRoute: SenderIdsRoute,
   SmscAccountsRoute: SmscAccountsRoute,
   SmtpRoute: SmtpRoute,

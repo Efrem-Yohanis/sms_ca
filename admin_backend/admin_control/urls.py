@@ -33,8 +33,8 @@ from .views import (
     UserCampaignListView,
     UserListCreateView,
     UserPasswordResetView,
-    PasswordResetPinConfirmView,
-    PasswordResetPinRequestView,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
 )
 
 
@@ -50,8 +50,8 @@ urlpatterns = [
     path("health/", HealthView.as_view(), name="admin-backend-health"),
     path("admin/auth/login/", AdminLoginView.as_view(), name="admin-api-login"),
     path("admin/auth/initial-password/", InitialPasswordChangeView.as_view(), name="admin-initial-password"),
-    path("admin/auth/password-reset/request/", PasswordResetPinRequestView.as_view(), name="admin-password-reset-request"),
-    path("admin/auth/password-reset/confirm/", PasswordResetPinConfirmView.as_view(), name="admin-password-reset-confirm"),
+    path("admin/auth/password-reset/request/", PasswordResetRequestView.as_view(), name="admin-password-reset-request"),
+    path("admin/auth/password-reset/confirm/", PasswordResetConfirmView.as_view(), name="admin-password-reset-confirm"),
     path("admin/email-config/", AdminEmailConfigView.as_view(), name="admin-email-config"),
     path("admin/email-services/", AdminEmailServiceListCreateView.as_view(), name="admin-email-services"),
     path("admin/email-services/<int:pk>/", AdminEmailServiceDetailView.as_view(), name="admin-email-service-detail"),

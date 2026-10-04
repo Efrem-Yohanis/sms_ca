@@ -54,6 +54,18 @@ the campaign and admin services so campaign users created here can sign in to
 the campaign UI with their admin-assigned credentials. The browser-facing
 campaign UI origin must also be included in `ADMIN_BACKEND_CORS_ORIGINS`.
 
+## API docs and Swagger
+
+The backend exposes an OpenAPI schema and Swagger UI via Drf Spectacular:
+
+- `GET /api/v1/schema/` — raw OpenAPI schema
+- `GET /api/v1/docs/` — Swagger UI
+- `GET /api/v1/redoc/` — ReDoc UI
+
+These endpoints are available from the same base API prefix and are enabled in
+`admin_backend/settings.py`, `admin_backend/urls.py`, and
+`admin_control/schema_urls.py`.
+
 ## API surface
 
 All routes below are under `/api/v1/`. Login returns SimpleJWT access and
@@ -63,8 +75,8 @@ refresh tokens; send the access token as `Authorization: Bearer <token>`.
 | --- | --- |
 | `POST /admin/auth/login/` | Admin-only login using username or email |
 | `POST /admin/auth/initial-password/` | Validate a temporary Admin password and require its replacement |
-| `POST /admin/auth/password-reset/request/` | Email a short-lived password reset PIN |
-| `POST /admin/auth/password-reset/confirm/` | Validate a reset PIN and set a new password |
+| `POST /admin/auth/password-reset/request/` | Email a one-time password reset link to the account address |
+| `POST /admin/auth/password-reset/confirm/` | Validate a reset-link token and set a new password |
 | `GET /admin/me/` | Current Admin profile |
 | `/admin/users/` and `/admin/users/<id>/` | User CRUD, role, status, TPS limit, and assignments |
 | `POST /admin/users/<id>/password-reset/` | Admin-initiated password reset |
@@ -101,6 +113,13 @@ password before tokens are issued. Manage their SMSC, Sender ID, Channel, TPS,
 and N-address access from the corresponding tabs on the user detail page.
 Admin email services are stored separately from Campaign Manager email
 settings.
+
+Forgot-password requests return a generic response and email a role-specific
+reset link when an eligible account exists. Links expire after 10 minutes and
+are single-use. The link opens `/reset-password` in the appropriate UI; the
+new password is submitted to the API from that page. Account-created and
+password-reset emails use responsive HTML templates with plain-text
+alternatives.
 
 ## Current scope boundary
 
