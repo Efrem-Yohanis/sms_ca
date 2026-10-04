@@ -4,6 +4,10 @@ from rest_framework.views import APIView
 
 from .views import (
     AdminLoginView,
+    AdminEmailConfigView,
+    AdminEmailServiceListCreateView,
+    AdminEmailServiceDetailView,
+    AdminEmailServiceTestView,
     AdminMeView,
     AssignedConfigurationsView,
     AuditLogListView,
@@ -14,6 +18,7 @@ from .views import (
     GlobalTPSDetailView,
     GlobalTPSListCreateView,
     LoginAttemptListView,
+    InitialPasswordChangeView,
     NAddressDetailView,
     NAddressListCreateView,
     NAddressesConfigDetailView,
@@ -25,8 +30,11 @@ from .views import (
     SenderSMSCBindingListCreateView,
     SenderSMSCBindingDetailView,
     UserDetailView,
+    UserCampaignListView,
     UserListCreateView,
     UserPasswordResetView,
+    PasswordResetPinConfirmView,
+    PasswordResetPinRequestView,
 )
 
 
@@ -41,8 +49,16 @@ class HealthView(APIView):
 urlpatterns = [
     path("health/", HealthView.as_view(), name="admin-backend-health"),
     path("admin/auth/login/", AdminLoginView.as_view(), name="admin-api-login"),
+    path("admin/auth/initial-password/", InitialPasswordChangeView.as_view(), name="admin-initial-password"),
+    path("admin/auth/password-reset/request/", PasswordResetPinRequestView.as_view(), name="admin-password-reset-request"),
+    path("admin/auth/password-reset/confirm/", PasswordResetPinConfirmView.as_view(), name="admin-password-reset-confirm"),
+    path("admin/email-config/", AdminEmailConfigView.as_view(), name="admin-email-config"),
+    path("admin/email-services/", AdminEmailServiceListCreateView.as_view(), name="admin-email-services"),
+    path("admin/email-services/<int:pk>/", AdminEmailServiceDetailView.as_view(), name="admin-email-service-detail"),
+    path("admin/email-services/<int:pk>/test/", AdminEmailServiceTestView.as_view(), name="admin-email-service-test"),
     path("admin/me/", AdminMeView.as_view(), name="admin-api-me"),
     path("admin/users/", UserListCreateView.as_view(), name="admin-users"),
+    path("admin/users/<int:pk>/campaigns/", UserCampaignListView.as_view(), name="admin-user-campaigns"),
     path("admin/users/<int:pk>/", UserDetailView.as_view(), name="admin-user-detail"),
     path("admin/users/<int:pk>/password-reset/", UserPasswordResetView.as_view(), name="admin-user-password-reset"),
     path("admin/smsc-configs/", SMSCConfigListCreateView.as_view(), name="admin-smsc-configs"),

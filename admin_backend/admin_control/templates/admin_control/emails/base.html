@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Safaricom SMS Platform{% endblock %}</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f3f6f5;font-family:Arial,Helvetica,sans-serif;color:#18312e;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+      {% block preview_text %}Safaricom SMS Platform account information{% endblock %}
+    </div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f3f6f5;">
+      <tr>
+        <td align="center" style="padding:32px 16px;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #dce5e2;">
+            <tr>
+              <td style="padding:22px 30px;background-color:#087f5b;color:#ffffff;">
+                <div style="font-size:18px;font-weight:bold;letter-spacing:0.3px;">SAFARICOM</div>
+                <div style="margin-top:4px;font-size:12px;color:#e6f4ef;">SMS Platform</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px 30px 28px;">
+                {% block email_content %}{% endblock %}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 30px;border-top:1px solid #e6ecea;color:#71817d;font-size:11px;line-height:1.6;">
+                This is an automated account message. If you did not expect it, contact your platform administrator.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

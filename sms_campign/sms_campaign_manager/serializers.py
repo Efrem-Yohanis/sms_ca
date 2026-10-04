@@ -3,6 +3,10 @@
 from django.contrib.auth import get_user_model, password_validation
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
+from .platform_accounts import get_platform_profile
 
 from .constants import (
     DELIVERY_STATUS_CHOICES,
@@ -78,6 +82,20 @@ class PasswordChangeSerializer(serializers.Serializer):
     def validate_new_password(self, value):
         password_validation.validate_password(value, user=self.context['request'].user)
         return value
+
+
+class CampaignTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        platform_profile = get_platform_profile(self.user.pk)
+        if platform_profile is None:
+            return data
+        role, require_password_change = platform_profile
+        if role == "ADMIN":
+            raise AuthenticationFailed("Use the administrator sign-in page.")
+        if require_password_change:
+            return {"must_change_password": True}
+        return data
 
 
 class SentRecordSerializer(serializers.ModelSerializer):

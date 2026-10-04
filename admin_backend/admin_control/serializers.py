@@ -1,6 +1,7 @@
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from rest_framework import serializers
@@ -8,6 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import (
     AdminAuditLog,
+    AdminEmailConfig,
     Campaign,
     Channel,
     ChannelSMSCBinding,
@@ -614,12 +616,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
         required=False,
     )
     password = serializers.CharField(write_only=True, required=False, trim_whitespace=False)
+    require_password_change = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = UserProfile
         fields = (
             "id", "user_id", "username", "email", "first_name", "last_name", "full_name",
             "department", "role", "is_active", "is_locked", "last_login", "notes",
+            "require_password_change",
             "tps_limit", "assigned_smscs", "assigned_sender_ids", "assigned_channels",
             "assigned_tps_configs", "assigned_n_address_configs", "assigned_n_addresses",
             "assigned_config_counts",
@@ -703,6 +707,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             if key in {"sms_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"}
         }
         profile = UserProfile.objects.get(user=user)
+        profile.require_password_change = True
         for key, value in validated_data.items():
             setattr(profile, key, value)
         profile.save()
@@ -735,6 +740,34 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def _save_assignments(profile, assignment_data):
         for field, values in assignment_data.items():
             getattr(profile, field).set(values)
+
+
+class UserCampaignSerializer(serializers.ModelSerializer):
+    channel_names = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Campaign
+        fields = (
+            "id",
+            "name",
+            "sender_id",
+            "owner_emails",
+            "channels_id",
+            "channel_names",
+            "status",
+            "is_ready_to_execute",
+            "is_deleted",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_channel_names(self, campaign):
+        channel_names_by_id = self.context.get("channel_names_by_id", {})
+        return [
+            channel_names_by_id[channel_id]
+            for channel_id in campaign.channels_id or []
+            if channel_id in channel_names_by_id
+        ]
 
 
 class LoginSerializer(serializers.Serializer):
@@ -782,8 +815,58 @@ class LoginSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated_data):
-        refresh = RefreshToken.for_user(validated_data["user"])
+        user = validated_data["user"]
+        if user.admin_profile.require_password_change:
+            return {"must_change_password": True}
+        refresh = RefreshToken.for_user(user)
         return {"refresh": str(refresh), "access": str(refresh.access_token)}
+
+
+class AdminEmailConfigSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, trim_whitespace=False
+    )
+    has_password = serializers.SerializerMethodField()
+    from_email = serializers.EmailField(required=False)
+    default_from_email = serializers.EmailField(source="from_email", required=False)
+
+    class Meta:
+        model = AdminEmailConfig
+        fields = (
+            "id", "name", "host", "port", "username", "password", "has_password",
+            "use_tls", "use_ssl", "from_email", "default_from_email", "is_default",
+            "is_active", "last_tested_at", "last_test_status", "last_test_message",
+            "created_at", "updated_at",
+        )
+        read_only_fields = (
+            "id", "has_password", "last_tested_at", "last_test_status",
+            "last_test_message", "created_at", "updated_at",
+        )
+
+    def get_has_password(self, config):
+        return bool(config.password)
+
+    def validate(self, attrs):
+        if not attrs.get("from_email", getattr(self.instance, "from_email", None)):
+            raise serializers.ValidationError({"default_from_email": "From email is required."})
+        if attrs.get("use_tls", getattr(self.instance, "use_tls", False)) and attrs.get(
+            "use_ssl", getattr(self.instance, "use_ssl", False)
+        ):
+            raise serializers.ValidationError({"use_ssl": "Choose TLS or SSL, not both."})
+        if attrs.get("password") and not settings.FIELD_ENCRYPTION_KEY:
+            raise serializers.ValidationError(
+                {"password": "FIELD_ENCRYPTION_KEY must be configured to store SMTP credentials securely."}
+            )
+        if attrs.get("is_default", getattr(self.instance, "is_default", False)) and not attrs.get(
+            "is_active", getattr(self.instance, "is_active", True)
+        ):
+            raise serializers.ValidationError({"is_default": "Only an active email service can be the default."})
+        return attrs
+
+    def update(self, instance, validated_data):
+        if validated_data.get("password") == "":
+            validated_data.pop("password")
+        return super().update(instance, validated_data)
 
 
 class AdminAuditLogSerializer(serializers.ModelSerializer):

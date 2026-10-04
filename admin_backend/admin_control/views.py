@@ -1,7 +1,17 @@
-from django.contrib.auth.models import User
+import logging
+import os
+import secrets
+import smtplib
+from datetime import timedelta
+
+from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
 from django.db.models import Q
+from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
+from django.template.loader import render_to_string
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.response import Response
@@ -10,6 +20,7 @@ from rest_framework.views import APIView
 from .audit import audit, snapshot
 from .models import (
     AdminAuditLog,
+    AdminEmailConfig,
     Campaign,
     Channel,
     ChannelSMSCBinding,
@@ -17,6 +28,7 @@ from .models import (
     LoginAttempt,
     NAddress,
     NAddressesConfig,
+    PasswordResetChallenge,
     SMSCConfig,
     SenderID,
     SenderSMSCBinding,
@@ -25,6 +37,7 @@ from .models import (
 from .permissions import IsActivePlatformUser, IsPlatformAdmin
 from .serializers import (
     AdminAuditLogSerializer,
+    AdminEmailConfigSerializer,
     ChannelSerializer,
     ChannelSMSCBindingSerializer,
     GlobalTPSConfigSerializer,
@@ -36,8 +49,12 @@ from .serializers import (
     SMSCConfigWriteSerializer,
     SenderIDSerializer,
     SenderSMSCBindingSerializer,
+    UserCampaignSerializer,
     UserProfileSerializer,
 )
+from .email_service import AdminEmailNotConfigured, send_admin_email
+
+logger = logging.getLogger(__name__)
 
 
 def _user_snapshot(profile):
@@ -59,6 +76,15 @@ def _serialize_manager_configs(serializer_class, queryset):
         {key: value for key, value in config.items() if key != "assigned_user_ids"}
         for config in serializer_class(queryset, many=True).data
     ]
+
+
+def _user_login_url(profile):
+    portal_url = (
+        os.environ.get("ADMIN_PORTAL_URL", "http://localhost:4173")
+        if profile.role == UserProfile.Role.ADMIN
+        else os.environ.get("CAMPAIGN_MANAGER_URL", "http://localhost:3000")
+    ).rstrip("/")
+    return f"{portal_url}/login"
 
 
 class AdminLoginView(APIView):
@@ -132,6 +158,7 @@ class UserListCreateView(generics.ListCreateAPIView):
             )
         return queryset.distinct()
 
+    @transaction.atomic
     def perform_create(self, serializer):
         profile = serializer.save()
         audit(
@@ -141,6 +168,42 @@ class UserListCreateView(generics.ListCreateAPIView):
             f"Created user {profile.user.username}.",
             new_values=_user_snapshot(profile),
         )
+        temporary_password = self.request.data.get("password")
+        login_url = _user_login_url(profile)
+        full_name = profile.user.get_full_name() or profile.user.username
+        role_label = profile.get_role_display()
+        text_body = (
+            f"Hello {full_name},\n\n"
+            f"Your {role_label} account has been created.\n"
+            f"Username: {profile.user.username}\n"
+            f"Temporary password: {temporary_password}\n\n"
+            f"Sign in here: {login_url}\n"
+            "You will be asked to change this password when you first sign in."
+        )
+        html_body = render_to_string(
+            "admin_control/emails/account_created.html",
+            {
+                "full_name": full_name,
+                "role_label": role_label,
+                "username": profile.user.username,
+                "temporary_password": temporary_password,
+                "login_url": login_url,
+            },
+        )
+        try:
+            send_admin_email(
+                profile.user.email,
+                "Your SMS platform account",
+                text_body,
+                html_body,
+            )
+        except (AdminEmailNotConfigured, smtplib.SMTPException, OSError) as error:
+            logger.exception("Could not send the new account email.")
+            from rest_framework.exceptions import APIException
+
+            failure = APIException("User account email could not be sent. Check admin email settings and try again.")
+            failure.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            raise failure from error
 
 
 class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -217,6 +280,34 @@ class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
             instance.user.delete()
 
 
+class UserCampaignListView(generics.ListAPIView):
+    permission_classes = [IsPlatformAdmin]
+    serializer_class = UserCampaignSerializer
+
+    def get_queryset(self):
+        profile = get_object_or_404(UserProfile, pk=self.kwargs["pk"])
+        return Campaign.objects.filter(created_by_id=profile.user_id).order_by(
+            "-created_at", "-id"
+        )
+
+    def list(self, request, *args, **kwargs):
+        campaigns = list(self.get_queryset())
+        channel_ids = {
+            channel_id
+            for campaign in campaigns
+            for channel_id in (campaign.channels_id or [])
+        }
+        channel_names_by_id = dict(
+            Channel.objects.filter(pk__in=channel_ids).values_list("pk", "name")
+        )
+        serializer = self.get_serializer(
+            campaigns,
+            many=True,
+            context={**self.get_serializer_context(), "channel_names_by_id": channel_names_by_id},
+        )
+        return Response(serializer.data)
+
+
 class UserPasswordResetView(APIView):
     permission_classes = [IsPlatformAdmin]
 
@@ -233,8 +324,261 @@ class UserPasswordResetView(APIView):
             return Response({"password": error.messages}, status=status.HTTP_400_BAD_REQUEST)
         profile.user.set_password(password)
         profile.user.save(update_fields=["password"])
+        profile.require_password_change = True
+        profile.save(update_fields=["require_password_change", "updated_at"])
         audit(request, "password_reset", profile, f"Reset password for {profile.user.username}.")
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class InitialPasswordChangeView(APIView):
+    permission_classes = []
+    authentication_classes = []
+
+    def post(self, request):
+        identifier = request.data.get("username", "")
+        current_password = request.data.get("current_password", "")
+        new_password = request.data.get("new_password", "")
+        if not all(isinstance(value, str) and value for value in (identifier, current_password, new_password)):
+            return Response(
+                {"detail": "Username, current password, and new password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = User.objects.filter(Q(username__iexact=identifier) | Q(email__iexact=identifier)).first()
+        profile = getattr(user, "admin_profile", None) if user else None
+        if not (
+            user
+            and user.is_active
+            and user.check_password(current_password)
+            and profile
+            and profile.role == UserProfile.Role.ADMIN
+            and not profile.is_locked
+            and profile.require_password_change
+        ):
+            return Response({"detail": "The temporary sign-in could not be verified."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as error:
+            return Response({"new_password": error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.save(update_fields=["password"])
+            profile.require_password_change = False
+            profile.save(update_fields=["require_password_change", "updated_at"])
+        return Response({"success": True})
+
+
+class PasswordResetPinRequestView(APIView):
+    permission_classes = []
+    authentication_classes = []
+
+    def post(self, request):
+        email = request.data.get("email", "")
+        if not isinstance(email, str) or not email.strip():
+            return Response({"email": ["Enter your email address."]}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.filter(email__iexact=email.strip(), is_active=True).first()
+        profile = getattr(user, "admin_profile", None) if user else None
+        if profile and not profile.is_locked:
+            recent = PasswordResetChallenge.objects.filter(
+                user=user, created_at__gte=timezone.now() - timedelta(minutes=1)
+            ).exists()
+            if not recent:
+                pin = f"{secrets.randbelow(1_000_000):06d}"
+                PasswordResetChallenge.objects.filter(
+                    user=user, consumed_at__isnull=True
+                ).delete()
+                challenge = PasswordResetChallenge.objects.create(
+                    user=user,
+                    pin_hash=make_password(pin),
+                    expires_at=timezone.now() + timedelta(minutes=10),
+                )
+                login_url = _user_login_url(profile)
+                try:
+                    send_admin_email(
+                        user.email,
+                        "Your SMS platform password reset PIN",
+                        (
+                            f"Hello {user.get_full_name() or user.username},\n\n"
+                            f"Your password reset PIN is {pin}. It expires in 10 minutes.\n\n"
+                            f"Sign in here: {login_url}"
+                        ),
+                        render_to_string(
+                            "admin_control/emails/password_reset_pin.html",
+                            {
+                                "full_name": user.get_full_name() or user.username,
+                                "pin": pin,
+                                "login_url": login_url,
+                            },
+                        ),
+                    )
+                except (AdminEmailNotConfigured, smtplib.SMTPException, OSError) as error:
+                    challenge.delete()
+                    logger.exception("Could not send the password reset PIN.")
+                    return Response(
+                        {"detail": "Password reset email could not be sent. Check admin email settings."},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+        return Response(
+            {"detail": "If an active account matches that email, a reset PIN has been sent."}
+        )
+
+
+class PasswordResetPinConfirmView(APIView):
+    permission_classes = []
+    authentication_classes = []
+
+    def post(self, request):
+        email = request.data.get("email", "")
+        pin = request.data.get("pin", "")
+        new_password = request.data.get("new_password", "")
+        if not all(isinstance(value, str) and value for value in (email, pin, new_password)):
+            return Response(
+                {"detail": "Email, PIN, and new password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = User.objects.filter(email__iexact=email.strip(), is_active=True).first()
+        profile = getattr(user, "admin_profile", None) if user else None
+        challenge = (
+            PasswordResetChallenge.objects.filter(
+                user=user, consumed_at__isnull=True, expires_at__gt=timezone.now(), attempts__lt=5
+            ).first()
+            if user and profile and not profile.is_locked
+            else None
+        )
+        if not challenge or not check_password(pin, challenge.pin_hash):
+            if challenge:
+                challenge.attempts += 1
+                challenge.save(update_fields=["attempts"])
+            return Response({"pin": ["The PIN is invalid or expired."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as error:
+            return Response({"new_password": error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.save(update_fields=["password"])
+            profile.require_password_change = False
+            profile.save(update_fields=["require_password_change", "updated_at"])
+            challenge.consumed_at = timezone.now()
+            challenge.save(update_fields=["consumed_at"])
+        return Response({"success": True})
+
+
+class AdminEmailConfigView(APIView):
+    permission_classes = [IsPlatformAdmin]
+
+    def get(self, request):
+        config = AdminEmailConfig.objects.filter(is_active=True, is_default=True).first()
+        if config is None:
+            return Response({"configured": False})
+        return Response({"configured": True, **AdminEmailConfigSerializer(config).data})
+
+    def patch(self, request):
+        config = AdminEmailConfig.objects.filter(is_active=True, is_default=True).first()
+        serializer = AdminEmailConfigSerializer(
+            config,
+            data=request.data,
+            partial=config is not None,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save(is_default=True, is_active=True)
+        return Response({"configured": True, **serializer.data})
+
+    def post(self, request):
+        recipient = request.data.get("recipient", "")
+        if not isinstance(recipient, str) or not recipient.strip():
+            return Response({"recipient": ["Enter a test recipient email."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            send_admin_email(
+                recipient.strip(),
+                "Admin email configuration test",
+                "This is a test message from the SMS platform admin console.",
+            )
+        except (AdminEmailNotConfigured, smtplib.SMTPException, OSError) as error:
+            logger.exception("Admin SMTP test failed.")
+            return Response({"detail": f"Could not send the test email: {error}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response({"success": True})
+
+
+class AdminEmailServiceListCreateView(APIView):
+    permission_classes = [IsPlatformAdmin]
+
+    def get(self, request):
+        configs = AdminEmailConfig.objects.all().order_by("-is_default", "name")
+        return Response({"results": AdminEmailConfigSerializer(configs, many=True).data})
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = AdminEmailConfigSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        is_default = serializer.validated_data.get("is_default", False)
+        if not AdminEmailConfig.objects.filter(is_active=True, is_default=True).exists():
+            is_default = True
+        config = serializer.save(is_default=is_default)
+        return Response(AdminEmailConfigSerializer(config).data, status=status.HTTP_201_CREATED)
+
+
+class AdminEmailServiceDetailView(APIView):
+    permission_classes = [IsPlatformAdmin]
+
+    @transaction.atomic
+    def patch(self, request, pk):
+        config = get_object_or_404(AdminEmailConfig, pk=pk)
+        was_default = config.is_default
+        serializer = AdminEmailConfigSerializer(config, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        config = serializer.save()
+        if was_default and not config.is_default:
+            replacement = AdminEmailConfig.objects.filter(is_active=True).order_by("name").first()
+            if replacement:
+                replacement.is_default = True
+                replacement.save(update_fields=["is_default", "updated_at"])
+        return Response(AdminEmailConfigSerializer(config).data)
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        config = get_object_or_404(AdminEmailConfig, pk=pk)
+        was_default = config.is_default
+        config.delete()
+        if was_default:
+            replacement = AdminEmailConfig.objects.filter(is_active=True).order_by("name").first()
+            if replacement:
+                replacement.is_default = True
+                replacement.save(update_fields=["is_default", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminEmailServiceTestView(APIView):
+    permission_classes = [IsPlatformAdmin]
+
+    def post(self, request, pk):
+        config = get_object_or_404(AdminEmailConfig, pk=pk)
+        if not config.is_active:
+            return Response(
+                {"detail": "Activate this email service before testing it."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        recipient = request.data.get("test_email", "")
+        if not isinstance(recipient, str) or not recipient.strip():
+            return Response({"test_email": ["Enter a test recipient email."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            send_admin_email(
+                recipient.strip(),
+                "Admin email configuration test",
+                "This is a test message from the SMS platform admin console.",
+                config=config,
+            )
+        except (AdminEmailNotConfigured, smtplib.SMTPException, OSError) as error:
+            logger.exception("Admin SMTP test failed.")
+            config.last_tested_at = timezone.now()
+            config.last_test_status = "failed"
+            config.last_test_message = str(error)
+            config.save(update_fields=["last_tested_at", "last_test_status", "last_test_message", "updated_at"])
+            return Response({"success": False, "message": f"Could not send the test email: {error}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        config.last_tested_at = timezone.now()
+        config.last_test_status = "success"
+        config.last_test_message = f"Test email sent to {recipient.strip()}."
+        config.save(update_fields=["last_tested_at", "last_test_status", "last_test_message", "updated_at"])
+        return Response({"success": True, "message": "Test email sent."})
 
 
 class AdminConfigViewSet:

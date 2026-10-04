@@ -24,13 +24,44 @@ async function handleApiResponse<T>(res: Response): Promise<T> {
 
 /* -------- Auth -------- */
 
-export async function login(username: string, password: string): Promise<{ access: string; refresh: string }> {
+export async function login(username: string, password: string): Promise<{ access: string; refresh: string } | { must_change_password: true }> {
   const res = await fetch(`${API_V1_BASE}/auth/login/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
   return handleResponse(res);
+}
+
+const ADMIN_API_BASE = `${(import.meta.env.VITE_ADMIN_API_BASE_URL || "http://localhost:8002").replace(/\/+$/, "")}/api/v1`;
+
+async function adminAuthRequest<T>(path: string, body: Record<string, string>): Promise<T> {
+  const response = await fetch(`${ADMIN_API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return handleResponse(response);
+}
+
+export function changeTemporaryPassword(username: string, currentPassword: string, newPassword: string) {
+  return fetch(`${API_V1_BASE}/auth/initial-password/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, current_password: currentPassword, new_password: newPassword }),
+  }).then((response) => handleResponse<{ success: true }>(response));
+}
+
+export function requestPasswordResetPin(email: string) {
+  return adminAuthRequest<{ detail: string }>("/admin/auth/password-reset/request/", { email });
+}
+
+export function confirmPasswordResetPin(email: string, pin: string, newPassword: string) {
+  return adminAuthRequest<{ success: true }>("/admin/auth/password-reset/confirm/", {
+    email,
+    pin,
+    new_password: newPassword,
+  });
 }
 
 export async function refreshToken(refresh: string): Promise<{ access: string }> {

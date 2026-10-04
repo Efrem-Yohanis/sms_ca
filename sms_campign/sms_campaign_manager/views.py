@@ -8,6 +8,8 @@ from datetime import date, datetime, time, timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.core.files.storage import default_storage
 from django.core.mail import EmailMessage, get_connection
@@ -22,6 +24,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 
@@ -57,6 +60,7 @@ from .models import (
 	SMSCConfig,
 )
 from .pagination import StandardPagination
+from .platform_accounts import clear_password_change_requirement, get_platform_profile
 from .serializers import (
 	CampaignCreateUpdateSerializer,
 	CampaignDetailSerializer,
@@ -96,6 +100,7 @@ from .serializers import (
 	ReportDeliveryLogSerializer,
 	CampaignProgressReportSerializer,
 	 UserRegistrationSerializer,
+	 CampaignTokenObtainPairSerializer,
 	UserSerializer,
 	UserAdminUpdateSerializer,
 	PasswordChangeSerializer,
@@ -128,6 +133,42 @@ from .services.email_reports import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class CampaignLoginView(TokenObtainPairView):
+	serializer_class = CampaignTokenObtainPairSerializer
+
+
+class CampaignInitialPasswordChangeView(APIView):
+	permission_classes = [AllowAny]
+	authentication_classes = []
+
+	def post(self, request):
+		identifier = request.data.get('username', '')
+		current_password = request.data.get('current_password', '')
+		new_password = request.data.get('new_password', '')
+		if not all(isinstance(value, str) and value for value in (identifier, current_password, new_password)):
+			return Response({'detail': 'Username, current password, and new password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+		User = get_user_model()
+		user = User.objects.filter(Q(username__iexact=identifier) | Q(email__iexact=identifier)).first()
+		platform_profile = get_platform_profile(user.pk) if user else None
+		if not (
+			user and user.is_active and user.check_password(current_password)
+			and platform_profile
+			and platform_profile[0] == 'CAMPAIGN_MANAGER'
+			and platform_profile[1]
+		):
+			return Response({'detail': 'The temporary sign-in could not be verified.'}, status=status.HTTP_400_BAD_REQUEST)
+		try:
+			validate_password(new_password, user=user)
+		except DjangoValidationError as error:
+			return Response({'new_password': error.messages}, status=status.HTTP_400_BAD_REQUEST)
+		with transaction.atomic():
+			if not clear_password_change_requirement(user.pk):
+				return Response({'detail': 'The temporary password has already been changed.'}, status=status.HTTP_409_CONFLICT)
+			user.set_password(new_password)
+			user.save(update_fields=['password'])
+		return Response({'success': True})
 
 
 def _audience_counts(campaign):
@@ -2142,38 +2183,39 @@ class DashboardView(APIView):
 		start_at = timezone.make_aware(datetime.combine(date_from, time.min)) if date_from else None
 		end_at = timezone.make_aware(datetime.combine(date_to + timedelta(days=1), time.min)) if date_to else None
 
-		def history_queryset(model, timestamp_field):
-			queryset = model.objects.filter(campaign_id__in=campaigns.values('id'))
-			if start_at:
-				queryset = queryset.filter(**{f'{timestamp_field}__gte': start_at})
-			if end_at:
-				queryset = queryset.filter(**{f'{timestamp_field}__lt': end_at})
-			return queryset
-
 		metric_models = {
 			'success_sent': (SuccessSent, 'sent_at'),
 			'failed_sent': (FailedSent, 'final_attempt_at'),
 			'success_delivery': (SuccessDelivery, 'delivered_at'),
 			'failed_delivery': (FailedDelivery, 'failed_at'),
 		}
-		metrics = {
-			key: queryset.count()
-			for key, (model, timestamp_field) in metric_models.items()
-			for queryset in [history_queryset(model, timestamp_field)]
-		}
 
-		status_base = Campaign.objects.filter(is_deleted=False)
-		if not request.user.is_superuser:
-			status_base = status_base.filter(created_by=request.user)
-		if campaign_id:
-			status_base = status_base.filter(pk=campaign_id)
-		if status_filter == 'active':
-			status_base = status_base.filter(status__in=['active', 'in_progress'])
-		elif status_filter == 'completed':
-			status_base = status_base.filter(status__in=['completed', 'archived'])
-		elif status_filter:
-			status_base = status_base.filter(status=status_filter)
-		status_counts = dict(status_base.values('status').annotate(total=Count('id')).values_list('status', 'total'))
+		def history_queryset(model, timestamp_field):
+			queryset = model.objects.filter(campaign_id__in=campaigns.order_by().values('id'))
+			if start_at:
+				queryset = queryset.filter(**{f'{timestamp_field}__gte': start_at})
+			if end_at:
+				queryset = queryset.filter(**{f'{timestamp_field}__lt': end_at})
+			return queryset
+
+		metric_counts = {
+			key: dict(
+				history_queryset(model, timestamp_field)
+				.order_by()
+				.values('campaign_id')
+				.annotate(total=Count('id'))
+				.values_list('campaign_id', 'total')
+			)
+			for key, (model, timestamp_field) in metric_models.items()
+		}
+		metrics = {key: sum(counts.values()) for key, counts in metric_counts.items()}
+
+		status_counts = dict(
+			campaigns.order_by()
+			.values('status')
+			.annotate(total=Count('id'))
+			.values_list('status', 'total')
+		)
 		active_count = status_counts.get('active', 0) + status_counts.get('in_progress', 0)
 		completed_count = status_counts.get('completed', 0) + status_counts.get('archived', 0)
 		status_distribution = {
@@ -2183,30 +2225,6 @@ class DashboardView(APIView):
 			'completed': completed_count,
 			'cancelled': status_counts.get('cancelled', 0),
 		}
-
-		latest_audience_round = Audience.objects.filter(campaign_id=OuterRef('pk')).order_by().values('campaign_id').annotate(round_number=Max('round_number')).values('round_number')[:1]
-		rows = campaigns.select_related('created_by', 'schedule').annotate(
-			audience_round=Subquery(latest_audience_round),
-			target_audience=Coalesce(
-				Subquery(
-					Audience.objects.filter(campaign_id=OuterRef('pk'), round_number=OuterRef('audience_round'))
-					.order_by().values('campaign_id').annotate(total=Count('id')).values('total')[:1],
-					output_field=IntegerField(),
-				), Value(0), output_field=IntegerField(),
-			),
-		)
-		for key, (model, timestamp_field) in metric_models.items():
-			filtered = model.objects.filter(campaign_id=OuterRef('pk'))
-			if start_at:
-				filtered = filtered.filter(**{f'{timestamp_field}__gte': start_at})
-			if end_at:
-				filtered = filtered.filter(**{f'{timestamp_field}__lt': end_at})
-			rows = rows.annotate(**{
-				key: Coalesce(
-					Subquery(filtered.order_by().values('campaign_id').annotate(total=Count('id')).values('total')[:1], output_field=IntegerField()),
-					Value(0), output_field=IntegerField(),
-				)
-			})
 
 		sort = request.query_params.get('sort', '-updated_at')
 		descending = sort.startswith('-')
@@ -2229,6 +2247,52 @@ class DashboardView(APIView):
 		}
 		if sort_key not in sort_fields:
 			sort_key = 'updated_at'
+
+		rows = campaigns.select_related('created_by', 'schedule')
+		if sort_key == 'target_audience':
+			latest_audience_round = Audience.objects.filter(
+				campaign_id=OuterRef('pk')
+			).order_by().values('campaign_id').annotate(
+				round_number=Max('round_number')
+			).values('round_number')[:1]
+			rows = rows.annotate(
+				audience_round=Subquery(latest_audience_round),
+				target_audience=Coalesce(
+					Subquery(
+						Audience.objects.filter(
+							campaign_id=OuterRef('pk'),
+							round_number=OuterRef('audience_round'),
+						).order_by().values('campaign_id').annotate(
+							total=Count('id')
+						).values('total')[:1],
+						output_field=IntegerField(),
+					),
+					Value(0),
+					output_field=IntegerField(),
+				),
+			)
+		elif sort_key in metric_models:
+			model, timestamp_field = metric_models[sort_key]
+			filtered = model.objects.filter(campaign_id=OuterRef('pk'))
+			if start_at:
+				filtered = filtered.filter(**{f'{timestamp_field}__gte': start_at})
+			if end_at:
+				filtered = filtered.filter(**{f'{timestamp_field}__lt': end_at})
+			rows = rows.annotate(
+				**{
+					sort_key: Coalesce(
+						Subquery(
+							filtered.order_by().values('campaign_id').annotate(
+								total=Count('id')
+							).values('total')[:1],
+							output_field=IntegerField(),
+						),
+						Value(0),
+						output_field=IntegerField(),
+					)
+				}
+			)
+
 		ordering = sort_fields[sort_key]
 		if isinstance(ordering, str):
 			ordering = f'-{ordering}' if descending else ordering
@@ -2239,10 +2303,33 @@ class DashboardView(APIView):
 			page_size = min(200, max(1, int(request.query_params.get('page_size', 50))))
 		except (TypeError, ValueError):
 			return Response({'success': False, 'error': 'page and page_size must be integers.'}, status=400)
-		count = rows.count()
+		count = sum(status_counts.values())
 		page_rows = list(rows[(page - 1) * page_size:page * page_size])
+		page_campaign_ids = [campaign.pk for campaign in page_rows]
 		channel_ids = {channel_id for campaign in page_rows for channel_id in (campaign.channels_id or [])}
 		channel_names = dict(Channel.objects.filter(pk__in=channel_ids).values_list('id', 'name'))
+
+		latest_audience_rounds = dict(
+			Audience.objects.filter(campaign_id__in=page_campaign_ids)
+			.order_by()
+			.values('campaign_id')
+			.annotate(round_number=Max('round_number'))
+			.values_list('campaign_id', 'round_number')
+		)
+		latest_audience_filter = Q()
+		for campaign_pk, round_number in latest_audience_rounds.items():
+			latest_audience_filter |= Q(campaign_id=campaign_pk, round_number=round_number)
+		if latest_audience_rounds:
+			audience_counts = dict(
+				Audience.objects.filter(latest_audience_filter)
+				.order_by()
+				.values('campaign_id')
+				.annotate(total=Count('id'))
+				.values_list('campaign_id', 'total')
+			)
+		else:
+			audience_counts = {}
+
 		results = [{
 			'id': campaign.id,
 			'name': campaign.name,
@@ -2252,11 +2339,11 @@ class DashboardView(APIView):
 			'channels': [channel_names[channel_id] for channel_id in (campaign.channels_id or []) if channel_id in channel_names],
 			'status': campaign.status,
 			'execution_status': campaign.execution_status,
-			'target_audience': campaign.target_audience,
-			'success_sent': campaign.success_sent,
-			'failed_sent': campaign.failed_sent,
-			'success_delivery': campaign.success_delivery,
-			'failed_delivery': campaign.failed_delivery,
+			'target_audience': audience_counts.get(campaign.pk, 0),
+			'success_sent': metric_counts['success_sent'].get(campaign.pk, 0),
+			'failed_sent': metric_counts['failed_sent'].get(campaign.pk, 0),
+			'success_delivery': metric_counts['success_delivery'].get(campaign.pk, 0),
+			'failed_delivery': metric_counts['failed_delivery'].get(campaign.pk, 0),
 		} for campaign in page_rows]
 
 		return Response({
@@ -2267,7 +2354,7 @@ class DashboardView(APIView):
 					'is_superuser': request.user.is_superuser,
 				},
 				'kpis': {
-					'total_campaigns': status_base.count(),
+					'total_campaigns': count,
 					'active_campaigns': active_count,
 					'draft_campaigns': status_counts.get('draft', 0),
 					'paused_campaigns': status_counts.get('paused', 0),

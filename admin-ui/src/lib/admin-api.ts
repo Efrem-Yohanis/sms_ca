@@ -16,6 +16,7 @@ export type ApiUser = {
   role: "ADMIN" | "CAMPAIGN_MANAGER";
   is_active: boolean;
   is_locked: boolean;
+  require_password_change: boolean;
   last_login: string | null;
   notes: string;
   tps_limit: number | null;
@@ -35,9 +36,57 @@ export type ApiUser = {
   };
 };
 
+export type ApiUserCampaign = {
+  id: number;
+  name: string;
+  sender_id: string;
+  owner_emails: string[];
+  channels_id: number[];
+  channel_names: string[];
+  status: string;
+  is_ready_to_execute: boolean;
+  is_deleted: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ApiConfig = {
   id: number;
   [key: string]: unknown;
+};
+
+export type AdminEmailConfig = {
+  configured?: boolean;
+  id?: number;
+  name?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  has_password?: boolean;
+  use_tls?: boolean;
+  use_ssl?: boolean;
+  from_email?: string;
+  default_from_email?: string;
+  is_default?: boolean;
+  is_active?: boolean;
+  last_tested_at?: string | null;
+  last_test_status?: string;
+  last_test_message?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type AdminEmailServiceInput = {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  default_from_email: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  is_default: boolean;
+  is_active: boolean;
 };
 
 export type UserInput = {
@@ -77,6 +126,7 @@ export function getAccessToken() {
 export function clearAdminTokens() {
   window.localStorage.removeItem(ACCESS_TOKEN_KEY);
   window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+  window.dispatchEvent(new Event("admin-workspace-invalidated"));
 }
 
 export async function adminRequest<T>(
@@ -107,6 +157,15 @@ export async function adminRequest<T>(
     clearAdminTokens();
     window.dispatchEvent(new Event("admin-session-expired"));
   }
+  const invalidatesWorkspace =
+    /^\/admin\/(users|smsc-configs|sender-ids|channels|tps-configs|n-address-configs|n-addresses)(?:\/|$)/.test(path);
+  if (
+    response.ok &&
+    (init.method ?? "GET").toUpperCase() !== "GET" &&
+    invalidatesWorkspace
+  ) {
+    window.dispatchEvent(new Event("admin-workspace-invalidated"));
+  }
   if (response.status === 204) return undefined as T;
 
   const payload: unknown = await response.json().catch(() => null);
@@ -117,7 +176,9 @@ export async function adminRequest<T>(
 }
 
 export async function adminLogin(username: string, password: string) {
-  const tokens = await adminRequest<{ access: string; refresh: string }>(
+  const result = await adminRequest<
+    { must_change_password: true } | { access: string; refresh: string }
+  >(
     "/admin/auth/login/",
     {
       method: "POST",
@@ -125,13 +186,109 @@ export async function adminLogin(username: string, password: string) {
     },
     false,
   );
+  if ("must_change_password" in result) return result;
+  const tokens = result;
   window.localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access);
   window.localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh);
-  return adminRequest<ApiUser>("/admin/me/");
+  return { user: await adminRequest<ApiUser>("/admin/me/") };
+}
+
+export function changeInitialAdminPassword(username: string, currentPassword: string, newPassword: string) {
+  return adminRequest<{ success: true }>(
+    "/admin/auth/initial-password/",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        username,
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    },
+    false,
+  );
+}
+
+export function requestAdminPasswordResetPin(email: string) {
+  return adminRequest<{ detail: string }>(
+    "/admin/auth/password-reset/request/",
+    { method: "POST", body: JSON.stringify({ email }) },
+    false,
+  );
+}
+
+export function confirmAdminPasswordResetPin(email: string, pin: string, newPassword: string) {
+  return adminRequest<{ success: true }>(
+    "/admin/auth/password-reset/confirm/",
+    {
+      method: "POST",
+      body: JSON.stringify({ email, pin, new_password: newPassword }),
+    },
+    false,
+  );
+}
+
+export function getAdminEmailConfig() {
+  return adminRequest<AdminEmailConfig>("/admin/email-config/");
+}
+
+export function saveAdminEmailConfig(config: {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  from_email: string;
+}) {
+  return adminRequest<AdminEmailConfig>("/admin/email-config/", {
+    method: "PATCH",
+    body: JSON.stringify(config),
+  });
+}
+
+export function testAdminEmailConfig(recipient: string) {
+  return adminRequest<{ success: true }>("/admin/email-config/", {
+    method: "POST",
+    body: JSON.stringify({ recipient }),
+  });
+}
+
+export function listAdminEmailServices() {
+  return adminRequest<{ results: AdminEmailConfig[] }>("/admin/email-services/");
+}
+
+export function createAdminEmailService(config: AdminEmailServiceInput) {
+  return adminRequest<AdminEmailConfig>("/admin/email-services/", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
+}
+
+export function updateAdminEmailService(id: number, config: Partial<AdminEmailServiceInput>) {
+  return adminRequest<AdminEmailConfig>(`/admin/email-services/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(config),
+  });
+}
+
+export function deleteAdminEmailService(id: number) {
+  return adminRequest<void>(`/admin/email-services/${id}/`, { method: "DELETE" });
+}
+
+export function testAdminEmailService(id: number, testEmail: string) {
+  return adminRequest<{ success: boolean; message: string }>(`/admin/email-services/${id}/test/`, {
+    method: "POST",
+    body: JSON.stringify({ test_email: testEmail }),
+  });
 }
 
 export function listUsers() {
   return adminRequest<ApiUser[]>("/admin/users/");
+}
+
+export function listUserCampaigns(profileId: number) {
+  return adminRequest<ApiUserCampaign[]>(`/admin/users/${profileId}/campaigns/`);
 }
 
 export function saveUser(profileId: number | null, user: UserInput) {

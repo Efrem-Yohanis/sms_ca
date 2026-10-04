@@ -1,9 +1,11 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.views import TokenRefreshView
 from .test_sms_views import TestMessageDetailView, TestMessageListCreateView, TestMessageResendView
 
 from .views import (
 	UserRegistrationView,
+	CampaignLoginView,
+	CampaignInitialPasswordChangeView,
 	CurrentUserView,
 	PasswordChangeView,
 	UserAdminListCreateView,
@@ -103,7 +105,8 @@ urlpatterns = [
 	path('test-sms/<int:pk>/', TestMessageDetailView.as_view(), name='test-sms-detail'),
 	path('test-sms/<int:pk>/resend/', TestMessageResendView.as_view(), name='test-sms-resend'),
 	path('auth/register/', UserRegistrationView.as_view(), name='user-register'),
-	path('auth/login/', TokenObtainPairView.as_view(), name='token-obtain-pair'),
+	path('auth/login/', CampaignLoginView.as_view(), name='token-obtain-pair'),
+	path('auth/initial-password/', CampaignInitialPasswordChangeView.as_view(), name='initial-password-change'),
 	path('auth/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
 	path('auth/me/', CurrentUserView.as_view(), name='current-user'),
 	path('auth/password/', PasswordChangeView.as_view(), name='password-change'),

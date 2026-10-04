@@ -98,7 +98,7 @@ services:
       DB_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
-      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},camaping_manager_backend_app"
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},camaping-manager-backend-app"
       SMSC_SENDER_API: http://sms_sender_app:8001
     volumes:
       - audience_uploads:/app/sms_campign/audience
@@ -114,6 +114,10 @@ services:
       main_db:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - camaping-manager-backend-app
 
   admin_backend_app:
     build:
@@ -132,6 +136,8 @@ services:
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},admin_backend_app"
       ADMIN_BACKEND_CORS_ORIGINS: "${ADMIN_BACKEND_CORS_ORIGINS:-http://localhost:5173,http://localhost:4173,http://localhost:5123,http://localhost:3000}"
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-SPPzmCFeMC2o0d3B4yaC094nDeE2ryKvKLR60OkUJC0=}
+      ADMIN_PORTAL_URL: ${ADMIN_PORTAL_URL:-http://localhost:4173}
+      CAMPAIGN_MANAGER_URL: ${CAMPAIGN_MANAGER_URL:-http://localhost:3000}
     ports:
       - "${ADMIN_BACKEND_HOST_PORT:-8002}:8002"
     healthcheck:
@@ -161,7 +167,7 @@ services:
       DB_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
-      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},camaping_manager_backend_app"
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},camaping-manager-backend-app"
     volumes:
       - audience_uploads:/app/sms_campign/audience
     depends_on:
@@ -183,7 +189,7 @@ services:
       DB_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
-      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},camaping_manager_backend_app"
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},camaping-manager-backend-app"
       PYTHONPATH: /app
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_SENT_TOPIC: sent-response
@@ -220,7 +226,7 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-campaign_manager_dev}
       DB_HOST: main_db
       DB_PORT: 5432
-      SMSC_SENDER_DJANGO_API: http://camaping_manager_backend_app:8000/api/v1
+      SMSC_SENDER_DJANGO_API: http://camaping-manager-backend-app:8000/api/v1
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_SENT_TOPIC: sent-response
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-SPPzmCFeMC2o0d3B4yaC094nDeE2ryKvKLR60OkUJC0=}
@@ -256,10 +262,10 @@ services:
     ports:
       - '8003:8003'
     depends_on:
+      kafka:
+        condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
-    networks:
-      - default
 
   mock_app:
     build:
@@ -315,7 +321,7 @@ services:
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-campaign_manager}:${POSTGRES_PASSWORD:-campaign_manager_dev}@main_db:5432/${POSTGRES_DB:-campaign_manager}
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-sms-airflow-local-secret-change-before-deploy}
-      AIRFLOW_DJANGO_API: http://camaping_manager_backend_app:8000/api/v1
+      AIRFLOW_DJANGO_API: http://camaping-manager-backend-app:8000/api/v1
       AIRFLOW_SENDER_API: http://sms_sender_app:8001
       AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
       AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-change-this-local-password}
@@ -362,7 +368,7 @@ services:
       context: ./sms_campaign_scheduler
       dockerfile: Dockerfile
     environment:
-      SMSC_SCHEDULER_DJANGO_API: http://camaping_manager_backend_app:8000/api/v1
+      SMSC_SCHEDULER_DJANGO_API: http://camaping-manager-backend-app:8000/api/v1
       SMSC_SCHEDULER_INTERVAL: ${SMSC_SCHEDULER_INTERVAL:-60}
       SMSC_SCHEDULER_RUN_WORKER: "false"
     ports:

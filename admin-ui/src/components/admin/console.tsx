@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { BackendConfiguration, type BackendConfigPage } from "@/components/admin/backend-configuration";
+import { AdminEmailSettings } from "@/components/admin/admin-email-settings";
 import {
   UsersManagement,
   UserEditor,
@@ -32,14 +33,34 @@ import {
   getAccessToken,
   listConfig,
   listUsers,
+  listUserCampaigns,
   saveUser as saveApiUser,
   type ApiConfig,
   type ApiUser,
+  type ApiUserCampaign,
   type UserInput,
 } from "@/lib/admin-api";
 
-export type Page = "Overview" | "Users" | "Campaigns" | "SMSC Accounts" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses" | "TPS & N-Addresses" | "SMTP" | "System Logs" | "Kafka Monitor";
+export type Page = "Overview" | "Users" | "Campaigns" | "SMSC Accounts" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses" | "TPS & N-Addresses" | "Email Config" | "System Logs" | "Kafka Monitor";
 type User = UserRecord;
+type WorkspaceCache = {
+  users: User[];
+  currentAdmin: string;
+  assignmentOptions: UserAssignmentOptions;
+  configEntries: Record<ConfigPage, ConfigEntry[]>;
+  expiresAt: number;
+};
+let workspaceCache: WorkspaceCache | null = null;
+const WORKSPACE_CACHE_TTL_MS = 5 * 60 * 1000;
+const getFreshWorkspaceCache = () =>
+  workspaceCache && workspaceCache.expiresAt > Date.now() ? workspaceCache : null;
+type UserAssignmentField =
+  | "assignedSmscs"
+  | "assignedSenderIds"
+  | "assignedChannels"
+  | "assignedTpsConfigs"
+  | "assignedNAddressConfigs"
+  | "assignedNAddresses";
 type Campaign = {
   id: string;
   name: string;
@@ -88,6 +109,7 @@ const navItems: { name: Page; icon: LucideIcon }[] = [
   { name: "Channels", icon: Layers3 },
   { name: "TPS", icon: Gauge },
   { name: "N-Addresses", icon: Inbox },
+  { name: "Email Config", icon: Mail },
 ];
 const format = (num: number) => num.toLocaleString("en-US");
 const initials = (name: string) => name.split(" ").map((s) => s[0]).slice(0, 2).join("").toUpperCase();
@@ -106,6 +128,7 @@ function fromApiUser(user: ApiUser): User {
     role: user.role === "ADMIN" ? "Admin" : "Campaign Manager",
     initials: initials(name),
     status: user.is_locked ? "Locked" : user.is_active ? "Active" : "Inactive",
+    requirePasswordChange: user.require_password_change,
     smsc: user.assigned_config_counts.smsc,
     sender: user.assigned_config_counts.sender_ids,
     channels: user.assigned_config_counts.channels,
@@ -186,38 +209,185 @@ function AssignedResources({
   user,
   page,
   options,
+  onUpdate,
 }: {
   user: User;
   page: "SMSC Accounts" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses";
   options: UserAssignmentOptions;
+  onUpdate: (field: UserAssignmentField, ids: number[]) => Promise<void>;
 }) {
-  const fields: Record<typeof page, [string, number[], { id: number; label: string }[]][]> = {
-    "SMSC Accounts": [["SMSC connections", user.assignedSmscs, options.smscs]],
-    "Sender IDs": [["Sender IDs", user.assignedSenderIds, options.senderIds]],
-    Channels: [["Channels", user.assignedChannels, options.channels]],
-    TPS: [["TPS configurations", user.assignedTpsConfigs, options.tpsConfigs]],
+  const fields: Record<typeof page, { label: string; key: UserAssignmentField; options: { id: number; label: string }[] }[]> = {
+    "SMSC Accounts": [{ label: "SMSC connections", key: "assignedSmscs", options: options.smscs }],
+    "Sender IDs": [{ label: "Sender IDs", key: "assignedSenderIds", options: options.senderIds }],
+    Channels: [{ label: "Channels", key: "assignedChannels", options: options.channels }],
+    TPS: [{ label: "TPS configurations", key: "assignedTpsConfigs", options: options.tpsConfigs }],
     "N-Addresses": [
-      ["N-address configurations", user.assignedNAddressConfigs, options.nAddressConfigs],
-      ["N-addresses", user.assignedNAddresses, options.nAddresses],
+      { label: "N-address configurations", key: "assignedNAddressConfigs", options: options.nAddressConfigs },
+      { label: "N-addresses", key: "assignedNAddresses", options: options.nAddresses },
     ],
   };
-  const assigned = fields[page].flatMap(([label, ids, choices]) => {
-    const selected = choices.filter((item) => ids.includes(item.id));
-    return selected.length ? [{ label, values: selected.map((item) => item.label) }] : [];
-  });
+  const [selectedIds, setSelectedIds] = useState<Partial<Record<UserAssignmentField, string>>>({});
+  const [savingField, setSavingField] = useState<UserAssignmentField | null>(null);
+  const [error, setError] = useState("");
+  const save = async (field: UserAssignmentField, ids: number[]) => {
+    setSavingField(field);
+    setError("");
+    try {
+      await onUpdate(field, ids);
+      setSelectedIds((current) => ({ ...current, [field]: "" }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update this user's assignments.");
+    } finally {
+      setSavingField(null);
+    }
+  };
+
   return (
     <div className="grid gap-4">
-      {assigned.map(({ label, values }) => (
-        <DetailSection key={label} title={label}>
-          <ul className="space-y-2 text-sm">
-            {values.map((value) => <li key={value}>{value}</li>)}
-          </ul>
-        </DetailSection>
-      ))}
-      {assigned.length === 0 && (
-        <div className="rounded-md border border-border bg-card">
-          <Empty text={`No ${page.toLowerCase()} assigned to this user.`} />
+      {fields[page].map(({ label, key, options: choices }) => {
+        const assignedIds = user[key];
+        const assigned = choices.filter((item) => assignedIds.includes(item.id));
+        const available = choices.filter((item) => !assignedIds.includes(item.id));
+        const selectedId = selectedIds[key] ?? "";
+        return (
+          <DetailSection key={key} title={label}>
+            <div className="mb-4 flex flex-wrap gap-2">
+              <select
+                aria-label={`Available ${label.toLowerCase()}`}
+                value={selectedId}
+                onChange={(event) => setSelectedIds((current) => ({ ...current, [key]: event.target.value }))}
+                className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                disabled={available.length === 0 || savingField !== null}
+              >
+                <option value="">Select available configuration</option>
+                {available.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+              <Button
+                type="button"
+                size="sm"
+                disabled={!selectedId || savingField !== null}
+                onClick={() => void save(key, [...assignedIds, Number(selectedId)])}
+              >
+                {savingField === key ? "Adding…" : "Add"}
+              </Button>
+            </div>
+            {available.length === 0 && (
+              <p className="mb-3 text-xs text-muted-foreground">
+                {choices.length === 0 ? "No configurations are available." : "All available configurations are assigned."}
+              </p>
+            )}
+            {assigned.length ? (
+              <ul className="space-y-2 text-sm">
+                {assigned.map((item) => (
+                  <li key={item.id} className="flex items-center justify-between gap-3">
+                    <span>{item.label}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      disabled={savingField !== null}
+                      onClick={() => void save(key, assignedIds.filter((id) => id !== item.id))}
+                    >
+                      Remove
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">No {label.toLowerCase()} assigned to this user.</p>
+            )}
+          </DetailSection>
+        );
+      })}
+      {error && <p role="alert" className="text-sm font-medium text-destructive">{error}</p>}
+    </div>
+  );
+}
+
+function UserCampaigns({ profileId }: { profileId: number }) {
+  const [campaigns, setCampaigns] = useState<ApiUserCampaign[]>([]);
+  const [selectedCampaignId, setSelectedCampaignId] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    void listUserCampaigns(profileId)
+      .then((items) => {
+        if (active) setCampaigns(items);
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(reason instanceof Error ? reason.message : "Could not load this user's campaigns.");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [profileId]);
+
+  const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId);
+
+  if (loading) {
+    return <p className="py-8 text-sm text-muted-foreground">Loading campaigns…</p>;
+  }
+  if (error) {
+    return <p role="alert" className="py-8 text-sm text-destructive">{error}</p>;
+  }
+  if (campaigns.length === 0) {
+    return <DetailSection title="Campaigns"><p className="text-sm text-muted-foreground">This user has not created any campaigns.</p></DetailSection>;
+  }
+
+  return (
+    <div className="grid gap-5">
+      <DetailSection title={`Campaigns created (${campaigns.length})`}>
+        <div className="divide-y divide-border">
+          {campaigns.map((campaign) => (
+            <button
+              key={campaign.id}
+              type="button"
+              aria-expanded={selectedCampaignId === campaign.id}
+              onClick={() => setSelectedCampaignId((current) => current === campaign.id ? null : campaign.id)}
+              className="flex w-full items-center justify-between gap-4 py-3 text-left hover:bg-surface"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold">{campaign.name}</span>
+                <span className="mt-1 block text-xs text-muted-foreground">Campaign #{campaign.id} · {campaign.sender_id}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
+                <Status value={campaign.is_deleted ? "Deleted" : campaign.status} />
+                <ChevronDown className={`size-4 transition-transform ${selectedCampaignId === campaign.id ? "rotate-180" : ""}`} />
+              </span>
+            </button>
+          ))}
         </div>
+      </DetailSection>
+      {selectedCampaign && (
+        <DetailSection title={`Campaign details · #${selectedCampaign.id}`}>
+          <dl className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+            {[
+              ["Campaign name", selectedCampaign.name],
+              ["Status", selectedCampaign.is_deleted ? "Deleted" : selectedCampaign.status],
+              ["Sender ID", selectedCampaign.sender_id],
+              ["Channels", selectedCampaign.channel_names.join(", ") || "None"],
+              ["Ready to execute", selectedCampaign.is_ready_to_execute ? "Yes" : "No"],
+              ["Created", new Date(selectedCampaign.created_at).toLocaleString()],
+              ["Last updated", new Date(selectedCampaign.updated_at).toLocaleString()],
+              ["Notification emails", selectedCampaign.owner_emails.join(", ") || "None"],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-[11px] text-muted-foreground">{label}</dt>
+                <dd className="mt-1 break-words text-sm font-medium">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </DetailSection>
       )}
     </div>
   );
@@ -227,8 +397,8 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
   const [page, setPage] = useState<Page>(initialPage);
   useEffect(() => setPage(initialPage), [initialPage]);
   const navigate = useNavigate();
-  const [users, setUsers] = useState<User[]>([]);
-  const [assignmentOptions, setAssignmentOptions] = useState<UserAssignmentOptions>({
+  const [users, setUsers] = useState<User[]>(() => getFreshWorkspaceCache()?.users ?? []);
+  const [assignmentOptions, setAssignmentOptions] = useState<UserAssignmentOptions>(() => getFreshWorkspaceCache()?.assignmentOptions ?? {
     smscs: [],
     senderIds: [],
     channels: [],
@@ -236,8 +406,8 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     nAddressConfigs: [],
     nAddresses: [],
   });
-  const [currentAdmin, setCurrentAdmin] = useState("Admin");
-  const [ready, setReady] = useState(false);
+  const [currentAdmin, setCurrentAdmin] = useState(() => getFreshWorkspaceCache()?.currentAdmin ?? "Admin");
+  const [ready, setReady] = useState(() => getFreshWorkspaceCache() !== null);
   const [bootError, setBootError] = useState("");
   const campaigns = campaignsSeed;
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
@@ -257,20 +427,39 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
 
   useEffect(() => {
     let active = true;
+    const invalidateWorkspace = () => {
+      workspaceCache = null;
+    };
     const expireSession = () => {
       void navigate({ to: "/login" });
     };
     window.addEventListener("admin-session-expired", expireSession);
+    window.addEventListener("admin-workspace-invalidated", invalidateWorkspace);
     if (!getAccessToken()) {
       void navigate({ to: "/login" });
-      return () => window.removeEventListener("admin-session-expired", expireSession);
+      return () => {
+        window.removeEventListener("admin-session-expired", expireSession);
+        window.removeEventListener("admin-workspace-invalidated", invalidateWorkspace);
+      };
+    }
+    const cachedWorkspace = getFreshWorkspaceCache();
+    if (cachedWorkspace) {
+      setUsers(cachedWorkspace.users);
+      setCurrentAdmin(cachedWorkspace.currentAdmin);
+      setAssignmentOptions(cachedWorkspace.assignmentOptions);
+      replaceConfigurationEntries(cachedWorkspace.configEntries);
+      setReady(true);
+      return () => {
+        window.removeEventListener("admin-session-expired", expireSession);
+        window.removeEventListener("admin-workspace-invalidated", invalidateWorkspace);
+      };
     }
 
     void (async () => {
       try {
-        const me = await adminRequest<ApiUser>("/admin/me/");
-        const [apiUsers, smscs, senderIds, channels, tpsConfigs, nAddressConfigs, nAddresses] =
+        const [me, apiUsers, smscs, senderIds, channels, tpsConfigs, nAddressConfigs, nAddresses] =
           await Promise.all([
+            adminRequest<ApiUser>("/admin/me/"),
             listUsers(),
             listConfig("smsc-configs"),
             listConfig("sender-ids"),
@@ -281,21 +470,31 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
           ]);
         if (!active) return;
         const mappedUsers = apiUsers.map(fromApiUser);
-        setUsers(mappedUsers);
-        setCurrentAdmin(me.full_name || me.username);
-        setAssignmentOptions({
+        const currentAdminName = me.full_name || me.username;
+        const options: UserAssignmentOptions = {
           smscs: smscs.map((item) => ({ id: item.id, label: `${String(item.name ?? item.id)} (${String(item.base_url ?? "")})` })),
           senderIds: senderIds.map((item) => ({ id: item.id, label: `${String(item.sender_id ?? "")} — ${String(item.name ?? "")}` })),
           channels: channels.map((item) => ({ id: item.id, label: `${String(item.name ?? "")} (${String(item.code ?? "")})` })),
           tpsConfigs: tpsConfigs.map((item) => ({ id: item.id, label: `${String(item.name ?? "")} — ${String(item.global_tps ?? "")} TPS` })),
           nAddressConfigs: nAddressConfigs.map((item) => ({ id: item.id, label: `${String(item.name ?? "")} — ${String(item.max_addresses_per_request ?? "")} per request` })),
           nAddresses: nAddresses.map((item) => ({ id: item.id, label: `${String(item.value ?? "")} (${String(item.address_type ?? "")})` })),
-        });
-        replaceConfigurationEntries({
+        };
+        const configEntries = {
           "SMSC Accounts": toStoreEntries("SMSC Accounts", smscs, mappedUsers),
           "Sender IDs": toStoreEntries("Sender IDs", senderIds, mappedUsers),
           Channels: toStoreEntries("Channels", channels, mappedUsers),
-        });
+        };
+        workspaceCache = {
+          users: mappedUsers,
+          currentAdmin: currentAdminName,
+          assignmentOptions: options,
+          configEntries,
+          expiresAt: Date.now() + WORKSPACE_CACHE_TTL_MS,
+        };
+        setUsers(mappedUsers);
+        setCurrentAdmin(currentAdminName);
+        setAssignmentOptions(options);
+        replaceConfigurationEntries(configEntries);
         setReady(true);
       } catch (reason) {
         if (active) {
@@ -307,10 +506,11 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     return () => {
       active = false;
       window.removeEventListener("admin-session-expired", expireSession);
+      window.removeEventListener("admin-workspace-invalidated", invalidateWorkspace);
     };
   }, [navigate]);
 
-  const pagePaths: Record<Page, string> = { Overview: "/", Users: "/users", Campaigns: "/campaigns", "SMSC Accounts": "/smsc-accounts", "Sender IDs": "/sender-ids", Channels: "/channels", TPS: "/tps", "N-Addresses": "/n-addresses", "TPS & N-Addresses": "/tps-n-addresses", SMTP: "/smtp", "System Logs": "/system-logs", "Kafka Monitor": "/kafka-monitor" };
+  const pagePaths: Record<Page, string> = { Overview: "/", Users: "/users", Campaigns: "/campaigns", "SMSC Accounts": "/smsc-accounts", "Sender IDs": "/sender-ids", Channels: "/channels", TPS: "/tps", "N-Addresses": "/n-addresses", "TPS & N-Addresses": "/tps-n-addresses", "Email Config": "/smtp", "System Logs": "/system-logs", "Kafka Monitor": "/kafka-monitor" };
   const go = (next: Page) => { setSelectedUser(null); setSelectedCampaign(null); setQuery(""); setFilter("All statuses"); setMenuOpen(false); if (next !== page) void navigate({ to: pagePaths[next] }); };
   const flash = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 3800); };
   const viewUser = (user: User) => { setSelectedUser(user); setDetailTab("Profile"); if (page !== "Users") void navigate({ to: "/users" }); };
@@ -384,6 +584,33 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     setEditingUserDetails(false);
     flash("User changes saved.");
   };
+  const updateUserAssignment = async (user: User, field: UserAssignmentField, ids: number[]) => {
+    const payload: UserSaveInput = {
+      username: user.username ?? user.email.split("@")[0] ?? "",
+      email: user.email,
+      firstName: user.firstName ?? "",
+      lastName: user.lastName ?? "",
+      department: user.department ?? user.company,
+      role: user.apiRole ?? (user.role === "Admin" ? "ADMIN" : "CAMPAIGN_MANAGER"),
+      password: "",
+      isActive: user.status !== "Inactive",
+      isLocked: user.status === "Locked",
+      notes: user.notes ?? "",
+      tpsLimit: user.tps || null,
+      assignedSmscs: user.assignedSmscs,
+      assignedSenderIds: user.assignedSenderIds,
+      assignedChannels: user.assignedChannels,
+      assignedTpsConfigs: user.assignedTpsConfigs,
+      assignedNAddressConfigs: user.assignedNAddressConfigs,
+      assignedNAddresses: user.assignedNAddresses,
+    };
+    payload[field] = ids;
+    const updated = await persistUser(user, user, payload);
+    setUsers((current) =>
+      current.map((candidate) => candidate.profileId === updated.profileId ? updated : candidate),
+    );
+    flash("Configuration assignments updated.");
+  };
   const openUserForm = (user?: User) => {
     if (user) setEditingUserDetails(true);
   };
@@ -443,7 +670,6 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
           <UsersManagement
             users={users}
             setUsers={setUsers}
-            assignmentOptions={assignmentOptions}
             onPersistUser={persistUser}
             onDeleteUser={removeUser}
             onUpdateAccount={updateAccount}
@@ -454,8 +680,8 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
 
         {page === "Users" && selectedUser && <><Button variant="ghost" size="sm" className="mb-5 -ml-3 text-muted-foreground" onClick={() => setSelectedUser(null)}><ArrowLeft /> Back to users</Button><div className="mb-7 flex flex-wrap items-center gap-4"><Avatar name={selectedUser.name} tone={selectedUser.tone} size="lg" /><div><div className="flex items-center gap-3"><h1 className="font-display text-[28px] font-bold">{selectedUser.name}</h1><Status value={selectedUser.status} /></div><p className="text-sm text-muted-foreground">{selectedUser.email} · {selectedUser.company}</p></div><div className="ml-auto flex gap-2"><Button onClick={() => openUserForm(selectedUser)}>Edit user</Button></div></div><div className="admin-scroll mb-6 flex gap-5 overflow-x-auto border-b border-border">{["Profile", "SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses", "Campaigns"].map(tab => <Button key={tab} variant="ghost" onClick={() => setDetailTab(tab)} className={`h-10 shrink-0 rounded-none border-b-2 px-0 text-xs shadow-none hover:bg-transparent ${detailTab === tab ? "border-primary text-primary" : "border-transparent text-muted-foreground"}`}>{tab}</Button>)}</div>
           {detailTab === "Profile" && <div className="grid gap-5"><div className="rounded-md border border-border bg-card p-6"><SectionHeading title="Profile information" /><div className="grid gap-y-6 sm:grid-cols-2">{[["Display name", selectedUser.name], ["Email address", selectedUser.email], ["Department", selectedUser.department ?? selectedUser.company], ["Role", selectedUser.role ?? "Campaign Manager"], ["Username", selectedUser.username ?? selectedUser.email.split("@")[0]], ["Last login", selectedUser.login]].map(([key, val]) => <div key={key}><div className="text-[11px] text-muted-foreground">{key}</div><div className="mt-1 text-sm font-medium">{val}</div></div>)}</div><div className="mt-6 border-t border-border pt-5"><div className="text-[11px] text-muted-foreground">Notes</div><p className="mt-1 text-sm">{selectedUser.notes || "No notes added."}</p></div></div></div>}
-          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(detailTab) && <AssignedResources page={detailTab as BackendConfigPage} user={selectedUser} options={assignmentOptions} />}
-          {detailTab === "Campaigns" && <CampaignTable rows={campaigns.filter(c => c.owner === selectedUser.name)} onOpen={viewCampaign} />}
+          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(detailTab) && <AssignedResources page={detailTab as BackendConfigPage} user={selectedUser} options={assignmentOptions} onUpdate={(field, ids) => updateUserAssignment(selectedUser, field, ids)} />}
+          {detailTab === "Campaigns" && <UserCampaigns key={selectedUser.profileId} profileId={selectedUser.profileId} />}
         </>}
 
         {page === "Campaigns" && !selectedCampaign && <>
@@ -504,10 +730,10 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
           </div>
         </>}
 
-        {!["Overview", "Users", "Campaigns"].includes(page) && <><PageTitle title={page} subtitle={pageSubtitle(page)} action={["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses", "TPS & N-Addresses", "System Logs", "Kafka Monitor"].includes(page) ? undefined : <Button onClick={() => openResource(page)}><Plus /> Add configuration</Button>} />
+        {!["Overview", "Users", "Campaigns"].includes(page) && <><PageTitle title={page} subtitle={pageSubtitle(page)} action={["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses", "Email Config", "System Logs", "Kafka Monitor"].includes(page) ? undefined : <Button onClick={() => openResource(page)}><Plus /> Add configuration</Button>} />
           {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(page) && <BackendConfiguration page={page as BackendConfigPage} users={users} onNotice={flash} />}
           {page === "TPS & N-Addresses" && <div className="grid gap-8"><section><h2 className="mb-4 font-display text-lg font-bold">TPS limits</h2><BackendConfiguration page="TPS" users={users} onNotice={flash} /></section><section><h2 className="mb-4 font-display text-lg font-bold">N-addresses</h2><BackendConfiguration page="N-Addresses" users={users} onNotice={flash} /></section></div>}
-          {page === "SMTP" && <ResourceView page={page} extra={resourceRows[page] || []} onAdd={() => openResource(page)} onAction={flash} />}
+          {page === "Email Config" && <AdminEmailSettings />}
           {page === "System Logs" && <><div className="mb-4 flex flex-wrap gap-2"><div className="relative min-w-[220px] flex-1 sm:max-w-[330px]"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search events..." className="bg-card pl-9" value={query} onChange={e => setQuery(e.target.value)} /></div><select aria-label="Filter log type" className="h-9 rounded-md border border-input bg-card px-3 text-xs" value={filter} onChange={e => setFilter(e.target.value)}><option>All statuses</option><option>Campaign</option><option>SMSC</option><option>System</option></select><select aria-label="Filter log user" className="h-9 rounded-md border border-input bg-card px-3 text-xs" onChange={e => setQuery(e.target.value)}><option value="">All users</option>{[...users.map(u => u.name), "Alex Morgan"].map(n => <option key={n}>{n}</option>)}</select><Input type="date" aria-label="Log date" className="w-[145px] bg-card text-xs" /></div><LogList query={query} category={filter} /></>}
           {page === "Kafka Monitor" && <><div className="mb-5 grid gap-3 sm:grid-cols-3">{[["Topics monitored", "2", Radio], ["Events this hour", "42,861", Zap], ["Consumer health", "Healthy", CheckCircle2]].map(([l,v,Icon]) => { const I = Icon as LucideIcon; return <div key={l as string} className="rounded-md border border-border bg-card p-5"><div className="flex justify-between text-xs text-muted-foreground">{l as string}<I className="size-4 text-primary" /></div><div className="mt-2 font-display text-2xl font-bold">{v as string}</div></div>; })}</div><div className="rounded-md border border-border bg-card"><div className="border-b border-border p-5 font-display text-sm font-bold">Consumer groups</div><div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left text-xs"><thead className="bg-surface text-muted-foreground"><tr>{["TOPIC", "CONSUMER GROUP", "CURRENT LAG", "EVENTS / HOUR", "STATUS"].map(h => <th key={h} className="px-5 py-3">{h}</th>)}</tr></thead><tbody>{[["sent-response", "status-updater", "12", "27,480"], ["delivery-report", "dlr-processor", "4", "15,381"]].map(([t,g,l,e]) => <tr key={t} className="border-t border-border"><td className="px-5 py-4 font-mono font-semibold">{t}</td><td className="px-5 py-4">{g}</td><td className="px-5 py-4">{l}</td><td className="px-5 py-4">{e}</td><td className="px-5 py-4"><Status value="Connected" /></td></tr>)}</tbody></table></div></div><div className="mt-5 rounded-md border border-border bg-card p-5"><SectionHeading title="Events per hour" detail="Last 12 hours across both topics" /><div className="flex h-44 items-end gap-2">{[31,28,35,40,38,44,52,47,41,45,49,43].map((v, i) => <div key={i} className="flex flex-1 flex-col items-center gap-2"><div className="w-full rounded-t bg-primary/80" style={{ height: `${v * 2.6}px` }} title={`${v}k events`} /><span className="text-[10px] text-muted-foreground">{String((i + 23) % 24).padStart(2, "0")}h</span></div>)}</div></div></>}
         </>}
@@ -519,7 +745,6 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
         key={selectedUser.profileId}
         users={users}
         user={selectedUser}
-        assignmentOptions={assignmentOptions}
         onClose={() => setEditingUserDetails(false)}
         onSave={persistUserDetails}
       />
@@ -682,4 +907,4 @@ const logEvents = [
   { action: "Test SMS sent", detail: "Northstar primary", user: "Aisha Patel", type: "SMSC", time: "Yesterday, 02:36 PM", status: "Completed" },
 ];
 function LogList({ filterName, query = "", category = "All statuses" }: { filterName?: string; query?: string; category?: string }) { const rows = logEvents.filter(e => (!filterName || `${e.user} ${e.detail}`.includes(filterName)) && (category === "All statuses" || e.type === category) && `${e.action} ${e.detail} ${e.user}`.toLowerCase().includes(query.toLowerCase())); return <div className="overflow-hidden rounded-md border border-border bg-card"><div className="border-b border-border px-5 py-4 font-display text-sm font-bold">Activity log</div><div className="overflow-x-auto"><table className="w-full min-w-[650px] text-left text-xs"><thead className="bg-surface text-[10px] uppercase tracking-wider text-muted-foreground"><tr>{["EVENT", "USER", "TYPE", "TIME", "STATUS"].map(h => <th key={h} className="px-5 py-3">{h}</th>)}</tr></thead><tbody>{rows.map((e,i) => <tr key={i} className="border-t border-border"><td className="px-5 py-4"><strong>{e.action}</strong><span className="mt-1 block text-[11px] text-muted-foreground">{e.detail}</span></td><td className="px-5 py-4">{e.user}</td><td className="px-5 py-4 text-muted-foreground">{e.type}</td><td className="px-5 py-4 text-muted-foreground">{e.time}</td><td className="px-5 py-4"><Status value={e.status} /></td></tr>)}</tbody></table>{rows.length === 0 && <Empty />}</div></div>; }
-function pageSubtitle(page: Page) { const subtitles: Partial<Record<Page, string>> = { "SMSC Accounts": "Manage messaging gateways and account connections.", "Sender IDs": "Control sender identities available to your users.", "Channels": "Manage delivery channels and user access.", TPS: "Configure named messages-per-second sending profiles.", "N-Addresses": "Configure named recipient-per-request limit profiles.", "TPS & N-Addresses": "Set default sending and recipient limits for new users.", "SMTP": "Monitor and configure outbound email connections.", "System Logs": "Audit actions and events across the platform.", "Kafka Monitor": "Monitor topic throughput and consumer health." }; return subtitles[page] || ""; }
+function pageSubtitle(page: Page) { const subtitles: Partial<Record<Page, string>> = { "SMSC Accounts": "Manage messaging gateways and account connections.", "Sender IDs": "Control sender identities available to your users.", "Channels": "Manage delivery channels and user access.", TPS: "Configure named messages-per-second sending profiles.", "N-Addresses": "Configure named recipient-per-request limit profiles.", "TPS & N-Addresses": "Set default sending and recipient limits for new users.", "Email Config": "Manage Admin account email services and password reset email.", "System Logs": "Audit actions and events across the platform.", "Kafka Monitor": "Monitor topic throughput and consumer health." }; return subtitles[page] || ""; }

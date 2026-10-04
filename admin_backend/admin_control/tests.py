@@ -4,11 +4,13 @@ from django.db import connection
 from django.test import TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from unittest.mock import patch
 
 from .models import (
     Campaign,
     Channel,
     GlobalTPSConfig,
+    AdminEmailConfig,
     NAddress,
     NAddressesConfig,
     SenderID,
@@ -37,6 +39,9 @@ class AdminBackendApiTests(TransactionTestCase):
         super().tearDownClass()
 
     def setUp(self):
+        self.email_sender = patch("admin_control.views.send_admin_email")
+        self.email_sender.start()
+        self.addCleanup(self.email_sender.stop)
         self.client = APIClient()
         self.admin = User.objects.create_user(
             username="platform-admin",
@@ -88,11 +93,81 @@ class AdminBackendApiTests(TransactionTestCase):
         )
         self.assertEqual(response.status_code, 201, response.data)
         self.assertFalse(User.objects.get(username="new-manager").is_staff)
+        self.assertTrue(User.objects.get(username="new-manager").admin_profile.require_password_change)
         self.assertEqual(response.data["assigned_config_counts"]["channels"], 0)
+        self.email_sender.assert_called_once()
+        self.assertEqual(self.email_sender.call_args.args[0], "new-manager@example.test")
+        self.assertIn("http://localhost:3000/login", self.email_sender.call_args.args[2])
+        self.assertIn('href="http://localhost:3000/login"', self.email_sender.call_args.args[3])
+        self.assertIn("Temporary password:", self.email_sender.call_args.args[3])
 
         self.client.force_authenticate(self.manager)
         denied = self.client.get("/api/v1/admin/users/")
         self.assertEqual(denied.status_code, 403)
+
+    def test_new_admin_must_change_temporary_password_before_getting_tokens(self):
+        self.client.force_authenticate(self.admin)
+        created = self.client.post(
+            "/api/v1/admin/users/",
+            {
+                "username": "new-platform-admin",
+                "email": "new-platform-admin@example.test",
+                "password": "Temp-admin-2891!",
+                "department": "IT",
+                "role": UserProfile.Role.ADMIN,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+
+        login = self.client.post(
+            "/api/v1/admin/auth/login/",
+            {"username": "new-platform-admin", "password": "Temp-admin-2891!"},
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.data, {"must_change_password": True})
+
+        changed = self.client.post(
+            "/api/v1/admin/auth/initial-password/",
+            {
+                "username": "new-platform-admin",
+                "current_password": "Temp-admin-2891!",
+                "new_password": "Changed-admin-5781!",
+            },
+        )
+        self.assertEqual(changed.status_code, 200, changed.data)
+        self.assertFalse(
+            User.objects.get(username="new-platform-admin").admin_profile.require_password_change
+        )
+
+        login = self.client.post(
+            "/api/v1/admin/auth/login/",
+            {"username": "new-platform-admin", "password": "Changed-admin-5781!"},
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("access", login.data)
+
+    def test_password_reset_pin_is_emailed_and_can_reset_a_manager_password(self):
+        requested = self.client.post(
+            "/api/v1/admin/auth/password-reset/request/",
+            {"email": self.manager.email},
+        )
+        self.assertEqual(requested.status_code, 200)
+        self.assertEqual(self.email_sender.call_args.args[0], self.manager.email)
+        pin = self.email_sender.call_args.args[2].split(" is ")[1].split(".")[0]
+        self.assertIn(pin, self.email_sender.call_args.args[3])
+        self.assertIn('href="http://localhost:3000/login"', self.email_sender.call_args.args[3])
+
+        confirmed = self.client.post(
+            "/api/v1/admin/auth/password-reset/confirm/",
+            {
+                "email": self.manager.email,
+                "pin": pin,
+                "new_password": "Manager-reset-4912!",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.data)
+        self.assertTrue(User.objects.get(pk=self.manager.pk).check_password("Manager-reset-4912!"))
 
     def test_user_creation_rejects_duplicate_identity_and_weak_password(self):
         self.client.force_authenticate(self.admin)
@@ -234,6 +309,55 @@ class AdminBackendApiTests(TransactionTestCase):
         self.assertEqual(assigned.status_code, 200)
         self.assertEqual([item["id"] for item in assigned.data["n_addresses"]], [address.pk])
 
+    def test_admin_can_view_campaigns_created_by_user(self):
+        now = timezone.now()
+        channel = Channel.objects.create(
+            code="campaigns", name="Campaign SMS", is_active=True,
+            created_at=now, updated_at=now,
+        )
+        user_campaign = Campaign.objects.create(
+            name="Manager campaign",
+            sender_id="TESTSENDER",
+            owner_emails=["owner@example.test"],
+            channels_id=[channel.pk],
+            status="draft",
+            is_ready_to_execute=False,
+            is_deleted=False,
+            created_at=now,
+            updated_at=now,
+            created_by=self.manager,
+        )
+        Campaign.objects.create(
+            name="Admin campaign",
+            sender_id="TESTSENDER",
+            owner_emails=[],
+            channels_id=[],
+            status="active",
+            is_ready_to_execute=True,
+            is_deleted=False,
+            created_at=now,
+            updated_at=now,
+            created_by=self.admin,
+        )
+
+        self.client.force_authenticate(self.admin)
+        response = self.client.get(
+            f"/api/v1/admin/users/{self.manager.admin_profile.pk}/campaigns/"
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            [campaign["id"] for campaign in response.data], [user_campaign.pk]
+        )
+        self.assertEqual(response.data[0]["name"], "Manager campaign")
+        self.assertEqual(response.data[0]["sender_id"], "TESTSENDER")
+        self.assertEqual(response.data[0]["channel_names"], ["Campaign SMS"])
+
+        self.client.force_authenticate(self.manager)
+        denied = self.client.get(
+            f"/api/v1/admin/users/{self.manager.admin_profile.pk}/campaigns/"
+        )
+        self.assertEqual(denied.status_code, 403)
+
     def test_channel_creation_requires_and_saves_smsc_binding(self):
         now = timezone.now()
         smsc = SMSCConfig.objects.create(
@@ -309,3 +433,71 @@ class AdminBackendApiTests(TransactionTestCase):
         event = AdminAuditLog.objects.get(action="create", object_type="admin_control.SMSCConfig")
         self.assertEqual(event.new_values["api_key"], "[redacted]")
         self.assertNotIn("api_key", response.data)
+
+    def test_admin_email_services_support_default_and_test_delivery(self):
+        self.client.force_authenticate(self.admin)
+        first = self.client.post(
+            "/api/v1/admin/email-services/",
+            {
+                "name": "Primary account mail",
+                "host": "smtp.primary.example.test",
+                "port": 587,
+                "username": "admin-mail",
+                "default_from_email": "accounts@example.test",
+                "use_tls": True,
+                "use_ssl": False,
+                "is_active": True,
+                "is_default": False,
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+        self.assertTrue(first.data["is_default"])
+        first_config = AdminEmailConfig.objects.get(pk=first.data["id"])
+
+        backup = self.client.post(
+            "/api/v1/admin/email-services/",
+            {
+                "name": "Backup account mail",
+                "host": "smtp.backup.example.test",
+                "port": 465,
+                "default_from_email": "backup@example.test",
+                "use_tls": False,
+                "use_ssl": True,
+                "is_active": True,
+                "is_default": False,
+            },
+            format="json",
+        )
+        self.assertEqual(backup.status_code, 201, backup.data)
+        self.assertFalse(backup.data["is_default"])
+
+        changed = self.client.patch(
+            f"/api/v1/admin/email-services/{backup.data['id']}/",
+            {"is_default": True},
+            format="json",
+        )
+        self.assertEqual(changed.status_code, 200, changed.data)
+        first_config.refresh_from_db()
+        self.assertFalse(first_config.is_default)
+
+        tested = self.client.post(
+            f"/api/v1/admin/email-services/{backup.data['id']}/test/",
+            {"test_email": "test-recipient@example.test"},
+            format="json",
+        )
+        self.assertEqual(tested.status_code, 200, tested.data)
+        self.email_sender.assert_called_once()
+        self.assertEqual(
+            self.email_sender.call_args.kwargs["config"].pk,
+            backup.data["id"],
+        )
+
+        disabled = self.client.patch(
+            f"/api/v1/admin/email-services/{backup.data['id']}/",
+            {"is_active": False, "is_default": False},
+            format="json",
+        )
+        self.assertEqual(disabled.status_code, 200, disabled.data)
+        first_config.refresh_from_db()
+        self.assertTrue(first_config.is_default)

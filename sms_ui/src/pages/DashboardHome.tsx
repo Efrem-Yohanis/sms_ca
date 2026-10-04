@@ -45,7 +45,7 @@ function dashboardParams(source: URLSearchParams) {
     if (value) params.set(key, value);
   }
   params.set("page_size", String(PAGE_SIZE));
-  params.set("date_range", "all_time");
+  params.set("date_range", "last_30_days");
   return params;
 }
 
@@ -74,7 +74,11 @@ export default function DashboardHome() {
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardData>({
     queryKey: ["campaign-dashboard", queryString],
     queryFn: () => fetchDashboard(safeParams),
-    refetchInterval: autoRefresh ? 30000 : false,
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
+    retry: 1,
+    refetchInterval: autoRefresh ? 60_000 : false,
+    refetchIntervalInBackground: false,
   });
 
   useEffect(() => {

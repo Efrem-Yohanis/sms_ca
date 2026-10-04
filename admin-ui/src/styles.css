@@ -37,9 +37,9 @@
   --color-danger-soft: var(--danger-soft);
   --color-surface: var(--surface);
   --color-chart-grid: var(--chart-grid);
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
 }
 
 :root {
@@ -105,11 +105,11 @@
 }
 
 @layer base {
-  * { border-color: var(--color-border); }
+  * { border-color: var(--color-border); border-radius: 0 !important; }
   body { margin: 0; background: var(--color-background); color: var(--color-foreground); font-family: var(--font-sans); }
   button, input, select, textarea { font: inherit; }
 }
 
 .admin-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
-.admin-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+.admin-scroll::-webkit-scrollbar-thumb { background: var(--border); }
 .chart-bars { background-image: linear-gradient(to top, var(--chart-grid) 1px, transparent 1px); background-size: 100% 25%; }

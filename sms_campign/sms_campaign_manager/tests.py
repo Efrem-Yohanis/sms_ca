@@ -61,6 +61,46 @@ from .views import CampaignDetailView
 
 
 class AuthenticationContractTests(TestCase):
+    def test_platform_campaign_manager_must_change_temporary_password_before_token_issue(self):
+        user = get_user_model().objects.create_user(
+            username='temporary-manager',
+            password='Temporary-manager-538!',
+        )
+        with patch(
+            'sms_campaign_manager.serializers.get_platform_profile',
+            return_value=('CAMPAIGN_MANAGER', True),
+        ):
+            login_response = self.client.post(
+                '/api/v1/auth/login/',
+                {'username': user.username, 'password': 'Temporary-manager-538!'},
+                format='json',
+            )
+        self.assertEqual(login_response.status_code, 200, login_response.content)
+        self.assertEqual(login_response.json(), {'must_change_password': True})
+
+        with (
+            patch(
+                'sms_campaign_manager.views.get_platform_profile',
+                return_value=('CAMPAIGN_MANAGER', True),
+            ),
+            patch(
+                'sms_campaign_manager.views.clear_password_change_requirement',
+                return_value=True,
+            ),
+        ):
+            changed = self.client.post(
+                '/api/v1/auth/initial-password/',
+                {
+                    'username': user.username,
+                    'current_password': 'Temporary-manager-538!',
+                    'new_password': 'Permanent-manager-614!',
+                },
+                format='json',
+            )
+        self.assertEqual(changed.status_code, 200, changed.content)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password('Permanent-manager-614!'))
+
     def test_registration_creates_standard_user_that_can_log_in(self):
         registration_response = self.client.post(
             '/api/v1/auth/register/',
@@ -171,6 +211,46 @@ class CampaignAudienceInsertionTests(TestCase):
         self.assertEqual(linked_audience['total_count'], 1)
         self.assertEqual(linked_audience['valid_count'], 1)
         self.assertEqual(linked_audience['source_type'], 'file_import')
+
+
+class CampaignDashboardTests(TestCase):
+    def test_dashboard_returns_batched_campaign_metrics(self):
+        user = get_user_model().objects.create_user(
+            username='dashboard-manager',
+            password='Dashboard-manager-392!',
+        )
+        channel = Channel.objects.create(code='dashboard-sms', name='Dashboard SMS')
+        sender = SenderID.objects.create(
+            sender_id='DASHBOARD',
+            name='Dashboard sender',
+            is_active=True,
+        )
+        campaign = Campaign.objects.create(
+            name='Dashboard campaign',
+            sender_id=sender.sender_id,
+            channels_id=[channel.pk],
+            status='draft',
+            created_by=user,
+        )
+        SuccessSent.objects.create(
+            message_id='dashboard-message-1',
+            campaign=campaign,
+            channel=channel,
+            recipient='+251711234567',
+            sender_id=sender.sender_id,
+        )
+        self.client.force_login(user)
+
+        response = self.client.get('/api/v1/dashboard/?date_range=all_time')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()['data']
+        self.assertEqual(payload['kpis']['total_campaigns'], 1)
+        self.assertEqual(payload['kpis']['draft_campaigns'], 1)
+        self.assertEqual(payload['sent_vs_delivery']['success_sent'], 1)
+        self.assertEqual(payload['campaigns']['count'], 1)
+        self.assertEqual(payload['campaigns']['results'][0]['success_sent'], 1)
+        self.assertEqual(payload['campaigns']['results'][0]['channels'], ['Dashboard SMS'])
 
 
 class CampaignCreateContractTests(TestCase):

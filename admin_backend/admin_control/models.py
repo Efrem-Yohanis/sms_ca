@@ -145,10 +145,23 @@ class NAddressesConfig(SharedConfigModel):
 
 
 class Campaign(SharedConfigModel):
+    name = models.CharField(max_length=255)
     sender_id = models.CharField(max_length=11)
+    owner_emails = models.JSONField(default=list, blank=True)
     channels_id = models.JSONField(default=list)
     status = models.CharField(max_length=20)
+    is_ready_to_execute = models.BooleanField(default=False)
     is_deleted = models.BooleanField(default=False)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+    created_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        db_column="created_by_id",
+        related_name="admin_created_campaigns",
+    )
 
     class Meta(SharedConfigModel.Meta):
         db_table = "sms_campaign_manager_campaign"
@@ -171,6 +184,7 @@ class UserProfile(models.Model):
     department = models.CharField(max_length=150, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     is_locked = models.BooleanField(default=False)
+    require_password_change = models.BooleanField(default=False)
     tps_limit = models.PositiveIntegerField(null=True, blank=True)
     sms_configs = models.ManyToManyField(SMSCConfig, blank=True, related_name="assigned_profiles")
     sender_ids = models.ManyToManyField(SenderID, blank=True, related_name="assigned_profiles")
@@ -290,6 +304,56 @@ class LoginAttempt(models.Model):
     succeeded = models.BooleanField(default=False, db_index=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+
+class AdminEmailConfig(models.Model):
+    name = models.CharField(max_length=150, unique=True, default="Admin account email")
+    host = models.CharField(max_length=255)
+    port = models.PositiveIntegerField(default=587)
+    username = models.CharField(max_length=255, blank=True, default="")
+    password = SharedEncryptedCharField(max_length=1000, blank=True, default="")
+    use_tls = models.BooleanField(default=True)
+    use_ssl = models.BooleanField(default=False)
+    from_email = models.EmailField()
+    is_default = models.BooleanField(default=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    last_test_status = models.CharField(max_length=20, blank=True, default="")
+    last_test_message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        if not self.host.strip():
+            raise ValidationError({"host": "SMTP host is required."})
+        if not 1 <= self.port <= 65535:
+            raise ValidationError({"port": "Port must be between 1 and 65535."})
+        if not self.from_email:
+            raise ValidationError({"from_email": "Sender email is required."})
+        if self.use_tls and self.use_ssl:
+            raise ValidationError({"use_ssl": "Choose TLS or SSL, not both."})
+
+    def save(self, *args, **kwargs):
+        if not self.is_active:
+            self.is_default = False
+        self.full_clean()
+        if self.is_default:
+            AdminEmailConfig.objects.filter(is_default=True).exclude(pk=self.pk).update(
+                is_default=False
+            )
+        super().save(*args, **kwargs)
+
+
+class PasswordResetChallenge(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="admin_password_challenges")
+    pin_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField(db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ("-created_at",)

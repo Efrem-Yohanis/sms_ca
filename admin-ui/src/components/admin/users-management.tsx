@@ -87,16 +87,9 @@ type UserForm = {
   lastName: string;
   department: string;
   role: string;
+  notes: string;
   password: string;
   confirmPassword: string;
-  notes: string;
-  tpsLimit: string;
-  assignedSmscs: number[];
-  assignedSenderIds: number[];
-  assignedChannels: number[];
-  assignedTpsConfigs: number[];
-  assignedNAddressConfigs: number[];
-  assignedNAddresses: number[];
 };
 
 const roles = ["Admin", "Campaign Manager"];
@@ -109,16 +102,9 @@ const emptyForm = (): UserForm => ({
   lastName: "",
   department: "",
   role: "",
+  notes: "",
   password: "",
   confirmPassword: "",
-  notes: "",
-  tpsLimit: "",
-  assignedSmscs: [],
-  assignedSenderIds: [],
-  assignedChannels: [],
-  assignedTpsConfigs: [],
-  assignedNAddressConfigs: [],
-  assignedNAddresses: [],
 });
 
 function getNameParts(user: UserRecord) {
@@ -159,13 +145,11 @@ function formatExactLogin(user: UserRecord) {
 function UserFormDialog({
   users,
   user,
-  assignmentOptions,
   onClose,
   onSave,
 }: {
   users: UserRecord[];
   user: UserRecord | null;
-  assignmentOptions: UserAssignmentOptions;
   onClose: () => void;
   onSave: (record: UserRecord, payload: UserSaveInput) => Promise<void>;
 }) {
@@ -180,13 +164,6 @@ function UserFormDialog({
           department: user.department ?? user.company,
           role: user.role ?? "",
           notes: user.notes ?? "",
-          tpsLimit: user.tps === null ? "" : String(user.tps),
-          assignedSmscs: user.assignedSmscs,
-          assignedSenderIds: user.assignedSenderIds,
-          assignedChannels: user.assignedChannels,
-          assignedTpsConfigs: user.assignedTpsConfigs,
-          assignedNAddressConfigs: user.assignedNAddressConfigs,
-          assignedNAddresses: user.assignedNAddresses,
         }
       : emptyForm(),
   );
@@ -281,13 +258,13 @@ function UserFormDialog({
         company: department,
         role: form.role,
         notes: form.notes,
-        tps: form.tpsLimit ? Number(form.tpsLimit) : 0,
-        assignedSmscs: form.assignedSmscs,
-        assignedSenderIds: form.assignedSenderIds,
-        assignedChannels: form.assignedChannels,
-        assignedTpsConfigs: form.assignedTpsConfigs,
-        assignedNAddressConfigs: form.assignedNAddressConfigs,
-        assignedNAddresses: form.assignedNAddresses,
+        tps: user?.tps ?? 0,
+        assignedSmscs: user?.assignedSmscs ?? [],
+        assignedSenderIds: user?.assignedSenderIds ?? [],
+        assignedChannels: user?.assignedChannels ?? [],
+        assignedTpsConfigs: user?.assignedTpsConfigs ?? [],
+        assignedNAddressConfigs: user?.assignedNAddressConfigs ?? [],
+        assignedNAddresses: user?.assignedNAddresses ?? [],
       };
     setSaving(true);
     setError("");
@@ -303,13 +280,13 @@ function UserFormDialog({
         isActive: user ? user.status !== "Inactive" : true,
         isLocked: user?.status === "Locked",
         notes: form.notes,
-        tpsLimit: form.tpsLimit ? Number(form.tpsLimit) : null,
-        assignedSmscs: form.assignedSmscs,
-        assignedSenderIds: form.assignedSenderIds,
-        assignedChannels: form.assignedChannels,
-        assignedTpsConfigs: form.assignedTpsConfigs,
-        assignedNAddressConfigs: form.assignedNAddressConfigs,
-        assignedNAddresses: form.assignedNAddresses,
+        tpsLimit: user?.tps ?? null,
+        assignedSmscs: user?.assignedSmscs ?? [],
+        assignedSenderIds: user?.assignedSenderIds ?? [],
+        assignedChannels: user?.assignedChannels ?? [],
+        assignedTpsConfigs: user?.assignedTpsConfigs ?? [],
+        assignedNAddressConfigs: user?.assignedNAddressConfigs ?? [],
+        assignedNAddresses: user?.assignedNAddresses ?? [],
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save user.");
@@ -317,15 +294,6 @@ function UserFormDialog({
       setSaving(false);
     }
   };
-
-  const assignments: [keyof UserForm, string, UserAssignmentOptions[keyof UserAssignmentOptions]][] = [
-    ["assignedSmscs", "Assigned SMSC connections", assignmentOptions.smscs],
-    ["assignedSenderIds", "Assigned Sender IDs", assignmentOptions.senderIds],
-    ["assignedChannels", "Assigned Channels", assignmentOptions.channels],
-    ["assignedTpsConfigs", "Assigned TPS limits", assignmentOptions.tpsConfigs],
-    ["assignedNAddressConfigs", "Assigned N-address limits", assignmentOptions.nAddressConfigs],
-    ["assignedNAddresses", "Assigned N-addresses", assignmentOptions.nAddresses],
-  ];
 
   const fieldClass =
     "mt-1.5 h-9 bg-background text-sm";
@@ -350,7 +318,7 @@ function UserFormDialog({
               {user ? "Edit user" : "Create user"}
             </h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Assignments and role changes take effect immediately.
+              Account details and role changes take effect immediately.
             </p>
           </div>
           <Button type="button" variant="ghost" size="icon" aria-label="Close" onClick={onClose}>
@@ -433,33 +401,21 @@ function UserFormDialog({
               ))}
             </select>
           </label>
-          <label className="block text-xs font-semibold">
-            User TPS limit
-            <Input
-              type="number"
-              min="1"
-              max="100000"
-              value={form.tpsLimit}
-              onChange={(event) => setValue("tpsLimit", event.target.value)}
-              className={fieldClass}
-            />
-          </label>
           <label className="block text-xs font-semibold sm:col-span-2">
             Notes
             <textarea
               value={form.notes}
               onChange={(event) => setValue("notes", event.target.value)}
-              className="mt-1.5 min-h-20 w-full rounded-md border border-input bg-background p-3 text-sm"
+              className="mt-1.5 min-h-20 w-full rounded-md border border-input bg-background p-3 text-sm font-normal"
             />
           </label>
-
           <label className="block text-xs font-semibold sm:col-span-2">
             Password {!user && <span className="text-destructive">*</span>}
             <span className="relative mt-1.5 block">
               <Input
                 required={!user}
                 type={showPassword ? "text" : "password"}
-                autoComplete={user ? "new-password" : "new-password"}
+                autoComplete="new-password"
                 minLength={user ? undefined : 8}
                 maxLength={128}
                 value={form.password}
@@ -476,6 +432,7 @@ function UserFormDialog({
                 {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
               </button>
             </span>
+            {!user && <span className="mt-1 block text-[11px] font-normal text-muted-foreground">At least 8 characters</span>}
           </label>
           <label className="block text-xs font-semibold sm:col-span-2">
             Confirm password {!user && <span className="text-destructive">*</span>}
@@ -500,34 +457,6 @@ function UserFormDialog({
             </span>
           </label>
 
-          {assignments.map(([key, label, options]) => (
-            <fieldset key={key} className="space-y-2 sm:col-span-2">
-              <legend className="text-xs font-semibold">{label}</legend>
-              <div className="max-h-32 space-y-2 overflow-y-auto rounded-md border border-border p-3">
-                {options.map((option) => (
-                  <label key={option.id} className="flex items-center gap-2 text-xs font-normal">
-                    <input
-                      type="checkbox"
-                      checked={(form[key] as number[]).includes(option.id)}
-                      onChange={(event) => {
-                        const current = form[key] as number[];
-                        setValue(
-                          key,
-                          event.target.checked
-                            ? [...new Set([...current, option.id])]
-                            : current.filter((id) => id !== option.id),
-                        );
-                      }}
-                    />
-                    {option.label}
-                  </label>
-                ))}
-                {options.length === 0 && (
-                  <p className="text-xs text-muted-foreground">No configurations available.</p>
-                )}
-              </div>
-            </fieldset>
-          ))}
           {error && (
             <p role="alert" className="text-xs font-medium text-destructive sm:col-span-2">
               {error}
@@ -549,13 +478,11 @@ function UserFormDialog({
 export function UserEditor({
   users,
   user,
-  assignmentOptions,
   onClose,
   onSave,
 }: {
   users: UserRecord[];
   user: UserRecord;
-  assignmentOptions: UserAssignmentOptions;
   onClose: () => void;
   onSave: (record: UserRecord, payload: UserSaveInput) => Promise<void>;
 }) {
@@ -563,7 +490,6 @@ export function UserEditor({
     <UserFormDialog
       users={users}
       user={user}
-      assignmentOptions={assignmentOptions}
       onClose={onClose}
       onSave={onSave}
     />
@@ -573,7 +499,6 @@ export function UserEditor({
 export function UsersManagement({
   users,
   setUsers,
-  assignmentOptions,
   onPersistUser,
   onDeleteUser,
   onUpdateAccount,
@@ -582,7 +507,6 @@ export function UsersManagement({
 }: {
   users: UserRecord[];
   setUsers: (users: UserRecord[] | ((current: UserRecord[]) => UserRecord[])) => void;
-  assignmentOptions: UserAssignmentOptions;
   onPersistUser: (
     user: UserRecord | null,
     record: UserRecord,
@@ -1024,7 +948,6 @@ export function UsersManagement({
         <UserFormDialog
           key={editing ? getUsername(editing) : "new-user"}
           users={users}
-          assignmentOptions={assignmentOptions}
           user={editing}
           onClose={() => {
             setFormOpen(false);

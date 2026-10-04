@@ -8,13 +8,13 @@ def get_fernet():
     key = settings.FIELD_ENCRYPTION_KEY
     if not key:
         raise ImproperlyConfigured(
-            "FIELD_ENCRYPTION_KEY must match the campaign backend key to edit SMSC credentials."
+            "FIELD_ENCRYPTION_KEY must match the campaign backend key to encrypt credentials."
         )
     return Fernet(key.encode() if isinstance(key, str) else key)
 
 
 class SharedEncryptedCharField(models.CharField):
-    """Read existing campaign-manager Fernet values without owning their table."""
+    """Use the shared Fernet key for credential fields stored by either backend."""
 
     def get_prep_value(self, value):
         if value in (None, ""):

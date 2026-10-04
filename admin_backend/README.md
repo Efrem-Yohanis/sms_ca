@@ -62,9 +62,16 @@ refresh tokens; send the access token as `Authorization: Bearer <token>`.
 | Route | Purpose |
 | --- | --- |
 | `POST /admin/auth/login/` | Admin-only login using username or email |
+| `POST /admin/auth/initial-password/` | Validate a temporary Admin password and require its replacement |
+| `POST /admin/auth/password-reset/request/` | Email a short-lived password reset PIN |
+| `POST /admin/auth/password-reset/confirm/` | Validate a reset PIN and set a new password |
 | `GET /admin/me/` | Current Admin profile |
 | `/admin/users/` and `/admin/users/<id>/` | User CRUD, role, status, TPS limit, and assignments |
 | `POST /admin/users/<id>/password-reset/` | Admin-initiated password reset |
+| `GET/PATCH/POST /admin/email-config/` | Legacy default-service settings and test-email endpoint |
+| `GET/POST /admin/email-services/` | List or create Admin-only SMTP email services |
+| `PATCH/DELETE /admin/email-services/<id>/` | Update or delete an Admin email service |
+| `POST /admin/email-services/<id>/test/` | Test a saved Admin email service |
 | `/admin/smsc-configs/` | Existing SMSC API configurations |
 | `/admin/sender-ids/` | Existing Sender IDs |
 | `/admin/channels/` | Existing Channels |
@@ -86,6 +93,14 @@ config API. Create Sender IDs with `smsc_ids`; Sender IDs also expose
 more `smsc_bindings` entries (`smsc`, optional `allowed_sender_ids`,
 `default_tps`, and `priority`). SMSC secrets are write-only and audit values
 redact credentials.
+
+The The admin console creates accounts with no configuration assignments. It sends
+the supplied temporary password and a role-specific login link using the active
+default service configured under Email Config. New users must change that
+password before tokens are issued. Manage their SMSC, Sender ID, Channel, TPS,
+and N-address access from the corresponding tabs on the user detail page.
+Admin email services are stored separately from Campaign Manager email
+settings.
 
 ## Current scope boundary
 

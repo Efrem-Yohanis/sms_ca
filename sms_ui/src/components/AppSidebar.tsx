@@ -52,11 +52,15 @@ export function AppSidebar() {
     <Sidebar collapsible="icon">
       <SidebarHeader className="h-14 flex items-center px-4 border-b border-sidebar-border">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center bg-sidebar-primary text-sidebar-primary-foreground shrink-0">
-            <Megaphone className="h-4 w-4" />
-          </div>
+          {collapsed ? (
+            <div className="flex h-8 w-8 items-center justify-center bg-sidebar-primary text-sidebar-primary-foreground shrink-0">
+              <Megaphone className="h-4 w-4" />
+            </div>
+          ) : (
+            <img src="/safaricom-logo.png" alt="Safaricom" className="h-auto w-24 shrink-0" />
+          )}
           {!collapsed && (
-            <span className="text-sm font-bold tracking-wide text-sidebar-accent-foreground whitespace-nowrap">
+            <span className="text-xs font-bold tracking-wide text-sidebar-accent-foreground whitespace-nowrap">
               SMS Campaign Manager
             </span>
           )}
@@ -124,7 +128,7 @@ export function AppSidebar() {
       <SidebarFooter className="border-t border-sidebar-border px-4 py-3">
         {!collapsed && (
           <p className="text-[10px] text-sidebar-foreground/40">
-            © {new Date().getFullYear()} SMS Campaign Manager
+            © {new Date().getFullYear()} Safaricom Ethiopia
           </p>
         )}
       </SidebarFooter>
