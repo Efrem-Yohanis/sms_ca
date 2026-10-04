@@ -1,6 +1,7 @@
 """Standalone campaign scheduler service."""
 
 import asyncio
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -10,6 +11,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from fastapi import FastAPI, HTTPException
+
+logger = logging.getLogger('sms_campaign_scheduler')
 
 DJANGO_API_BASE_URL = os.getenv(
     'SMSC_SCHEDULER_DJANGO_API',
@@ -241,6 +244,10 @@ class CampaignScheduler:
                         paused.append(campaign['id'])
                 except (requests.RequestException, RuntimeError, ValueError, TypeError, KeyError) as exc:
                     errors.append(str(exc))
+                    logger.exception(
+                        'Schedule processing failed campaign_id=%s',
+                        campaign.get('id'),
+                    )
 
             self.last_report = {
                 'success': not errors,
@@ -252,6 +259,15 @@ class CampaignScheduler:
                 'resumed': resumed,
                 'errors': errors,
             }
+            logger.info(
+                'Schedule check complete checked=%s prepared=%s started=%s paused=%s resumed=%s errors=%s',
+                len(campaigns),
+                len(prepared),
+                len(started),
+                len(paused),
+                len(resumed),
+                len(errors),
+            )
             return self.last_report
 
     async def worker(self) -> None:
@@ -261,6 +277,7 @@ class CampaignScheduler:
                 await self.run_once()
             except Exception as exc:
                 self.last_report = {'success': False, 'errors': [str(exc)]}
+                logger.exception('Scheduled worker cycle failed')
             delay = max(
                 0.0,
                 SCHEDULER_INTERVAL_SECONDS - (asyncio.get_running_loop().time() - started_at),
@@ -274,9 +291,14 @@ scheduler = CampaignScheduler()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if RUN_WORKER:
+        logger.info(
+            'Starting scheduler worker interval_seconds=%s',
+            SCHEDULER_INTERVAL_SECONDS,
+        )
         scheduler.worker_task = asyncio.create_task(scheduler.worker())
     yield
     if scheduler.worker_task:
+        logger.info('Stopping scheduler worker')
         scheduler.worker_task.cancel()
         try:
             await scheduler.worker_task

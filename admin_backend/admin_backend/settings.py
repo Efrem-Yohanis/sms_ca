@@ -128,3 +128,36 @@ SPECTACULAR_SETTINGS = {
 LOGIN_URL = "/admin/login/"
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "admin_backend": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "admin_backend",
+        },
+    },
+    "loggers": {
+        "admin_control": {
+            "handlers": ["console"],
+            "level": os.environ.get("ADMIN_BACKEND_LOG_LEVEL", "INFO").upper(),
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "django.security": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+}
