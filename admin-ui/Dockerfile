@@ -1,14 +1,15 @@
-FROM oven/bun:1 AS build
+FROM node:24-slim AS build
 
 WORKDIR /app
 
-COPY package.json bun.lock bunfig.toml ./
-RUN bun install --frozen-lockfile
+COPY package.json package-lock.json ./
+# RUN npm install --frozen-lockfile --registry http://registry.safaricomet.net
+RUN npm install ci --registry http://registry.safaricomet.net
 
 COPY . ./
 ARG VITE_ADMIN_API_URL=http://localhost:8002/api/v1
 ENV VITE_ADMIN_API_URL=${VITE_ADMIN_API_URL}
-RUN bun run build
+RUN npm run build
 
 FROM node:22-slim AS runtime
 

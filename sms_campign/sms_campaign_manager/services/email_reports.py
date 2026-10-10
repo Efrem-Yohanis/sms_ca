@@ -268,6 +268,7 @@ def send_campaign_report(
 REPORT_COLUMNS = [
     ('campaign_name', 'Campaign Name'),
     ('campaign_id', 'Campaign ID'),
+    ('campaign_status', 'Campaign Status'),
     ('owner_email', 'Owner Email'),
     ('total_audience', 'Total Audience'),
     ('pending', 'Pending'),
@@ -319,6 +320,7 @@ def _campaign_report_row(campaign, owner_email):
     return {
         'campaign_name': campaign.name,
         'campaign_id': campaign.id,
+        'campaign_status': campaign.status,
         'owner_email': owner_email,
         'total_audience': audience_rows.filter(round_number=current_round).count(),
         'pending': MessageObject.objects.filter(
@@ -388,7 +390,8 @@ def render_subscription_report(report_data, report_format):
         ]
         lines.extend(' | '.join(str(row[key]) for key, _ in REPORT_COLUMNS) for row in rows)
         lines.append(' | '.join(str(totals.get(key, '—')) if key in TOTAL_KEYS else '—' for key, _ in REPORT_COLUMNS))
-        return '\n'.join(lines), []
+        report_text = '\n'.join(lines)
+        return report_text, [('campaign-report.txt', report_text, 'text/plain')]
 
     if report_format == 'csv':
         output = io.StringIO()
@@ -405,7 +408,7 @@ def send_subscription_report(subscription, campaigns, recipients):
     config = subscription.email_config
     if not config or not config.is_active:
         config = get_active_email_config()
-    subject = f'Hourly Campaign Report: {subscription.name}'
+    subject = f'Campaign Report: {subscription.name}'
     logs = []
     for recipient in recipients:
         report_data = None
@@ -413,13 +416,18 @@ def send_subscription_report(subscription, campaigns, recipients):
         attachments = []
         render_error = ''
         try:
-            report_data = build_subscription_report_data(subscription, campaigns, recipient)
+            recipient_campaigns = (
+                campaigns.get(recipient, [])
+                if isinstance(campaigns, dict)
+                else campaigns
+            )
+            report_data = build_subscription_report_data(subscription, recipient_campaigns, recipient)
             body, attachments = render_subscription_report(report_data, subscription.format)
         except Exception as exc:
             render_error = str(exc)
         log = ReportDeliveryLog.objects.create(
             subscription=subscription,
-            campaign=campaigns[0] if len(campaigns) == 1 else None,
+            campaign=recipient_campaigns[0] if len(recipient_campaigns) == 1 else None,
             email_config=config,
             recipients=[recipient],
             format=subscription.format,

@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: campaign-migrate
+  namespace: sms-platform
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example.com/sms/campaign-backend:REPLACE_WITH_TAG
+          command: ["python", "manage.py", "migrate", "--noinput"]
+          envFrom:
+            - configMapRef:
+                name: sms-platform-config
+            - secretRef:
+                name: sms-platform-secrets

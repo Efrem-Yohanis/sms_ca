@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sms-platform
+  namespace: sms-platform
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - campaign.example.com
+        - admin.example.com
+        - admin-api.example.com
+      secretName: sms-platform-tls
+  rules:
+    - host: campaign.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: campaign-ui
+                port:
+                  number: 80
+    - host: admin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin-ui
+                port:
+                  number: 3000
+    - host: admin-api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin-backend
+                port:
+                  number: 8002

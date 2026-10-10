@@ -1,9 +1,10 @@
 """Send report subscriptions that Django reports as due."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 import logging
 import os
 
+import pendulum
 import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -21,6 +22,7 @@ def dispatch(**context):
         raise RuntimeError(body.get('error') or body.get('detail') or 'Report due-now request failed')
 
     sent = []
+    skipped = []
     failed = []
     for subscription in body.get('data') or []:
         subscription_id = subscription['id']
@@ -31,7 +33,14 @@ def dispatch(**context):
                 timeout=180,
             )
             result = response.json()
-            if response.status_code == 200 and result.get('success'):
+            if response.status_code == 200 and result.get('success') and result.get('skipped'):
+                skipped.append({
+                    'subscription_id': subscription_id,
+                    'name': subscription.get('name'),
+                    'reason': result.get('message'),
+                    'next_run_at': result.get('next_run_at'),
+                })
+            elif response.status_code == 200 and result.get('success'):
                 sent.append({
                     'subscription_id': subscription_id,
                     'name': subscription.get('name'),
@@ -50,10 +59,11 @@ def dispatch(**context):
             failed.append(failure)
             log.exception('Scheduled report request failed subscription_id=%s', subscription_id)
 
-    result = {'sent': sent, 'failed': failed}
+    result = {'sent': sent, 'skipped': skipped, 'failed': failed}
     log.info('Report dispatch result: %s', result)
     if context.get('ti'):
         context['ti'].xcom_push(key='sent', value=sent)
+        context['ti'].xcom_push(key='skipped', value=skipped)
         context['ti'].xcom_push(key='failed', value=failed)
     return result
 
@@ -62,7 +72,7 @@ with DAG(
     dag_id='dispatch_reports',
     description='Send scheduled email reports through Django',
     schedule='* * * * *',
-    start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    start_date=pendulum.datetime(2026, 1, 1, tz='Africa/Addis_Ababa'),
     catchup=False,
     max_active_runs=1,
     default_args={'retries': 1, 'retry_delay': timedelta(seconds=30)},

@@ -1,6 +1,7 @@
 from django.urls import path
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
     AdminLoginView,
@@ -49,6 +50,7 @@ class HealthView(APIView):
 urlpatterns = [
     path("health/", HealthView.as_view(), name="admin-backend-health"),
     path("admin/auth/login/", AdminLoginView.as_view(), name="admin-api-login"),
+    path("admin/auth/refresh/", TokenRefreshView.as_view(), name="admin-api-refresh"),
     path("admin/auth/initial-password/", InitialPasswordChangeView.as_view(), name="admin-initial-password"),
     path("admin/auth/password-reset/request/", PasswordResetRequestView.as_view(), name="admin-password-reset-request"),
     path("admin/auth/password-reset/confirm/", PasswordResetConfirmView.as_view(), name="admin-password-reset-confirm"),

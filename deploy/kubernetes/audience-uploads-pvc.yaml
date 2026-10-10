@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audience-uploads
+  namespace: sms-platform
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: REPLACE_WITH_BP_RWX_STORAGE_CLASS
+  resources:
+    requests:
+      storage: 10Gi

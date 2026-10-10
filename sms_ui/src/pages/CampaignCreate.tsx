@@ -141,7 +141,7 @@ export default function CampaignCreate() {
           time_windows: Array.isArray(scheduleObject?.time_windows)
             ? scheduleObject.time_windows as WizardData["time_windows"]
             : [...EMPTY_WIZARD.time_windows],
-          timezone: String(scheduleObject?.timezone ?? "UTC"),
+          timezone: "Africa/Addis_Ababa",
           auto_reset: Boolean(scheduleObject?.auto_reset ?? true),
         });
         setIds({
@@ -289,7 +289,7 @@ export default function CampaignCreate() {
           end_date: data.end_date || null,
           ...(data.run_days.length > 0 ? { run_days: data.run_days } : {}),
           time_windows: data.time_windows,
-          timezone: data.timezone,
+          timezone: "Africa/Addis_Ababa",
           auto_reset: data.auto_reset,
         };
         if (ids.scheduleId) {

@@ -755,7 +755,7 @@ class ReportSubscriptionSerializer(serializers.ModelSerializer):
         many=True,
         queryset=Campaign.objects.filter(
             is_deleted=False,
-            status__in=['active', 'in_progress', 'paused'],
+            status__in=['draft', 'active', 'in_progress', 'paused'],
         ),
         required=True,
         write_only=True,
@@ -1534,7 +1534,8 @@ class ScheduleCreateUpdateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        from datetime import date
+        from django.utils import timezone
+        attrs['timezone'] = 'Africa/Addis_Ababa'
         get = lambda key, default=None: attrs.get(key, getattr(self.instance, key, default) if self.instance else default)
         start_date = get('start_date')
         end_date = get('end_date')
@@ -1545,7 +1546,7 @@ class ScheduleCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'start_date': 'Start date is required.'})
         if end_date and start_date > end_date:
             raise serializers.ValidationError({'end_date': 'End date must be on or after start date.'})
-        if schedule_type == 'once' and start_date < date.today():
+        if schedule_type == 'once' and start_date < timezone.localdate():
             raise serializers.ValidationError({'start_date': 'Start date cannot be in the past.'})
         if schedule_type == 'weekly' and not run_days:
             raise serializers.ValidationError({'run_days': 'Weekly schedules require at least one run day.'})

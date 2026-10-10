@@ -314,6 +314,8 @@ services:
     user: "${AIRFLOW_UID:-50000}:0"
     environment: &airflow-environment
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: Africa/Addis_Ababa
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Africa/Addis_Ababa
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__WEBSERVER__WEB_SERVER_WORKERS: "1"

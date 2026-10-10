@@ -51,7 +51,7 @@ export function ScheduleSection({ schedule }: { schedule: Schedule }) {
           {s.end_date && (
             <Field label="End Date" value={s.end_date} />
           )}
-          <Field label="Timezone" value={s.timezone} />
+          <Field label="Timezone" value="Ethiopian time" />
         </div>
 
         {/* Recurring details */}

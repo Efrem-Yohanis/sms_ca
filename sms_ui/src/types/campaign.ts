@@ -188,7 +188,7 @@ export const EMPTY_WIZARD: WizardData = {
   end_date: "",
   run_days: [],
   time_windows: [{ start: "", end: "" }],
-  timezone: "UTC",
+  timezone: "Africa/Addis_Ababa",
   auto_reset: true,
   content: { en: "", am: "", ti: "", om: "", so: "" },
   default_language: "en",

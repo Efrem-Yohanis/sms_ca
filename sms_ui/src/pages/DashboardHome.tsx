@@ -18,6 +18,7 @@ const STATUS_COLORS: Record<string, string> = {
   active: "#22c55e", draft: "#94a3b8", paused: "#f59e0b",
   completed: "#8b5cf6", cancelled: "#ef4444",
 };
+const STATUSES = ["active", "draft", "paused", "completed", "cancelled"] as const;
 const STATUS_BADGES: Record<string, string> = {
   active: "border-green-200 bg-green-50 text-green-800",
   in_progress: "border-green-200 bg-green-50 text-green-800",
@@ -92,13 +93,9 @@ export default function DashboardHome() {
   }, [queryString, searchParams, setSearchParams]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    setSearchParams(dashboardParams(searchParams), { replace: true });
-  }, [searchParams, setSearchParams]);
 
   const updateParams = (changes: Record<string, string | null>, resetPage = true) => {
     setSearchParams((current) => {
@@ -159,10 +156,10 @@ export default function DashboardHome() {
   const rangeStart = hasCampaigns ? (page - 1) * PAGE_SIZE + 1 : 0;
   const rangeEnd = Math.min(page * PAGE_SIZE, data.campaigns.count);
 
-  return <div className="space-y-5 pb-8">
+  return <div className="dashboard-home space-y-5 pb-8">
     <header className="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <h1 className="text-2xl font-semibold">Dashboard 👋</h1>
         <p className="mt-1 text-sm text-muted-foreground">Welcome back, {data.viewer.first_name || "there"}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -181,7 +178,7 @@ export default function DashboardHome() {
     </section>
 
     <section className="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Campaign charts">
-      <article className="min-w-0 border border-border bg-card p-4">
+      <article className="min-w-0 border border-border bg-card p-5">
         <h2 className="text-sm font-semibold">Sent vs Delivery</h2>
         <p className="mt-1 text-xs text-muted-foreground">All time · {data.campaigns.count.toLocaleString()} campaigns</p>
         {activityData.every((item) => item.count === 0) ? <div className="flex h-[245px] items-center justify-center text-sm text-muted-foreground">No data for this period.</div> : <div role="img" aria-label="Sent and delivery successes and failures">
@@ -191,7 +188,7 @@ export default function DashboardHome() {
           </BarChart></ResponsiveContainer>
         </div>}
       </article>
-      <article className="min-w-0 border border-border bg-card p-4">
+      <article className="min-w-0 border border-border bg-card p-5">
         <h2 className="text-sm font-semibold">Campaign Status Distribution</h2><p className="mt-1 text-xs text-muted-foreground">Current status of all campaigns</p>
         {statusTotal === 0 ? <div className="flex h-[245px] items-center justify-center text-sm text-muted-foreground">No campaigns yet.</div> : <>
           <div className="relative h-[190px]" role="img" aria-label="Campaigns by current status"><ResponsiveContainer width="100%" height="100%"><PieChart>
@@ -207,8 +204,8 @@ export default function DashboardHome() {
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h2 id="campaign-table-title" className="text-lg font-semibold">Campaigns <span className="text-sm font-normal text-muted-foreground">({data.campaigns.count.toLocaleString()})</span></h2>
         <div className="flex w-full flex-wrap gap-2 sm:w-auto"><div className="relative min-w-[200px] flex-1 sm:w-64 sm:flex-none"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search campaigns" placeholder="Search campaigns or owners..." value={tableSearch} onChange={(event) => setTableSearch(event.target.value)} className="pl-9" /></div><Button variant="outline" size="sm" className="gap-2" onClick={exportCsv}><Download className="h-4 w-4" />Export CSV</Button></div>
       </div>
-      {!hasCampaigns ? <div className="border border-border bg-card px-5 py-12 text-center"><h3 className="font-semibold">You don&apos;t have any campaigns yet</h3><p className="mt-1 text-sm text-muted-foreground">Create your first campaign to get started.</p><Button asChild className="mt-4"><Link to="/campaigns/new">Create Campaign</Link></Button></div> : filteredCampaigns.length === 0 ? <div className="border border-border bg-card px-5 py-12 text-center"><h3 className="font-semibold">No campaigns match this search</h3><p className="mt-1 text-sm text-muted-foreground">Try a different campaign name or owner.</p></div> : <>
-        <div className="hidden overflow-x-auto border border-border bg-card md:block"><table className="w-full min-w-[1120px] table-fixed text-left text-xs"><thead className="border-b bg-muted/40 text-[10px] uppercase text-muted-foreground"><tr>
+      {!hasCampaigns ? <div className="dashboard-empty-state border border-border bg-card px-5 py-12 text-center"><h3 className="font-semibold">You don&apos;t have any campaigns yet</h3><p className="mt-1 text-sm text-muted-foreground">Create your first campaign to get started.</p><Button asChild className="mt-4"><Link to="/campaigns/new">Create Campaign</Link></Button></div> : filteredCampaigns.length === 0 ? <div className="dashboard-empty-state border border-border bg-card px-5 py-12 text-center"><h3 className="font-semibold">No campaigns match this search</h3><p className="mt-1 text-sm text-muted-foreground">Try a different campaign name or owner.</p></div> : <>
+        <div className="dashboard-table hidden overflow-x-auto border border-border bg-card md:block"><table className="w-full min-w-[1120px] table-fixed text-left text-xs"><thead className="border-b bg-muted/40 text-[10px] uppercase text-muted-foreground"><tr>
           <SortHeader label="Campaign Name" field="name" sort={sort} onSort={applySort} className="w-[18%]" />
           {data.viewer.is_superuser && <SortHeader label="Owner" field="owner" sort={sort} onSort={applySort} className="w-[12%]" />}
           <SortHeader label="Type" field="type" sort={sort} onSort={applySort} className="w-[8%]" /><SortHeader label="Sender ID" field="sender_id" sort={sort} onSort={applySort} className="w-[9%]" /><SortHeader label="Channels" field="channels" sort={sort} onSort={applySort} className="w-[10%]" /><SortHeader label="Status" field="status" sort={sort} onSort={applySort} className="w-[8%]" /><SortHeader label="Exec Status" field="execution_status" sort={sort} onSort={applySort} className="w-[10%]" /><SortHeader label="Target Audience" field="target_audience" sort={sort} onSort={applySort} className="w-[8%] text-right" /><SortHeader label="Success Sent" field="success_sent" sort={sort} onSort={applySort} className="w-[7%] text-right" /><SortHeader label="Failed Sent" field="failed_sent" sort={sort} onSort={applySort} className="w-[7%] text-right" /><SortHeader label="Success Delivery" field="success_delivery" sort={sort} onSort={applySort} className="w-[8%] text-right" /><SortHeader label="Failed Delivery" field="failed_delivery" sort={sort} onSort={applySort} className="w-[8%] text-right" />
@@ -222,7 +219,7 @@ export default function DashboardHome() {
 
 function KpiCard({ icon: Icon, label, value, tone }: { icon: typeof ClipboardList; label: string; value: number; tone: string }) {
   const colors: Record<string, string> = { blue: "border-sky-200 bg-sky-50/70 text-sky-900", green: "border-green-200 bg-green-50/70 text-green-900", slate: "border-slate-200 bg-slate-50 text-slate-900", amber: "border-amber-200 bg-amber-50/70 text-amber-900", violet: "border-violet-200 bg-violet-50/70 text-violet-900" };
-  return <div className={`min-h-[112px] border p-4 text-left ${colors[tone]}`}><span className="flex items-center justify-between gap-2"><Icon className="h-4 w-4 opacity-75" aria-hidden="true" /><span className="text-[10px] font-semibold uppercase text-muted-foreground">{label}</span></span><span className="mt-3 block text-3xl font-semibold tabular-nums">{value.toLocaleString()}</span><span className="mt-1 block text-[10px] text-muted-foreground">— no historical baseline</span></div>;
+  return <div className={`dashboard-kpi min-h-[112px] border p-4 text-left ${colors[tone]}`}><span className="flex items-center justify-between gap-2"><Icon className="h-4 w-4 opacity-75" aria-hidden="true" /><span className="text-[10px] font-semibold uppercase text-muted-foreground">{label}</span></span><span className="mt-3 block text-3xl font-semibold tabular-nums">{value.toLocaleString()}</span><span className="mt-1 block text-[10px] text-muted-foreground">— no historical baseline</span></div>;
 }
 
 function SortHeader({ label, field, sort, onSort, className = "" }: { label: string; field: string; sort: string; onSort: (field: string) => void; className?: string }) {

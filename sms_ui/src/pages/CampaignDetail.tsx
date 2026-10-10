@@ -508,7 +508,7 @@ function ScheduleInfo({ schedule: s }: { schedule: NonNullable<ApiCampaign["sche
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="Start Date" value={s.start_date} />
           {s.end_date && <Field label="End Date" value={s.end_date} />}
-          <Field label="Timezone" value={s.timezone || "UTC"} />
+          <Field label="Timezone" value="Ethiopian time" />
           {s.next_run_date && <Field label="Next Run" value={s.next_run_date} />}
         </div>
 

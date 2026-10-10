@@ -167,7 +167,6 @@ export default function StepReview({ data, campaignId }: Props) {
                 : <span className="text-foreground">—</span>}
             </div>
           </div>
-          <ReviewField label="Timezone" value={data.timezone} />
         </div>
       </ReviewSection>
     </div>

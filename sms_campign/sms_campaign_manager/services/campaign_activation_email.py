@@ -53,6 +53,7 @@ def build_activation_email_context(campaign):
         {'label': 'Execution Status', 'value': campaign.execution_status.title()},
         {'label': 'Channels', 'value': channel_names},
         {'label': 'Created', 'value': display_date(campaign.created_at)},
+        {'label': 'Activated At', 'value': display_date(campaign.activated_at)},
         {'label': 'Last Updated', 'value': display_date(campaign.updated_at)},
         {'label': 'Total Processed', 'value': str(processed.count())},
         {'label': 'Last Processed ID', 'value': str(last_processed_id)},

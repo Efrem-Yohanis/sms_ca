@@ -1,10 +1,11 @@
 """Poll Django schedules and start or stop campaign senders."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 import logging
 import os
 import time
 
+import pendulum
 import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -100,16 +101,19 @@ def _start_campaign(campaign):
         raise RuntimeError(f'Campaign activation failed HTTP {status_code}: {response_text[:300]}')
 
     status_code, body, response_text = _post_json(
-        f'{SENDER_API}/sender/start',
-        {'campaign_id': campaign_id, 'round_number': round_number},
-        timeout=30,
+        f'{DJANGO_API}/campaigns/{campaign_id}/send-now/',
+        {'round_number': round_number},
+        timeout=60,
     )
-    if status_code == 409:
-        log.info('Campaign already running campaign_id=%s', campaign_id)
-        return {'campaign_id': campaign_id, 'round_number': round_number, 'status': 'already_running'}
-    if status_code != 202 or body.get('success') is False:
+    if status_code not in (200, 202) or body.get('success') is False:
         raise RuntimeError(f'Sender start failed HTTP {status_code}: {response_text[:300]}')
-    return {'campaign_id': campaign_id, 'round_number': round_number, 'status': 'started'}
+    result_status = 'already_running' if 'already running' in str(body.get('message', '')).lower() else 'started'
+    return {
+        'campaign_id': campaign_id,
+        'round_number': round_number,
+        'status': result_status,
+        'owner_notification_sent': body.get('owner_notification_sent'),
+    }
 
 
 def dispatch(**context):
@@ -183,7 +187,7 @@ with DAG(
     dag_id='dispatch_campaigns',
     description='Start and stop campaign senders using Django schedules',
     schedule='* * * * *',
-    start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    start_date=pendulum.datetime(2026, 1, 1, tz='Africa/Addis_Ababa'),
     catchup=False,
     max_active_runs=1,
     default_args={'retries': 1, 'retry_delay': timedelta(seconds=30)},

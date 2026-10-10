@@ -695,7 +695,7 @@ class EmailConfigAndReportTests(TestCase):
         self.assertIn('verify@example.com', config.last_test_message)
 
     def test_report_subscription_crud_accepts_selected_recipients(self):
-        self.campaign.status = 'active'
+        self.campaign.status = 'draft'
         self.campaign.save(update_fields=['status', 'updated_at'])
         create_response = self.client.post(
             '/api/v1/report-subscriptions/',
@@ -726,6 +726,25 @@ class EmailConfigAndReportTests(TestCase):
 
         delete_response = self.client.delete(f'/api/v1/report-subscriptions/{subscription_id}/')
         self.assertEqual(delete_response.status_code, 204)
+
+    def test_report_subscription_can_select_campaign_before_it_starts(self):
+        response = self.client.post(
+            '/api/v1/report-subscriptions/',
+            {
+                'name': 'Future campaign report',
+                'campaign_ids': [self.campaign.id],
+                'recipients': ['reports@example.com'],
+                'include_campaign_owners': False,
+                'frequency': '1hr',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(
+            response.json()['campaigns'],
+            [{'id': self.campaign.id, 'name': self.campaign.name}],
+        )
 
     def test_report_subscription_due_now_filters_active_scheduled_reports(self):
         due = ReportSubscription.objects.create(
@@ -817,13 +836,151 @@ class EmailConfigAndReportTests(TestCase):
         self.assertTrue(all(log.report_data['campaigns'][0]['owner_email'] == log.recipients[0] for log in deliveries))
         report_rows = deliveries.first().report_data['campaigns']
         self.assertEqual(report_rows[0]['pending'], 1)
-        self.assertEqual(report_rows[1]['pending'], 0)
         self.assertEqual(deliveries.first().report_data['totals']['pending'], 1)
-        self.assertEqual(len(report_rows[0]), 13)
+        self.assertEqual(len(report_rows[0]), 14)
         subscription.refresh_from_db()
         self.assertGreater(subscription.next_run_at, timezone.now())
         self.assertIsNotNone(subscription.last_sent_at)
         self.assertEqual(mock_send.call_count, 3)
+
+    @patch('sms_campaign_manager.services.email_reports.EmailMultiAlternatives.send', return_value=1)
+    def test_scheduled_report_skips_empty_slots_and_picks_up_campaigns_that_start_later(self, mock_send):
+        self.campaign.status = 'draft'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        other_campaign = Campaign.objects.create(
+            name='Flash Voice',
+            sender_id=self.sender.sender_id,
+            channels_id=[self.channel.id],
+            status='draft',
+        )
+        scheduled_at = timezone.now() - timedelta(minutes=1)
+        subscription = ReportSubscription.objects.create(
+            name='Hourly running campaign report',
+            recipients=['reports@example.com'],
+            include_campaign_owners=False,
+            frequency='1hr',
+            format='text',
+            next_run_at=scheduled_at,
+        )
+        subscription.campaigns.add(self.campaign, other_campaign)
+
+        skipped = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+
+        self.assertEqual(skipped.status_code, 200, skipped.content)
+        self.assertTrue(skipped.json()['success'])
+        self.assertTrue(skipped.json()['skipped'])
+        self.assertEqual(ReportDeliveryLog.objects.filter(subscription=subscription).count(), 0)
+        mock_send.assert_not_called()
+        subscription.refresh_from_db()
+        self.assertGreater(subscription.next_run_at, timezone.now())
+        self.assertEqual(subscription.next_run_at.minute, 0)
+
+        self.campaign.status = 'in_progress'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        other_campaign.status = 'in_progress'
+        other_campaign.save(update_fields=['status', 'updated_at'])
+        subscription.next_run_at = timezone.now() - timedelta(minutes=1)
+        subscription.save(update_fields=['next_run_at', 'updated_at'])
+        sent = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+
+        self.assertEqual(sent.status_code, 200, sent.content)
+        self.assertTrue(sent.json()['success'])
+        self.assertNotIn('skipped', sent.json())
+        mock_send.assert_called_once()
+        initial_delivery = ReportDeliveryLog.objects.get(subscription=subscription, status='sent')
+        self.assertEqual(
+            {row['campaign_id'] for row in initial_delivery.report_data['campaigns']},
+            {self.campaign.id, other_campaign.id},
+        )
+
+        ReportDeliveryLog.objects.filter(subscription=subscription).update(
+            sent_at=timezone.now() - timedelta(hours=2),
+        )
+        self.campaign.status = 'completed'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        subscription.next_run_at = timezone.now() - timedelta(minutes=1)
+        subscription.save(update_fields=['next_run_at', 'updated_at'])
+        completion_round = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+
+        self.assertTrue(completion_round.json()['success'], completion_round.json())
+        completion_delivery = ReportDeliveryLog.objects.filter(
+            subscription=subscription,
+            status='sent',
+        ).order_by('-sent_at').first()
+        completion_rows = completion_delivery.report_data['campaigns']
+        self.assertEqual(
+            {row['campaign_id']: row['campaign_status'] for row in completion_rows},
+            {self.campaign.id: 'completed', other_campaign.id: 'in_progress'},
+        )
+        self.assertIn('Campaign Status', completion_delivery.content)
+
+        ReportDeliveryLog.objects.filter(subscription=subscription).update(
+            sent_at=timezone.now() - timedelta(hours=2),
+        )
+        subscription.next_run_at = timezone.now() - timedelta(minutes=1)
+        subscription.save(update_fields=['next_run_at', 'updated_at'])
+        ongoing_round = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+        self.assertTrue(ongoing_round.json()['success'], ongoing_round.json())
+        ongoing_delivery = ReportDeliveryLog.objects.filter(
+            subscription=subscription,
+            status='sent',
+        ).order_by('-sent_at').first()
+        self.assertEqual(
+            [row['campaign_id'] for row in ongoing_delivery.report_data['campaigns']],
+            [other_campaign.id],
+        )
+
+        other_campaign.status = 'completed'
+        other_campaign.save(update_fields=['status', 'updated_at'])
+        ReportDeliveryLog.objects.filter(subscription=subscription).update(
+            sent_at=timezone.now() - timedelta(hours=2),
+        )
+        subscription.next_run_at = timezone.now() - timedelta(minutes=1)
+        subscription.save(update_fields=['next_run_at', 'updated_at'])
+        final_round = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+        self.assertTrue(final_round.json()['success'], final_round.json())
+        final_delivery = ReportDeliveryLog.objects.filter(
+            subscription=subscription,
+            status='sent',
+        ).order_by('-sent_at').first()
+        self.assertEqual(
+            [(row['campaign_id'], row['campaign_status']) for row in final_delivery.report_data['campaigns']],
+            [(other_campaign.id, 'completed')],
+        )
+
+        ReportDeliveryLog.objects.filter(subscription=subscription).update(
+            sent_at=timezone.now() - timedelta(hours=2),
+        )
+        subscription.next_run_at = timezone.now() - timedelta(minutes=1)
+        subscription.save(update_fields=['next_run_at', 'updated_at'])
+        finished_round = self.client.post(
+            f'/api/v1/report-subscriptions/{subscription.id}/send-now/',
+            {'scheduled': True},
+            format='json',
+        )
+        self.assertTrue(finished_round.json()['success'], finished_round.json())
+        self.assertTrue(finished_round.json()['skipped'])
+        self.assertEqual(mock_send.call_count, 4)
 
     @patch('sms_campaign_manager.services.email_reports.EmailMultiAlternatives.send', return_value=1)
     def test_manual_send_does_not_change_next_run_at(self, mock_send):
