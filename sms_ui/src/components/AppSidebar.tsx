@@ -21,6 +21,7 @@ import {
   SidebarMenuItem,
   SidebarHeader,
   SidebarFooter,
+  SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
 
@@ -50,21 +51,15 @@ export function AppSidebar() {
 
   return (
     <Sidebar collapsible="icon">
-      <SidebarHeader className="h-14 flex items-center px-4 border-b border-sidebar-border">
-        <div className="flex items-center gap-2.5">
-          {collapsed ? (
-            <div className="flex h-8 w-8 items-center justify-center bg-sidebar-primary text-sidebar-primary-foreground shrink-0">
-              <Megaphone className="h-4 w-4" />
-            </div>
-          ) : (
+      <SidebarHeader className="h-14 flex-row items-center justify-between border-b border-sidebar-border px-3">
+        {collapsed ? (
+          <SidebarTrigger className="text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" />
+        ) : (
+          <>
             <img src="/safaricom-logo.png" alt="Safaricom" className="h-auto w-24 shrink-0" />
-          )}
-          {!collapsed && (
-            <span className="text-xs font-bold tracking-wide text-sidebar-accent-foreground whitespace-nowrap">
-              SMS Campaign Manager
-            </span>
-          )}
-        </div>
+            <SidebarTrigger className="ml-auto text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" />
+          </>
+        )}
       </SidebarHeader>
 
       <SidebarContent>

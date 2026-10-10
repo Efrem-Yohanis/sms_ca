@@ -142,9 +142,14 @@ export async function adminRequest<T>(
   const token = authenticated ? getAccessToken() : null;
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
+  const request = (accessToken: string | null) => {
+    const requestHeaders = new Headers(headers);
+    if (authenticated && accessToken) requestHeaders.set("Authorization", `Bearer ${accessToken}`);
+    return fetch(`${API_BASE}${path}`, { ...init, headers: requestHeaders });
+  };
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, { ...init, headers });
+    response = await request(token);
   } catch (error) {
     throw new AdminApiError(
       error instanceof Error
@@ -155,8 +160,35 @@ export async function adminRequest<T>(
   }
 
   if (response.status === 401 && authenticated) {
-    clearAdminTokens();
-    window.dispatchEvent(new Event("admin-session-expired"));
+    const refresh = window.localStorage.getItem(REFRESH_TOKEN_KEY);
+    if (refresh && !path.startsWith("/admin/auth/")) {
+      try {
+        const refreshed = await fetch(`${API_BASE}/admin/auth/refresh/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh }),
+        });
+        if (refreshed.ok) {
+          const tokens = await refreshed.json() as { access: string; refresh?: string };
+          window.localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access);
+          if (tokens.refresh) window.localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh);
+          response = await request(tokens.access);
+          if (response.status === 401) {
+            clearAdminTokens();
+            window.dispatchEvent(new Event("admin-session-expired"));
+          }
+        } else {
+          clearAdminTokens();
+          window.dispatchEvent(new Event("admin-session-expired"));
+        }
+      } catch {
+        clearAdminTokens();
+        window.dispatchEvent(new Event("admin-session-expired"));
+      }
+    } else {
+      clearAdminTokens();
+      window.dispatchEvent(new Event("admin-session-expired"));
+    }
   }
   const invalidatesWorkspace =
     /^\/admin\/(users|smsc-configs|sender-ids|channels|tps-configs|n-address-configs|n-addresses)(?:\/|$)/.test(

@@ -1,0 +1,274 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: campaign-backend
+  namespace: sms-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: campaign-backend
+  template:
+    metadata:
+      labels:
+        app: campaign-backend
+    spec:
+      volumes:
+        - name: audience-uploads
+          persistentVolumeClaim:
+            claimName: audience-uploads
+      containers:
+        - name: app
+          image: registry.example.com/sms/campaign-backend:REPLACE_WITH_TAG
+          # Add gunicorn to requirements before using this production command.
+          command: ["gunicorn"]
+          args: ["sms_campign.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: sms-platform-config
+            - secretRef:
+                name: sms-platform-secrets
+          volumeMounts:
+            - name: audience-uploads
+              mountPath: /app/sms_campign/audience
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # The campaign UI's Nginx config proxies to this DNS name.
+  name: camaping-manager-backend-app
+  namespace: sms-platform
+spec:
+  selector:
+    app: campaign-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-backend
+  namespace: sms-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: admin-backend
+  template:
+    metadata:
+      labels:
+        app: admin-backend
+    spec:
+      containers:
+        - name: app
+          image: registry.example.com/sms/admin-backend:REPLACE_WITH_TAG
+          # Add gunicorn to requirements before using this production command.
+          command: ["gunicorn"]
+          args: ["admin_backend.wsgi:application", "--bind", "0.0.0.0:8002", "--workers", "3"]
+          ports:
+            - name: http
+              containerPort: 8002
+          envFrom:
+            - configMapRef:
+                name: sms-platform-config
+            - secretRef:
+                name: sms-platform-secrets
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-backend
+  namespace: sms-platform
+spec:
+  selector:
+    app: admin-backend
+  ports:
+    - name: http
+      port: 8002
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audience-worker
+  namespace: sms-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audience-worker
+  template:
+    metadata:
+      labels:
+        app: audience-worker
+    spec:
+      volumes:
+        - name: audience-uploads
+          persistentVolumeClaim:
+            claimName: audience-uploads
+      containers:
+        - name: worker
+          image: registry.example.com/sms/campaign-backend:REPLACE_WITH_TAG
+          command: ["python", "manage.py", "run_audience_build_jobs"]
+          envFrom:
+            - configMapRef:
+                name: sms-platform-config
+            - secretRef:
+                name: sms-platform-secrets
+          volumeMounts:
+            - name: audience-uploads
+              mountPath: /app/sms_campign/audience
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: campaign-ui
+  namespace: sms-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: campaign-ui
+  template:
+    metadata:
+      labels:
+        app: campaign-ui
+    spec:
+      containers:
+        - name: web
+          image: registry.example.com/sms/campaign-ui:REPLACE_WITH_TAG
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: campaign-ui
+  namespace: sms-platform
+spec:
+  selector:
+    app: campaign-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-ui
+  namespace: sms-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: admin-ui
+  template:
+    metadata:
+      labels:
+        app: admin-ui
+    spec:
+      containers:
+        - name: web
+          image: registry.example.com/sms/admin-ui:REPLACE_WITH_TAG
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "3000"
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-ui
+  namespace: sms-platform
+spec:
+  selector:
+    app: admin-ui
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

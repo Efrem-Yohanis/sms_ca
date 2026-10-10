@@ -69,9 +69,12 @@ export async function patchReport(id: number, data: Partial<ReportSubscriptionIn
 
 export interface SendReportResult {
   success: boolean;
+  skipped?: boolean;
   log_id: number | null;
   recipients_count: number;
   sent_at?: string;
+  message?: string;
+  next_run_at?: string | null;
   error?: string;
 }
 

@@ -1192,7 +1192,7 @@ class Schedule(models.Model):
     end_date = models.DateField(null=True, blank=True)
     run_days = models.JSONField(default=list, blank=True)
     time_windows = models.JSONField(default=list)
-    timezone = models.CharField(max_length=50, default='UTC')
+    timezone = models.CharField(max_length=50, default='Africa/Addis_Ababa')
     auto_reset = models.BooleanField(default=True)
     is_active = models.BooleanField(default=True, db_index=True)
     schedule_status = models.CharField(

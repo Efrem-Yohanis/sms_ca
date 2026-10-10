@@ -9,7 +9,8 @@ due-window decisions are managed by the Django campaign backend.
 ## What it does
 
 The Compose deployment includes two DAGs. Both are configured to run once per
-minute in UTC, with catchup disabled and at most one active run of each DAG.
+minute in Ethiopian time (`Africa/Addis_Ababa`), with catchup disabled and at
+most one active run of each DAG.
 
 ### `dispatch_campaigns`
 
@@ -24,7 +25,8 @@ The campaign dispatcher performs these operations:
    - Builds campaign message records when required or after an audience
      rebuild.
    - Activates the campaign through the campaign API.
-   - Starts that campaign round in the SMS sender.
+   - Starts that campaign round through the campaign API, which records the
+     campaign as in progress and emails its owner when sending begins.
    - Stops a previously running round if the due schedule has advanced to a
      different round.
 4. Stops sender campaigns that are running but are no longer due.
@@ -43,7 +45,14 @@ The report dispatcher:
    `GET /api/v1/report-subscriptions/due-now/`.
 2. Requests each due subscription to be sent through
    `POST /api/v1/report-subscriptions/<id>/send-now/` with `scheduled: true`.
-3. Logs successful and failed sends and publishes the results to task XCom.
+3. Sends only when at least one selected campaign has started and is still in
+   progress or paused, or has completed since its final status was last reported
+   to that recipient. Campaigns that complete between rounds are included once
+   with their final status and delivery statistics.
+4. Advances the schedule without sending email when there are no running
+   campaigns or unreported final results.
+5. Logs successful, skipped, and failed sends and publishes the results to task
+   XCom.
 
 The campaign backend generates and delivers the reports; this DAG periodically
 asks it to process subscriptions that are due.
@@ -94,6 +103,8 @@ These environment variables are configured for the Airflow services:
 
 | Variable | Compose default | Purpose |
 | --- | --- | --- |
+| `AIRFLOW__CORE__DEFAULT_TIMEZONE` | `Africa/Addis_Ababa` | Default timezone used by the Airflow scheduler. |
+| `AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE` | `Africa/Addis_Ababa` | Timezone used to display Airflow dates and times in the web UI. |
 | `AIRFLOW_DJANGO_API` | `http://camaping-manager-backend-app:8000/api/v1` | Campaign API base URL used by the DAGs. |
 | `AIRFLOW_SENDER_API` | `http://sms_sender_app:8001` | SMS sender API base URL used by the campaign dispatcher. |
 | `AIRFLOW_AUDIENCE_BUILD_TIMEOUT` | `1800` seconds | Maximum time the campaign DAG polls an audience build before failing that campaign dispatch. |

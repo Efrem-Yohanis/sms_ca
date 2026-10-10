@@ -2,22 +2,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import type { WizardData, ScheduleType } from "@/types/campaign";
 import { SCHEDULE_TYPE_LABELS, DAY_LABELS } from "@/types/campaign";
-import { Plus, Trash2, Clock, Repeat, Calendar, CalendarRange, CalendarDays } from "lucide-react";
+import { Plus, Trash2, Clock, Calendar, CalendarRange, CalendarDays } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+export type ScheduleStepData = Pick<WizardData, "schedule_type" | "start_date" | "end_date" | "run_days" | "time_windows" | "auto_reset">;
+
 interface Props {
-  data: WizardData;
+  data: ScheduleStepData;
   errors: Record<string, string>;
-  update: (partial: Partial<WizardData>) => void;
+  update: (partial: Partial<ScheduleStepData>) => void;
 }
 
 const SCHEDULE_TYPES: { value: ScheduleType; icon: typeof Clock; desc: string }[] = [
@@ -25,14 +20,6 @@ const SCHEDULE_TYPES: { value: ScheduleType; icon: typeof Clock; desc: string }[
   { value: "daily", icon: Calendar, desc: "Repeat every day" },
   { value: "weekly", icon: CalendarRange, desc: "Repeat on selected days each week" },
   { value: "monthly", icon: CalendarDays, desc: "Repeat monthly" },
-];
-
-const TIMEZONE_OPTIONS = [
-  "UTC",
-  "Africa/Addis_Ababa",
-  "Africa/Nairobi",
-  "Europe/London",
-  "America/New_York",
 ];
 
 export default function StepSchedule({ data, errors, update }: Props) {
@@ -70,6 +57,7 @@ export default function StepSchedule({ data, errors, update }: Props) {
 
   return (
     <div className="space-y-5">
+      <p className="text-sm text-muted-foreground">Schedule times use Ethiopian time (Africa/Addis_Ababa).</p>
       {/* Schedule type selector */}
       <div className="space-y-1.5">
         <Label>Schedule type</Label>
@@ -177,21 +165,6 @@ export default function StepSchedule({ data, errors, update }: Props) {
           <Plus className="h-3.5 w-3.5 mr-1" /> Add time window
         </Button>
         {errors.time_windows && <p className="text-sm text-destructive">{errors.time_windows}</p>}
-      </div>
-
-      {/* Timezone */}
-      <div className="space-y-1.5">
-        <Label>Timezone</Label>
-        <Select value={data.timezone} onValueChange={(v) => update({ timezone: v })}>
-          <SelectTrigger className="w-64">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {TIMEZONE_OPTIONS.map((tz) => (
-              <SelectItem key={tz} value={tz}>{tz}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
       </div>
 
       {/* Auto reset */}

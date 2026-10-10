@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sms-platform-config
+  namespace: sms-platform
+data:
+  DB_ENGINE: postgresql
+  DB_NAME: campaign_manager
+  DB_USER: campaign_manager
+  DB_HOST: REPLACE_WITH_MANAGED_POSTGRES_HOST
+  DB_PORT: "5432"
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: campaign.example.com,admin-api.example.com
+  ADMIN_BACKEND_CORS_ORIGINS: https://campaign.example.com,https://admin.example.com
+  ADMIN_PORTAL_URL: https://admin.example.com
+  CAMPAIGN_MANAGER_URL: https://campaign.example.com
+  SMSC_SENDER_API: http://sms-sender-app:8001

@@ -44,20 +44,30 @@ const FREQUENCIES: { value: ReportFrequency; label: string }[] = [
   { value: "manual", label: "Manual only" },
 ];
 const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ETHIOPIAN_TIMEZONE = "Africa/Addis_Ababa";
+const ETHIOPIAN_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+function formatEthiopianDate(value: Date | string) {
+  return new Intl.DateTimeFormat("en-ET", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: ETHIOPIAN_TIMEZONE,
+  }).format(value instanceof Date ? value : new Date(value));
+}
 
 function nextRunPreview(frequency: ReportFrequency) {
-  const now = new Date();
+  const now = new Date(Date.now() + ETHIOPIAN_OFFSET_MS);
   if (frequency === "manual") return null;
   if (frequency === "10min") {
-    now.setMinutes(Math.floor(now.getMinutes() / 10) * 10, 0, 0);
-    now.setMinutes(now.getMinutes() + 10);
+    now.setUTCMinutes(Math.floor(now.getUTCMinutes() / 10) * 10, 0, 0);
+    now.setUTCMinutes(now.getUTCMinutes() + 10);
   } else if (frequency === "1hr") {
-    now.setMinutes(0, 0, 0);
-    now.setHours(now.getHours() + 1);
+    now.setUTCMinutes(0, 0, 0);
+    now.setUTCHours(now.getUTCHours() + 1);
   } else {
-    now.setDate(now.getDate() + 1);
+    now.setUTCDate(now.getUTCDate() + 1);
   }
-  return now;
+  return new Date(now.getTime() - ETHIOPIAN_OFFSET_MS);
 }
 
 export default function ReportSubscriptions() {
@@ -66,6 +76,7 @@ export default function ReportSubscriptions() {
   const [emailServices, setEmailServices] = useState<EmailService[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [campaignPickerValue, setCampaignPickerValue] = useState("");
   const [current, setCurrent] = useState<Report | null>(null);
   const [form, setForm] = useState<FormState>(initialForm);
   const [saving, setSaving] = useState(false);
@@ -83,7 +94,7 @@ export default function ReportSubscriptions() {
       ]);
       setReports(reportResponse.results);
       setCampaigns(campaignResponse.results.filter((campaign) =>
-        !campaign.is_deleted && ["active", "in_progress", "paused"].includes(campaign.status),
+        !campaign.is_deleted && ["draft", "active", "in_progress", "paused"].includes(campaign.status),
       ));
       setEmailServices(serviceResponse.results.filter((service) => service.is_active));
     } catch (error) {
@@ -112,6 +123,7 @@ export default function ReportSubscriptions() {
 
   function openCreate() {
     setCurrent(null);
+    setCampaignPickerValue("");
     setForm({
       ...initialForm(),
       email_config_id: emailServices.find((service) => service.is_default)?.id ?? null,
@@ -121,6 +133,7 @@ export default function ReportSubscriptions() {
 
   function openEdit(report: Report) {
     setCurrent(report);
+    setCampaignPickerValue("");
     setForm({
       name: report.name,
       campaign_ids: report.campaigns.map((campaign) => campaign.id),
@@ -134,12 +147,18 @@ export default function ReportSubscriptions() {
     setModalOpen(true);
   }
 
-  function toggleCampaign(campaignId: number, checked: boolean) {
+  function addCampaign(campaignId: number) {
     setForm((previous) => ({
       ...previous,
-      campaign_ids: checked
-        ? [...new Set([...previous.campaign_ids, campaignId])]
-        : previous.campaign_ids.filter((id) => id !== campaignId),
+      campaign_ids: [...new Set([...previous.campaign_ids, campaignId])],
+    }));
+    setCampaignPickerValue("");
+  }
+
+  function removeCampaign(campaignId: number) {
+    setForm((previous) => ({
+      ...previous,
+      campaign_ids: previous.campaign_ids.filter((id) => id !== campaignId),
     }));
   }
 
@@ -245,7 +264,7 @@ export default function ReportSubscriptions() {
                     <td className="px-4 py-3">{report.campaigns.length}</td>
                     <td className="px-4 py-3">{report.recipients.length + (report.include_campaign_owners ? " + owners" : "")}</td>
                     <td className="px-4 py-3">{FREQUENCIES.find((item) => item.value === report.frequency)?.label ?? report.frequency}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{report.next_run_at ? new Date(report.next_run_at).toLocaleString() : "Manual"}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{report.next_run_at ? formatEthiopianDate(report.next_run_at) : "Manual"}</td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-1">
                         <Button variant="outline" size="sm" disabled={sendingId === report.id} onClick={() => void sendNow(report)}>
@@ -277,13 +296,26 @@ export default function ReportSubscriptions() {
 
             <section className="space-y-3">
               <h3 className="text-xs font-semibold uppercase text-muted-foreground">Campaigns</h3>
-              <div className="max-h-48 space-y-1 overflow-y-auto border border-border p-2">
-                {campaigns.length ? campaigns.map((campaign) => (
-                  <label key={campaign.id} className="flex items-center gap-3 px-2 py-2 text-sm hover:bg-muted/40">
-                    <Checkbox checked={form.campaign_ids.includes(campaign.id)} onCheckedChange={(checked) => toggleCampaign(campaign.id, checked === true)} />
-                    <span>{campaign.name} <span className="text-muted-foreground">(#{campaign.id})</span></span>
-                  </label>
-                )) : <p className="px-2 py-4 text-sm text-muted-foreground">No active, in-progress, or paused campaigns.</p>}
+              <Select value={campaignPickerValue} onValueChange={(value) => addCampaign(Number(value))}>
+                <SelectTrigger><SelectValue placeholder="Select a campaign to add" /></SelectTrigger>
+                <SelectContent>
+                  {campaigns.map((campaign) => (
+                    <SelectItem key={campaign.id} value={String(campaign.id)} disabled={form.campaign_ids.includes(campaign.id)}>
+                      {campaign.name} (#{campaign.id})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {campaigns.length === 0 && <p className="text-sm text-muted-foreground">No eligible campaigns available.</p>}
+              <div className="flex flex-wrap gap-2">
+                {selectedCampaigns.map((campaign) => (
+                  <Badge key={campaign.id} variant="secondary" className="gap-1 py-1">
+                    {campaign.name}
+                    <button type="button" title={`Remove ${campaign.name}`} aria-label={`Remove ${campaign.name}`} onClick={() => removeCampaign(campaign.id)}>
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
               </div>
             </section>
 
@@ -336,7 +368,7 @@ export default function ReportSubscriptions() {
                     </label>
                   ))}
                 </RadioGroup>
-                <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock3 className="h-3.5 w-3.5" />{nextPreview ? `Next: ${nextPreview.toLocaleString()} local time` : "Manual only — no scheduled run"}</p>
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock3 className="h-3.5 w-3.5" />{nextPreview ? `Next: ${formatEthiopianDate(nextPreview)} Ethiopian time` : "Manual only — no scheduled run"}</p>
               </div>
 
               <div className="space-y-2">

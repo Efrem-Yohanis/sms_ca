@@ -174,7 +174,7 @@ export default function ScheduleDetail() {
             <Globe className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
             <div>
               <p className="text-xs text-muted-foreground">Timezone</p>
-              <p className="font-medium">{s.timezone}</p>
+              <p className="font-medium">Ethiopian time (Africa/Addis_Ababa)</p>
             </div>
           </div>
         </div>
