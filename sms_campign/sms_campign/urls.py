@@ -21,4 +21,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/v1/', include('sms_campaign_manager.schema_urls')),
     path('api/v1/', include('sms_campaign_manager.urls')),
+    path('api/v1/task-scheduler/', include('task_scheduler.urls', namespace='task_scheduler')),
 ]

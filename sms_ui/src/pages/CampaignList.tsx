@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { fetchCampaigns, deleteCampaignApi, startCampaign, pauseCampaign, stopCampaign, type ApiCampaign } from "@/lib/api";
+import { fetchCampaigns, activateCampaign, deactivateCampaign, startCampaign, pauseCampaign, resumeCampaign, stopCampaign, type ApiCampaign } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -17,8 +17,8 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import ListViewToggle, { useListView } from "@/components/ListViewToggle";
 import {
-  Plus, Search, Eye, Pencil, Trash2, ChevronLeft, ChevronRight,
-  Play, Pause, Square, Clock, ArrowUpDown, RefreshCw,
+  Plus, Search, Eye, ChevronLeft, ChevronRight,
+  Play, Pause, Square, ArrowUpDown, RefreshCw,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { toast } from "sonner";
@@ -40,7 +40,7 @@ const EXEC_STYLES: Record<string, string> = {
   STOPPED: "bg-muted text-muted-foreground",
 };
 
-type ActionType = "start" | "pause" | "stop" | "delete";
+type ActionType = "activate" | "deactivate" | "start" | "pause" | "resume" | "stop";
 
 interface PendingAction {
   type: ActionType;
@@ -49,10 +49,12 @@ interface PendingAction {
 }
 
 const ACTION_CONFIG: Record<ActionType, { title: string; description: string; buttonLabel: string; destructive: boolean }> = {
+  activate: { title: "Activate campaign", description: "Make this campaign eligible to run on its schedule.", buttonLabel: "Activate", destructive: false },
+  deactivate: { title: "Deactivate campaign", description: "Remove this campaign from scheduled execution.", buttonLabel: "Deactivate", destructive: false },
   start: { title: "Start campaign", description: "This will begin sending messages to all recipients.", buttonLabel: "Start", destructive: false },
   pause: { title: "Pause campaign", description: "This will temporarily pause message delivery. You can resume later.", buttonLabel: "Pause", destructive: false },
+  resume: { title: "Resume campaign", description: "Resume message delivery.", buttonLabel: "Resume", destructive: false },
   stop: { title: "Stop campaign", description: "This will permanently stop the campaign. This action cannot be undone.", buttonLabel: "Stop", destructive: true },
-  delete: { title: "Delete campaign", description: "This action cannot be undone. The campaign will be permanently removed.", buttonLabel: "Delete", destructive: true },
 };
 
 export default function CampaignList() {
@@ -95,6 +97,18 @@ export default function CampaignList() {
     setActionLoading(true);
     try {
       switch (pendingAction.type) {
+        case "activate":
+          await activateCampaign(pendingAction.campaignId);
+          toast.success(`Campaign "${pendingAction.campaignName}" activated`);
+          break;
+        case "deactivate":
+          await deactivateCampaign(pendingAction.campaignId);
+          toast.success(`Campaign "${pendingAction.campaignName}" deactivated`);
+          break;
+        case "resume":
+          await resumeCampaign(pendingAction.campaignId);
+          toast.success(`Campaign "${pendingAction.campaignName}" resumed`);
+          break;
         case "start":
           await startCampaign(pendingAction.campaignId);
           toast.success(`Campaign "${pendingAction.campaignName}" started`);
@@ -106,10 +120,6 @@ export default function CampaignList() {
         case "stop":
           await stopCampaign(pendingAction.campaignId);
           toast.success(`Campaign "${pendingAction.campaignName}" stopped`);
-          break;
-        case "delete":
-          await deleteCampaignApi(pendingAction.campaignId);
-          toast.success(`Campaign "${pendingAction.campaignName}" deleted`);
           break;
       }
       refetch();
@@ -251,14 +261,13 @@ export default function CampaignList() {
                   <th className="text-left px-5 py-3.5 font-medium text-muted-foreground text-xs uppercase tracking-wider min-w-[180px]">Progress</th>
                   <SortableHeader label="Created" field="created_at" current={ordering} onToggle={toggleOrdering} />
                   <th className="text-left px-5 py-3.5 font-medium text-muted-foreground text-xs uppercase tracking-wider">Next Run</th>
-                  <th className="text-left px-5 py-3.5 font-medium text-muted-foreground text-xs uppercase tracking-wider">Ready</th>
                   <th className="text-right px-5 py-3.5 font-medium text-muted-foreground text-xs uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {campaigns.length === 0 && (
                   <tr>
-                    <td colSpan={10} className="px-5 py-16 text-center text-muted-foreground">
+                    <td colSpan={9} className="px-5 py-16 text-center text-muted-foreground">
                       No campaigns found.
                     </td>
                   </tr>
@@ -353,9 +362,6 @@ function CampaignRow({ campaign: c, onAction }: { campaign: ApiCampaign; onActio
   const totalMessages = (c as any).total_messages ?? 0;
   const totalProcessed = (c as any).total_processed ?? 0;
   const nextRun = (c as any).next_run;
-  const hasSchedule = (c as any).has_schedule;
-  const hasAudience = (c as any).has_audience;
-  const hasContent = (c as any).has_content;
 
   const triggerAction = (type: ActionType) => {
     onAction({ type, campaignId: c.id, campaignName: c.name });
@@ -405,47 +411,16 @@ function CampaignRow({ campaign: c, onAction }: { campaign: ApiCampaign; onActio
       <td className="px-5 py-3.5 text-muted-foreground text-xs">
         {c.created_at ? formatDistanceToNow(new Date(c.created_at), { addSuffix: true }) : "—"}
       </td>
-      <td className="px-5 py-3.5 text-muted-foreground text-xs">
-        {nextRun ? (
-          <div className="flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            {formatDistanceToNow(new Date(nextRun), { addSuffix: true })}
-          </div>
-        ) : "—"}
-      </td>
-      <td className="px-5 py-3.5">
-        <div className="flex gap-1">
-          <ReadinessIndicator ok={hasSchedule} label="S" />
-          <ReadinessIndicator ok={hasAudience} label="A" />
-          <ReadinessIndicator ok={hasContent} label="C" />
-        </div>
-      </td>
+      <td className="px-5 py-3.5 text-muted-foreground text-xs">{nextRun ? new Date(nextRun).toLocaleString() : "\u2014"}</td>
       <td className="px-5 py-3.5">
         <div className="flex gap-1 justify-end">
           <Link to={`/campaigns/${c.id}`}>
             <Button variant="ghost" size="icon" className="h-8 w-8"><Eye className="h-3.5 w-3.5" /></Button>
           </Link>
-          <Link to={`/campaigns/${c.id}/edit`}>
-            <Button variant="ghost" size="icon" className="h-8 w-8"><Pencil className="h-3.5 w-3.5" /></Button>
-          </Link>
-          {c.can_start && (
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-emerald-600 hover:text-emerald-700" onClick={() => triggerAction("start")} title="Start">
-              <Play className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          {c.can_pause && (
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-amber-600 hover:text-amber-700" onClick={() => triggerAction("pause")} title="Pause">
-              <Pause className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          {c.can_stop && (
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => triggerAction("stop")} title="Stop">
-              <Square className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => triggerAction("delete")} title="Delete">
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
+          {c.status === "draft" && <Button variant="ghost" size="sm" onClick={() => triggerAction("activate")}>Activate</Button>}
+          {c.status === "active" && <><Button variant="ghost" size="sm" onClick={() => triggerAction("deactivate")}>Deactivate</Button>{c.is_ready_to_execute && <Button variant="ghost" size="sm" onClick={() => triggerAction("start")}>Start</Button>}</>}
+          {c.status === "in_progress" && <><Button variant="ghost" size="sm" onClick={() => triggerAction("pause")}>Pause</Button><Button variant="ghost" size="sm" onClick={() => triggerAction("stop")}>Stop</Button></>}
+          {c.status === "paused" && <><Button variant="ghost" size="sm" onClick={() => triggerAction("resume")}>Resume</Button><Button variant="ghost" size="sm" onClick={() => triggerAction("stop")}>Stop</Button></>}
         </div>
       </td>
     </tr>
@@ -495,11 +470,10 @@ function CampaignGridCard({ campaign: c, onAction }: { campaign: ApiCampaign; on
           </span>
           <div className="flex gap-1">
             <Link to={`/campaigns/${c.id}`}><Button variant="ghost" size="icon" className="h-8 w-8" title="View"><Eye className="h-3.5 w-3.5" /></Button></Link>
-            <Link to={`/campaigns/${c.id}/edit`}><Button variant="ghost" size="icon" className="h-8 w-8" title="Edit"><Pencil className="h-3.5 w-3.5" /></Button></Link>
-            {c.can_start && <Button variant="ghost" size="icon" className="h-8 w-8" title="Start" onClick={() => triggerAction("start")}><Play className="h-3.5 w-3.5" /></Button>}
-            {c.can_pause && <Button variant="ghost" size="icon" className="h-8 w-8" title="Pause" onClick={() => triggerAction("pause")}><Pause className="h-3.5 w-3.5" /></Button>}
-            {c.can_stop && <Button variant="ghost" size="icon" className="h-8 w-8" title="Stop" onClick={() => triggerAction("stop")}><Square className="h-3.5 w-3.5" /></Button>}
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" title="Delete" onClick={() => triggerAction("delete")}><Trash2 className="h-3.5 w-3.5" /></Button>
+            {c.status === "draft" && <Button variant="ghost" size="sm" onClick={() => triggerAction("activate")}>Activate</Button>}
+            {c.status === "active" && <><Button variant="ghost" size="sm" onClick={() => triggerAction("deactivate")}>Deactivate</Button>{c.is_ready_to_execute && <Button variant="ghost" size="sm" onClick={() => triggerAction("start")}>Start</Button>}</>}
+            {c.status === "in_progress" && <><Button variant="ghost" size="sm" onClick={() => triggerAction("pause")}>Pause</Button><Button variant="ghost" size="sm" onClick={() => triggerAction("stop")}>Stop</Button></>}
+            {c.status === "paused" && <><Button variant="ghost" size="sm" onClick={() => triggerAction("resume")}>Resume</Button><Button variant="ghost" size="sm" onClick={() => triggerAction("stop")}>Stop</Button></>}
           </div>
         </div>
       </CardContent>

@@ -35,6 +35,38 @@ class CampaignSchedulerStepTests(unittest.TestCase):
         current = datetime.combine(date.today(), time(21), tzinfo=timezone.utc)
         self.assertFalse(CampaignScheduler.is_running_now(self.row, current))
 
+    def test_schedule_finishes_after_configured_end_date(self):
+        row = {**self.row, 'schedule': {**self.row['schedule'], 'end_date': '2026-05-10'}}
+        self.assertTrue(CampaignScheduler.schedule_finished(
+            row, datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
+        ))
+        self.assertFalse(CampaignScheduler.schedule_finished(
+            row, datetime(2026, 5, 10, 23, 59, tzinfo=timezone.utc),
+        ))
+
+    def test_once_schedule_finishes_after_its_start_date_without_end_date(self):
+        row = {**self.row, 'schedule': {
+            **self.row['schedule'], 'schedule_type': 'once',
+            'start_date': '2026-05-10', 'end_date': None,
+        }}
+        self.assertTrue(CampaignScheduler.schedule_finished(
+            row, datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
+        ))
+
+    def test_automatic_start_is_marked_as_scheduled(self):
+        scheduler = CampaignScheduler()
+        campaign = {**self.row, 'id': 43, 'status': 'active'}
+        self.row['schedule']['time_windows'] = [{'start': '00:00', 'end': '23:59'}]
+        campaign['schedule'] = self.row['schedule']
+        with (
+            patch.object(scheduler, 'campaigns', return_value=[campaign]),
+            patch.object(CampaignScheduler, 'is_running_now', return_value=True),
+            patch.object(scheduler, 'call_campaign_api') as call_api,
+        ):
+            report = asyncio.run(scheduler.run_once())
+        self.assertEqual(report['started'], [43])
+        call_api.assert_called_once_with(43, 'start', {'start_method': 'scheduled'})
+
     def test_audience_rebuild_starts_ten_minutes_before_window(self):
         current = datetime.combine(date.today(), time(7, 50), tzinfo=timezone.utc)
         self.assertTrue(CampaignScheduler.is_prepare_window(self.row, current))

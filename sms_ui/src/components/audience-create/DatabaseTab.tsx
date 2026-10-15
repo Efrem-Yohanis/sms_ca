@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -34,10 +35,16 @@ export default function DatabaseTab({ records, onChange, initialConfig, onConfig
   const [langCol, setLangCol] = useState(initialConfig?.source_language_column || NONE);
   const [whereClause, setWhereClause] = useState(initialConfig?.source_filter_clause ?? "");
   const [loading, setLoading] = useState(false);
+  const [tableSearch, setTableSearch] = useState("");
 
   const { connections, loading: loadingConns } = useConnections();
   const { tables, loading: loadingTables } = useTables(connection);
   const { columns, loading: loadingCols } = useColumns(connection, table);
+  const visibleTables = useMemo(() => {
+    const query = tableSearch.trim().toLocaleLowerCase();
+    const matching = query ? tables.filter((item) => item.name.toLocaleLowerCase().includes(query)) : tables;
+    return query ? matching.slice(0, 50) : matching.slice(0, 10);
+  }, [tables, tableSearch]);
 
   useEffect(() => {
     if (!connection || !table || !msisdnCol) {
@@ -113,6 +120,13 @@ export default function DatabaseTab({ records, onChange, initialConfig, onConfig
 
         <div className="space-y-1.5">
           <Label className="text-xs">2. Source Table *</Label>
+          <Input
+            value={tableSearch}
+            onChange={(event) => setTableSearch(event.target.value)}
+            placeholder="Search tables by name..."
+            disabled={!connection || loadingTables}
+            aria-label="Search audience tables"
+          />
           <Select
             value={table}
             onValueChange={(v) => { setTable(v); setMsisdnCol(""); setLangCol(NONE); }}
@@ -122,9 +136,14 @@ export default function DatabaseTab({ records, onChange, initialConfig, onConfig
               <SelectValue placeholder={loadingTables ? "Loading..." : "Select table"} />
             </SelectTrigger>
             <SelectContent>
-              {tables.map((t) => (
+              {visibleTables.map((t) => (
                 <SelectItem key={t.name} value={t.name}>{t.name}</SelectItem>
               ))}
+              {!loadingTables && visibleTables.length === 0 && (
+                <div className="px-2 py-2 text-xs text-muted-foreground">
+                  {tableSearch ? "No audience tables match your search." : "No audience tables available."}
+                </div>
+              )}
             </SelectContent>
           </Select>
         </div>

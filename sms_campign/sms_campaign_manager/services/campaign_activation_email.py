@@ -1,4 +1,5 @@
 import logging
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
@@ -200,12 +201,22 @@ def send_campaign_activation_email(campaign):
     )
 
 
-def send_campaign_started_email(campaign):
+def send_campaign_started_email(campaign, start_method='manual'):
+    now = timezone.now()
+    schedule = getattr(campaign, 'schedule', None)
+    try:
+        campaign_timezone = ZoneInfo(schedule.timezone) if schedule and schedule.timezone else timezone.get_current_timezone()
+    except ZoneInfoNotFoundError:
+        campaign_timezone = timezone.get_current_timezone()
+    start_time = timezone.localtime(now, campaign_timezone).strftime('%d/%m/%Y, %H:%M:%S %Z')
     return _send_campaign_owner_email(
         campaign,
         subject=f'Campaign started: {campaign.name}',
         notification_heading=f'{campaign.name} is now sending',
-        notification_message='The following campaign has started sending messages.',
+        notification_message=(
+            f'The campaign started {"automatically according to its schedule" if start_method == "scheduled" else "manually"} '
+            f'at {start_time}.'
+        ),
         notification_type='started',
     )
 

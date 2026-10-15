@@ -34,7 +34,7 @@
     --input: 214 33% 92%;
     --ring: 157 100% 28%;
 
-    --radius: 0rem;
+    --radius: 0.625rem;
 
     --sidebar-background: 156 100% 15%;
     --sidebar-foreground: 145 26% 88%;
@@ -57,7 +57,6 @@
 @layer base {
   * {
     @apply border-border;
-    border-radius: 0 !important;
   }
 
   body {
@@ -98,12 +97,10 @@
 .dashboard-home article,
 .dashboard-home .dashboard-table,
 .dashboard-home .dashboard-empty-state {
-  border-radius: var(--radius);
   box-shadow: 0 2px 8px rgba(21, 43, 67, 0.035);
 }
 
 .dashboard-home .dashboard-kpi {
-  border-radius: var(--radius);
   box-shadow: 0 2px 8px rgba(21, 43, 67, 0.035);
   transition: transform 180ms ease, box-shadow 180ms ease;
 }

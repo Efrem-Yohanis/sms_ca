@@ -4,6 +4,7 @@ const API_BASE = (import.meta.env.VITE_ADMIN_API_URL || "http://localhost:8002/a
 );
 const ACCESS_TOKEN_KEY = "sms-admin-access-token";
 const REFRESH_TOKEN_KEY = "sms-admin-refresh-token";
+const LAST_ACTIVITY_KEY = "sms-admin-last-activity";
 
 export type ApiUser = {
   id: number;
@@ -127,6 +128,7 @@ export function getAccessToken() {
 export function clearAdminTokens() {
   window.localStorage.removeItem(ACCESS_TOKEN_KEY);
   window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+  window.localStorage.removeItem(LAST_ACTIVITY_KEY);
   window.dispatchEvent(new Event("admin-workspace-invalidated"));
 }
 
@@ -221,6 +223,7 @@ export async function adminLogin(username: string, password: string) {
   const tokens = result;
   window.localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access);
   window.localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh);
+  window.localStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
   return { user: await adminRequest<ApiUser>("/admin/me/") };
 }
 

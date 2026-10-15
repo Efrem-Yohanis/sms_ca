@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_spectacular',
     'sms_campaign_manager',
+    'task_scheduler',
 ]
 
 MIDDLEWARE = [
@@ -200,6 +201,12 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
+# Task Scheduler uses the campaign application's database and Airflow instance.
+AIRFLOW_API_URL = os.environ.get('AIRFLOW_API_URL', 'http://localhost:8080').rstrip('/')
+AIRFLOW_API_USERNAME = os.environ.get('AIRFLOW_API_USERNAME', 'admin')
+AIRFLOW_API_PASSWORD = os.environ.get('AIRFLOW_API_PASSWORD', '')
+AIRFLOW_DAGS_DIR = os.environ.get('AIRFLOW_DAGS_DIR', str(BASE_DIR / 'task_scheduler_dags'))
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'SMS Campaign Manager API',
     'VERSION': '1.0.0',
@@ -224,6 +231,7 @@ SPECTACULAR_SETTINGS = {
     'ENUM_NAME_OVERRIDES': {
         'DefaultLanguageE1dEnum': 'DefaultLanguageEnum',
         'DatabaseType588Enum': 'DatabaseTypeEnum',
+        'Format93cEnum': 'FormatEnum',
         'DeliveryStatus388Enum': 'DeliveryStatusEnum',
         'SentStatusC2bEnum': 'SentStatusEnum',
     },

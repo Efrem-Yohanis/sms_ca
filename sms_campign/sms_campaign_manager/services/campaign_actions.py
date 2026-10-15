@@ -1,6 +1,7 @@
 """Campaign lifecycle actions."""
 
 from django.db import transaction
+from ..models import Campaign
 from django.utils import timezone
 
 from .campaign_readiness import CampaignReadinessService
@@ -50,7 +51,8 @@ class CampaignActionsService:
             }
         build_result = None
         try:
-            if build_messages:
+            queued_messages_exist = self.campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists()
+            if build_messages and not queued_messages_exist:
                 build_result = MessageBuilder(campaign=self.campaign).build()
                 if build_result['built'] < 1:
                     raise ValueError('No messages were built for this campaign.')
@@ -62,6 +64,11 @@ class CampaignActionsService:
                 self.campaign.is_ready_to_execute = True
                 self.campaign.activated_at = timezone.now()
                 self.campaign.save(update_fields=['status', 'is_ready_to_execute', 'activated_at', 'updated_at'])
+                schedule = getattr(self.campaign, 'schedule', None)
+                if schedule:
+                    schedule.is_active = True
+                    schedule.schedule_status = 'active'
+                    schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
         except ValueError as exc:
             return {
                 'success': False,
@@ -83,6 +90,19 @@ class CampaignActionsService:
             'warnings': report['warnings'],
         }
 
+    def deactivate_campaign(self):
+        if self.campaign.status != 'active':
+            return {'success': False, 'message': f"Cannot deactivate campaign in '{self.campaign.status}' status."}
+        self.campaign.status = 'draft'
+        self.campaign.is_ready_to_execute = False
+        self.campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        schedule = getattr(self.campaign, 'schedule', None)
+        if schedule:
+            schedule.is_active = False
+            schedule.schedule_status = 'paused'
+            schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
+        return {'success': True, 'message': 'Campaign deactivated successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
+
     def pause_campaign(self):
         if self.campaign.status != 'in_progress':
             return {'success': False, 'message': f"Cannot pause campaign in '{self.campaign.status}' status."}
@@ -90,7 +110,7 @@ class CampaignActionsService:
         self.campaign.save(update_fields=['status', 'updated_at'])
         return {'success': True, 'message': 'Campaign paused successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
 
-    def start_campaign(self):
+    def start_campaign(self, start_method='manual'):
         if self.campaign.status == 'in_progress':
             return {
                 'success': True,
@@ -103,9 +123,18 @@ class CampaignActionsService:
             return {'success': False, 'message': 'Campaign is not ready to execute.'}
         if not self.campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
             return {'success': False, 'message': 'Campaign has no queued messages to send.'}
+        changed = Campaign.objects.filter(pk=self.campaign.pk, status='active').update(
+            status='in_progress', updated_at=timezone.now(),
+        )
+        if not changed:
+            self.campaign.refresh_from_db(fields=['status'])
+            return {
+                'success': self.campaign.status == 'in_progress',
+                'message': 'Campaign sending is already in progress.' if self.campaign.status == 'in_progress' else f"Cannot start campaign in '{self.campaign.status}' status.",
+                'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status},
+            }
         self.campaign.status = 'in_progress'
-        self.campaign.save(update_fields=['status', 'updated_at'])
-        owner_notification_sent = send_campaign_started_email(self.campaign)
+        owner_notification_sent = send_campaign_started_email(self.campaign, start_method=start_method)
         return {
             'success': True,
             'message': 'Campaign sending started.',
@@ -124,7 +153,7 @@ class CampaignActionsService:
         return {'success': True, 'message': 'Campaign resumed successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
 
     def complete_campaign(self):
-        if self.campaign.status != 'in_progress':
+        if self.campaign.status not in {'active', 'in_progress', 'paused'}:
             return {'success': False, 'message': f"Cannot complete campaign in '{self.campaign.status}' status."}
         self.campaign.status = 'completed'
         self.campaign.completed_at = timezone.now()
