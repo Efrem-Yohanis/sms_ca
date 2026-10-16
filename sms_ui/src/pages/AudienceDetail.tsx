@@ -40,6 +40,18 @@ export default function AudienceDetail() {
     loadData();
   }, [id]);
 
+  useEffect(() => {
+    const query = search.replace(/\D/g, "");
+    if (!id) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetchRecipientsPreview(Number(id), query || undefined)
+        .then((result) => { if (!cancelled) setPreview(result); })
+        .catch((error) => { if (!cancelled) console.error("Failed to search audience recipients", error); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [id, search]);
+
   async function loadData() {
     setLoading(true);
     try {
@@ -86,9 +98,11 @@ export default function AudienceDetail() {
   }
 
   const recipients = preview?.preview ?? audience.recipients_preview ?? [];
-  const filtered = search.trim()
-    ? recipients.filter((r) => r.msisdn.includes(search.trim()))
-    : recipients;
+  // Keep the detail view lightweight while showing a representative 10% sample.
+  const previewLimit = Math.min(50, Math.max(10, Math.ceil((preview?.total_recipients ?? audience.total_count) * 0.1)));
+  const normalizedSearch = search.replace(/\D/g, "");
+  const visibleRecipients = normalizedSearch ? recipients : recipients.slice(0, previewLimit);
+  const resultCount = normalizedSearch ? (preview?.matching_count ?? recipients.length) : (preview?.total_recipients ?? audience.total_count);
 
   return (
     <div className="space-y-6">
@@ -178,17 +192,18 @@ export default function AudienceDetail() {
       <Card className="shadow-card overflow-hidden">
         <div className="px-5 py-3 border-b bg-muted/40 flex items-center justify-between">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            Recipients Preview {preview?.has_more && `(showing ${preview.preview_count} of ${preview.total_recipients.toLocaleString()})`}
+            {normalizedSearch ? `Search Results (showing ${visibleRecipients.length} of ${resultCount.toLocaleString()} matches)` : `Recipients Preview (showing ${visibleRecipients.length} of ${(preview?.total_recipients ?? audience.total_count).toLocaleString()})`}
           </span>
         </div>
 
-        <div className="p-4">
+        <div className="p-5">
           <div className="relative mb-4">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by phone number..." className="pl-10" />
           </div>
         </div>
 
+        <div className="px-3 pb-3 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b">
@@ -199,25 +214,25 @@ export default function AudienceDetail() {
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && (
+            {visibleRecipients.length === 0 && (
               <tr>
                 <td colSpan={4} className="px-5 py-8 text-center text-muted-foreground">
-                  {search.trim() ? "No recipients match your search." : "No recipients preview available."}
+                  {normalizedSearch ? "No recipients match your search." : "No recipients preview available."}
                 </td>
               </tr>
             )}
-            {filtered.map((r, i) => {
+            {visibleRecipients.map((r, i) => {
               const langKey = r.lang?.toUpperCase() || "";
               return (
                 <tr key={r.msisdn} className="border-b last:border-b-0 hover:bg-accent/30 transition-colors">
-                  <td className="px-5 py-2.5 text-muted-foreground">{i + 1}</td>
-                  <td className="px-5 py-2.5 font-mono text-xs">{r.msisdn}</td>
-                  <td className="px-5 py-2.5">
+                  <td className="px-5 py-3 text-muted-foreground">{i + 1}</td>
+                  <td className="px-5 py-3 font-mono text-xs">{r.msisdn}</td>
+                  <td className="px-5 py-3">
                     <Badge variant="outline" className={`text-xs ${LANG_COLORS[langKey] || ""}`}>
                       {LANGUAGE_LABELS[r.lang as Language] ?? r.lang}
                     </Badge>
                   </td>
-                  <td className="px-5 py-2.5 text-right">
+                  <td className="px-5 py-3 text-right">
                     <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copyToClipboard(r.msisdn)}>
                       <Copy className="h-3 w-3" />
                     </Button>
@@ -227,6 +242,7 @@ export default function AudienceDetail() {
             })}
           </tbody>
         </table>
+        </div>
       </Card>
 
       {/* Invalid samples */}

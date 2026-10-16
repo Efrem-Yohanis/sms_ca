@@ -12,7 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { SidebarProvider } from "@/components/ui/sidebar";
+import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 
 export default function AppShell({ children }: { children: ReactNode }) {
@@ -27,10 +27,12 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
         <div className="flex-1 flex flex-col min-w-0">
           {/* Header */}
-          <header className="h-16 border-b bg-card/95 backdrop-blur-sm flex items-center justify-between px-4 md:px-6 shrink-0 sticky top-0 z-10">
-            <h1 className="text-sm font-semibold tracking-tight text-foreground sm:text-base">
-              SMS Campaign Management
-            </h1>
+          <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center justify-between border-b border-border bg-card/95 px-3 backdrop-blur-sm md:px-5">
+            <div className="flex min-w-0 items-center gap-3">
+              <h1 className="truncate text-sm font-semibold tracking-tight text-foreground sm:text-base">
+                SMS Campaign Management
+              </h1>
+            </div>
 
             {/* User dropdown */}
             <DropdownMenu>

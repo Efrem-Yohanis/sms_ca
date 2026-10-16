@@ -291,6 +291,9 @@ class AudienceCollectionView(APIView):
 		campaign_filter = request.query_params.get('campaign')
 		if campaign_filter:
 			campaigns = campaigns.filter(id=campaign_filter)
+		name_filter = request.query_params.get('name', '').strip()
+		if name_filter:
+			campaigns = campaigns.filter(name__icontains=name_filter)
 		paginator = StandardPagination()
 		page = paginator.paginate_queryset(campaigns, request)
 		return paginator.get_paginated_response([
@@ -432,15 +435,20 @@ class AudienceRecipientsPreviewView(APIView):
 		campaign = get_object_or_404(campaigns, id=pk)
 		members = AudienceMember.objects.filter(campaign=campaign).select_related('language').order_by('sequence_number')
 		total = members.count()
+		search = ''.join(char for char in request.query_params.get('search', '').strip() if char.isdigit())
+		searching = bool(search)
+		matching_members = members.filter(msisdn__icontains=search) if searching else members
+		matching_count = matching_members.count() if searching else total
 		preview = [
 			{'msisdn': member.msisdn, 'lang': member.language.code}
-			for member in members[:100]
+			for member in matching_members[:50 if searching else 100]
 		]
 		return Response({
 			'audience_id': campaign.id,
 			'campaign_id': campaign.id,
 			'campaign_name': campaign.name,
 			'total_recipients': total,
+			'matching_count': matching_count,
 			'valid_recipients': members.filter(is_valid=True).count(),
 			'invalid_recipients': members.filter(is_valid=False).count(),
 			'preview': preview,
@@ -1776,17 +1784,27 @@ class CampaignActivateView(APIView):
 		return Response(result, status=status.HTTP_200_OK if result['success'] else status.HTTP_400_BAD_REQUEST)
 
 
+class CampaignDeactivateView(APIView):
+	def post(self, request, campaign_id):
+		return _campaign_action_response(campaign_id, 'deactivate_campaign')
+
+
 class CampaignStartView(APIView):
 	@extend_schema(tags=['Campaign Actions'], summary='Start an active campaign', request=None, responses={200: OpenApiResponse(description='Start result.')})
 	def post(self, request, campaign_id):
-		return _campaign_action_response(campaign_id, 'start_campaign')
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		method = request.data.get('start_method', 'manual')
+		if method not in {'manual', 'scheduled'}:
+			return Response({'success': False, 'message': 'start_method must be manual or scheduled.'}, status=status.HTTP_400_BAD_REQUEST)
+		result = CampaignActionsService(campaign).start_campaign(start_method=method)
+		return Response(result, status=status.HTTP_200_OK if result['success'] else status.HTTP_400_BAD_REQUEST)
 
 
 class CampaignSendNowView(APIView):
 	@extend_schema(tags=['Campaign Actions'], summary='Start the SMS sender immediately', request=None, responses={202: OpenApiResponse(description='Sender started.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
-		if campaign.status not in {'active', 'in_progress', 'paused', 'stopped'}:
+		if campaign.status not in {'active', 'in_progress', 'paused'}:
 			return Response(
 				{'success': False, 'message': f"Cannot start sender for campaign in '{campaign.status}' status."},
 				status=status.HTTP_400_BAD_REQUEST,
@@ -1796,18 +1814,15 @@ class CampaignSendNowView(APIView):
 				{'success': False, 'message': 'Campaign is not ready to execute.'},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
+		start_method = request.data.get('start_method', 'manual')
+		if start_method not in {'manual', 'scheduled'}:
+			return Response({'success': False, 'message': 'start_method must be manual or scheduled.'}, status=status.HTTP_400_BAD_REQUEST)
 
 		if not campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
 			return Response(
 				{'success': False, 'message': 'Campaign has no queued messages to send.'},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
-
-		was_stopped = campaign.status == 'stopped'
-		if was_stopped:
-			campaign.status = 'active'
-			campaign.activated_at = timezone.now()
-			campaign.save(update_fields=['status', 'activated_at', 'updated_at'])
 
 		round_number_value = request.data.get('round_number')
 		if round_number_value in (None, ''):
@@ -1837,9 +1852,6 @@ class CampaignSendNowView(APIView):
 		if sender_response.status_code == 409:
 			sender_message = 'Campaign sender is already running.'
 		elif sender_response.status_code != 202 or body.get('success') is False:
-			if was_stopped:
-				campaign.status = 'stopped'
-				campaign.save(update_fields=['status', 'updated_at'])
 			return Response(
 				{'success': False, 'message': body.get('detail') or 'SMS sender rejected the campaign.', 'data': body},
 				status=status.HTTP_502_BAD_GATEWAY,
@@ -1848,10 +1860,21 @@ class CampaignSendNowView(APIView):
 			sender_message = 'Campaign sender started.'
 
 		was_in_progress = campaign.status == 'in_progress'
+		transitioned = False
+		previous_status = campaign.status
 		if not was_in_progress:
-			campaign.status = 'in_progress'
-			campaign.save(update_fields=['status', 'updated_at'])
-			owner_notification_sent = send_campaign_started_email(campaign)
+			transitioned = Campaign.objects.filter(
+				pk=campaign.pk, status__in=['active', 'paused'],
+			).update(status='in_progress', updated_at=timezone.now())
+			if transitioned:
+				campaign.status = 'in_progress'
+			else:
+				campaign.refresh_from_db(fields=['status'])
+				was_in_progress = campaign.status == 'in_progress'
+		if not was_in_progress:
+			return Response({'success': False, 'message': f"Cannot start sender for campaign in '{campaign.status}' status."}, status=status.HTTP_400_BAD_REQUEST)
+		if transitioned and previous_status == 'active':
+			owner_notification_sent = send_campaign_started_email(campaign, start_method=start_method)
 		else:
 			owner_notification_sent = None
 		return Response({

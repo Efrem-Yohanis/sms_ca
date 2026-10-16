@@ -23,7 +23,8 @@ export default function AudienceList() {
   const pageSize = 10;
 
   // Filters
-  const [campaignFilter, setCampaignFilter] = useState("");
+  const [audienceSearchInput, setAudienceSearchInput] = useState("");
+  const [audienceSearch, setAudienceSearch] = useState("");
 
   // Dialogs
   const [formOpen, setFormOpen] = useState(false);
@@ -33,13 +34,21 @@ export default function AudienceList() {
 
   useEffect(() => {
     loadData();
-  }, [page, campaignFilter]);
+  }, [page, audienceSearch]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAudienceSearch(audienceSearchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [audienceSearchInput]);
 
   async function loadData() {
     setLoading(true);
     try {
       const filters: Record<string, string> = {};
-      if (campaignFilter.trim()) filters.campaign = campaignFilter.trim();
+      if (audienceSearch) filters.name = audienceSearch;
 
       const [listRes, summaryRes] = await Promise.all([
         fetchAudiences(page, pageSize, Object.keys(filters).length ? filters : undefined),
@@ -128,12 +137,12 @@ export default function AudienceList() {
         <div className="relative max-w-xs flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            value={campaignFilter}
+            value={audienceSearchInput}
             onChange={(e) => {
-              setCampaignFilter(e.target.value);
-              setPage(1);
+              setAudienceSearchInput(e.target.value);
             }}
-            placeholder="Filter by campaign ID..."
+            placeholder="Search audiences by name..."
+            aria-label="Search audiences by name"
             className="pl-10"
           />
         </div>

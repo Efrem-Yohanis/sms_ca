@@ -19,7 +19,7 @@ import { useState, useCallback } from "react";
 import {
   fetchCampaign, fetchCampaignProgress, fetchCampaignBatches,
   activateCampaign, startCampaign, pauseCampaign, resumeCampaign, stopCampaign,
-  completeCampaign, archiveCampaign, softDeleteCampaign,
+  completeCampaign, archiveCampaign, softDeleteCampaign, deactivateCampaign,
   type ApiCampaign
 } from "@/lib/api";
 import {
@@ -216,7 +216,7 @@ export default function CampaignDetail() {
       </div>
 
       {/* ─── Action Buttons ─── */}
-      <div className="flex items-center gap-2 flex-wrap">
+      {/* <div className="flex items-center gap-2 flex-wrap">
         <Button size="sm" disabled={acting || c.status !== "draft" || !c.is_ready_to_execute} onClick={() => confirmAndExec(
           "Activate Campaign",
           "This builds the message queue, confirms the campaign is ready to execute, and activates it. It will not start sending until you choose Start.",
@@ -271,7 +271,198 @@ export default function CampaignDetail() {
         )} className="gap-1.5">
           <Trash2 className="h-3.5 w-3.5" /> Delete
         </Button>
-      </div>
+      </div> */}
+      
+<div className="flex items-center gap-2 flex-wrap">
+  {/* DRAFT: Activate and Edit */}
+  {c.status === "draft" && (
+    <>
+      <Button
+        size="sm"
+        disabled={acting || !c.is_ready_to_execute}
+        onClick={() =>
+          confirmAndExec(
+            "Activate Campaign",
+            "Build the message queue and activate this campaign. SMS sending will not begin until execution starts.",
+            () => activateCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        <CheckCircle2 className="h-3.5 w-3.5" />
+        Activate
+      </Button>
+
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={acting}
+        onClick={() => navigate(`/campaigns/${c.id}/edit`)}
+        className="gap-1.5"
+      >
+        <Edit className="h-3.5 w-3.5" />
+        Edit
+      </Button>
+    </>
+  )}
+
+  {/* ACTIVE: Deactivate and Start when ready */}
+  {c.status === "active" && (
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Deactivate Campaign",
+            "Remove this campaign from scheduled execution. This should not interrupt an already-running execution unless the backend explicitly supports that behavior.",
+            () => deactivateCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        Deactivate
+      </Button>
+
+      {c.is_ready_to_execute && (
+        <Button
+          size="sm"
+          disabled={acting}
+          onClick={() =>
+            confirmAndExec(
+              "Start Campaign",
+              "Start sending queued messages immediately. Verify that the campaign's schedule permits execution.",
+              () => startCampaign(numId)
+            )
+          }
+          className="gap-1.5"
+        >
+          <Play className="h-3.5 w-3.5" />
+          Start
+        </Button>
+      )}
+    </>
+  )}
+
+  {/* RUNNING: Pause and Stop */}
+  {c.status === "in_progress" && (
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Pause Campaign",
+            "Temporarily suspend message delivery. You can resume the campaign later.",
+            () => pauseCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        <Pause className="h-3.5 w-3.5" />
+        Pause
+      </Button>
+
+      <Button
+        size="sm"
+        variant="destructive"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Stop Campaign",
+            "Stop the current execution. Confirm whether your backend treats this as a permanent stop or marks the campaign completed.",
+            () => stopCampaign(numId),
+            "destructive"
+          )
+        }
+        className="gap-1.5"
+      >
+        <Square className="h-3.5 w-3.5" />
+        Stop
+      </Button>
+    </>
+  )}
+
+  {/* PAUSED: Resume and Stop */}
+  {c.status === "paused" && (
+    <>
+      <Button
+        size="sm"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Resume Campaign",
+            "Resume message delivery from the existing queue.",
+            () => resumeCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        <Play className="h-3.5 w-3.5" />
+        Resume
+      </Button>
+
+      <Button
+        size="sm"
+        variant="destructive"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Stop Campaign",
+            "Stop the current execution. This action may not be reversible.",
+            () => stopCampaign(numId),
+            "destructive"
+          )
+        }
+        className="gap-1.5"
+      >
+        <Square className="h-3.5 w-3.5" />
+        Stop
+      </Button>
+    </>
+  )}
+
+  {/* STOPPED: Restart only if the backend permits it */}
+  {c.status === "stopped" && c.is_ready_to_execute && (
+    <Button
+      size="sm"
+      disabled={acting}
+      onClick={() =>
+        confirmAndExec(
+          "Restart Campaign",
+          "Restart this campaign if its schedule and backend state permit a new execution.",
+          () => startCampaign(numId)
+        )
+      }
+      className="gap-1.5"
+    >
+      <Play className="h-3.5 w-3.5" />
+      Restart
+    </Button>
+  )}
+
+  {/* COMPLETED: Archive */}
+  {c.status === "completed" && (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={acting}
+      onClick={() =>
+        confirmAndExec(
+          "Archive Campaign",
+          "Archive this completed campaign. Verify that it cannot resume sending after archival.",
+          () => archiveCampaign(numId)
+        )
+      }
+      className="gap-1.5"
+    >
+      <Layers className="h-3.5 w-3.5" />
+      Archive
+    </Button>
+  )}
+</div>
 
       {/* ─── Readiness Check ─── */}
       {c.status === "draft" && (

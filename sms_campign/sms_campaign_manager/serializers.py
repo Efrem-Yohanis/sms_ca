@@ -1151,7 +1151,34 @@ class CampaignListSerializer(serializers.ModelSerializer):
 
     def get_next_run(self, obj):
         schedule = getattr(obj, 'schedule', None)
-        return schedule.next_run_date if schedule else None
+        if not schedule or not schedule.is_active or schedule.schedule_status != 'active':
+            return None
+        if obj.status in {'stopped', 'completed', 'archived', 'invalid_schedule'}:
+            return None
+        from datetime import datetime, time, timedelta
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        from django.utils import timezone
+        try:
+            tz = ZoneInfo(schedule.timezone or 'UTC')
+        except ZoneInfoNotFoundError:
+            tz = timezone.utc
+        now = timezone.now().astimezone(tz)
+        cursor = max(now.date(), schedule.start_date)
+        last = schedule.end_date or (cursor + timedelta(days=366 * 5))
+        while cursor <= last:
+            eligible = (
+                schedule.schedule_type == 'daily'
+                or (schedule.schedule_type == 'once' and cursor == schedule.start_date)
+                or (schedule.schedule_type == 'weekly' and cursor.weekday() in (schedule.run_days or []))
+                or (schedule.schedule_type == 'monthly' and cursor.day == schedule.start_date.day)
+            )
+            if eligible:
+                for window in schedule.time_windows or []:
+                    candidate = datetime.combine(cursor, time.fromisoformat(window['start']), tzinfo=tz)
+                    if candidate > now:
+                        return candidate.isoformat()
+            cursor += timedelta(days=1)
+        return None
 
     def get_has_schedule(self, obj):
         return obj.schedule_id is not None

@@ -322,6 +322,7 @@ export async function startCampaign(id: number) {
   const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/send-now/`, {
     method: "POST",
     headers: authHeaders(),
+    body: JSON.stringify({ start_method: "manual" }),
   });
   return handleResponse<{
     success: boolean;
@@ -346,6 +347,11 @@ export async function activateCampaign(id: number): Promise<{
     method: "POST",
     headers: authHeaders(),
   });
+  return handleResponse(res);
+}
+
+export async function deactivateCampaign(id: number) {
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/deactivate/`, { method: "POST", headers: authHeaders() });
   return handleResponse(res);
 }
 

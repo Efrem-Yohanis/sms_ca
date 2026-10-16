@@ -96,6 +96,23 @@ class CampaignScheduler:
         return cls.current_window_start(row, current) is not None
 
     @classmethod
+    def schedule_finished(cls, row: dict[str, Any], current: datetime) -> bool:
+        schedule = row.get('schedule') or {}
+        if not schedule:
+            return False
+        local_current = cls._local_current(schedule, current)
+        try:
+            configured_end = schedule.get('end_date')
+            if not configured_end and schedule.get('schedule_type') == 'once':
+                configured_end = schedule.get('start_date')
+            if not configured_end:
+                return False
+            end = date.fromisoformat(str(configured_end))
+        except ValueError:
+            return False
+        return local_current.date() > end
+
+    @classmethod
     def prepare_window_start(cls, row: dict[str, Any], current: datetime) -> datetime | None:
         policy = row.get('audience_rebuild')
         schedule = row.get('schedule')
@@ -210,6 +227,9 @@ class CampaignScheduler:
                         prepared.append(campaign['id'])
 
                 try:
+                    if self.schedule_finished(campaign, now) and campaign['status'] in {'active', 'in_progress', 'paused'}:
+                        await asyncio.to_thread(self.call_campaign_api, campaign['id'], 'complete')
+                        continue
                     preparation_start = self.prepare_window_start(campaign, now)
                     if (
                         preparation_start
@@ -231,10 +251,10 @@ class CampaignScheduler:
                             'activate',
                             {'build_messages': not bool(policy.get('enabled'))},
                         )
-                        await asyncio.to_thread(self.call_campaign_api, campaign['id'], 'start')
+                        await asyncio.to_thread(self.call_campaign_api, campaign['id'], 'start', {'start_method': 'scheduled'})
                         started.append(campaign['id'])
                     elif running and campaign['status'] == 'active':
-                        await asyncio.to_thread(self.call_campaign_api, campaign['id'], 'start')
+                        await asyncio.to_thread(self.call_campaign_api, campaign['id'], 'start', {'start_method': 'scheduled'})
                         started.append(campaign['id'])
                     elif running and campaign['status'] == 'paused':
                         await asyncio.to_thread(self.call_campaign_api, campaign['id'], 'resume')

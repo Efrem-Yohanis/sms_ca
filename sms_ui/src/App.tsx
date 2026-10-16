@@ -18,6 +18,13 @@ import ScheduleList from "@/pages/ScheduleList";
 import ScheduleCreate from "@/pages/ScheduleCreate";
 import ScheduleEdit from "@/pages/ScheduleEdit";
 import ScheduleDetail from "@/pages/ScheduleDetail";
+import TaskSchedulerPage, {
+  TaskSchedulerCreatePage,
+  TaskSchedulerEditPage,
+  TaskSchedulerRunsPage,
+  TaskSchedulerUpcomingPage,
+} from "@/pages/TaskSchedulerPages";
+import TaskScheduleDetail from "@/pages/TaskScheduleDetail";
 import MessageContentList from "@/pages/MessageContentList";
 import MessageContentDetail from "@/pages/MessageContentDetail";
 import MessageContentCreate from "@/pages/MessageContentCreate";
@@ -88,6 +95,12 @@ const App = () => (
                         path="/schedules/:id/edit"
                         element={<ScheduleEdit />}
                       />
+                      <Route path="/task-scheduler" element={<TaskSchedulerPage />} />
+                      <Route path="/task-scheduler/upcoming" element={<TaskSchedulerUpcomingPage />} />
+                      <Route path="/task-scheduler/new" element={<TaskSchedulerCreatePage />} />
+                      <Route path="/task-scheduler/runs" element={<TaskSchedulerRunsPage />} />
+                      <Route path="/task-scheduler/:id/edit" element={<TaskSchedulerEditPage />} />
+                      <Route path="/task-scheduler/:id" element={<TaskScheduleDetail />} />
                       <Route
                         path="/messages"
                         element={<MessageContentList />}

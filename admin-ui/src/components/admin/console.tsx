@@ -427,12 +427,34 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
 
   useEffect(() => {
     let active = true;
+    const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+    const LAST_ACTIVITY_KEY = "sms-admin-last-activity";
+    let lastActivityWrite = Number(window.localStorage.getItem(LAST_ACTIVITY_KEY)) || 0;
     const invalidateWorkspace = () => {
       workspaceCache = null;
     };
     const expireSession = () => {
+      clearAdminTokens();
+      window.localStorage.removeItem(LAST_ACTIVITY_KEY);
       void navigate({ to: "/login" });
     };
+    const recordActivity = () => {
+      const now = Date.now();
+      if (getAccessToken() && now - lastActivityWrite >= 30_000) {
+        lastActivityWrite = now;
+        window.localStorage.setItem(LAST_ACTIVITY_KEY, String(now));
+      }
+    };
+    const checkIdleSession = () => {
+      const lastActivity = Number(window.localStorage.getItem(LAST_ACTIVITY_KEY));
+      if (!lastActivity || Date.now() - lastActivity >= IDLE_TIMEOUT_MS) expireSession();
+    };
+    const activityEvents = ["pointerdown", "keydown", "mousemove", "touchstart"] as const;
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, recordActivity, { passive: true }));
+    const idleTimer = window.setInterval(checkIdleSession, 15_000);
+    window.addEventListener("storage", checkIdleSession);
+    if (!window.localStorage.getItem(LAST_ACTIVITY_KEY)) recordActivity();
+    checkIdleSession();
     window.addEventListener("admin-session-expired", expireSession);
     window.addEventListener("admin-workspace-invalidated", invalidateWorkspace);
     if (!getAccessToken()) {
@@ -440,6 +462,9 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
       return () => {
         window.removeEventListener("admin-session-expired", expireSession);
         window.removeEventListener("admin-workspace-invalidated", invalidateWorkspace);
+        window.clearInterval(idleTimer);
+        window.removeEventListener("storage", checkIdleSession);
+        activityEvents.forEach((eventName) => window.removeEventListener(eventName, recordActivity));
       };
     }
     const cachedWorkspace = getFreshWorkspaceCache();
@@ -452,6 +477,9 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
       return () => {
         window.removeEventListener("admin-session-expired", expireSession);
         window.removeEventListener("admin-workspace-invalidated", invalidateWorkspace);
+        window.clearInterval(idleTimer);
+        window.removeEventListener("storage", checkIdleSession);
+        activityEvents.forEach((eventName) => window.removeEventListener(eventName, recordActivity));
       };
     }
 
@@ -507,6 +535,9 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
       active = false;
       window.removeEventListener("admin-session-expired", expireSession);
       window.removeEventListener("admin-workspace-invalidated", invalidateWorkspace);
+      window.clearInterval(idleTimer);
+      window.removeEventListener("storage", checkIdleSession);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, recordActivity));
     };
   }, [navigate]);
 

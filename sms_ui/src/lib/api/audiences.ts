@@ -65,6 +65,7 @@ export interface RecipientsPreview {
   campaign_id: number;
   campaign_name: string;
   total_recipients: number;
+  matching_count?: number;
   valid_recipients: number;
   invalid_recipients: number;
   preview: { msisdn: string; lang: string }[];
@@ -201,8 +202,11 @@ export async function fetchAudienceStatistics(id: number) {
 }
 
 /** GET /api/audiences/:id/recipients_preview/ */
-export async function fetchRecipientsPreview(id: number) {
-  const res = await authFetch(`${API_BASE}/api/audiences/${id}/recipients_preview/`, { headers: authHeaders() });
+export async function fetchRecipientsPreview(id: number, search?: string) {
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  const query = params.toString();
+  const res = await authFetch(`${API_BASE}/api/audiences/${id}/recipients_preview/${query ? `?${query}` : ""}`, { headers: authHeaders() });
   return handleResponse<RecipientsPreview>(res);
 }
 
