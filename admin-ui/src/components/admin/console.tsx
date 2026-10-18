@@ -27,17 +27,19 @@ import {
   type ConfigPage,
 } from "@/components/admin/configuration-store";
 import {
-  adminRequest,
   clearAdminTokens,
   deleteUser,
+  getCurrentAdmin,
   getAccessToken,
   listConfig,
+  listAdminCampaigns,
   listUsers,
   listUserCampaigns,
   saveUser as saveApiUser,
   type ApiConfig,
   type ApiUser,
   type ApiUserCampaign,
+  type ApiAdminCampaign,
   type UserInput,
 } from "@/lib/admin-api";
 
@@ -92,15 +94,6 @@ type Campaign = {
   executionCompletedAt: string;
 };
 
-const campaignsSeed: Campaign[] = [
-  { id: "CMP-2048", name: "September product launch", owner: "Olivia Chen", status: "Active", executionStatus: "Processing", audience: "24,580", audienceValid: "24,580", audienceInvalid: "0", audienceSource: "Product launch subscribers", audienceDescription: "Subscribers opted in to product announcements.", type: "Bulk SMS", sent: "18,420", delivered: "17,892", failedSent: "0", failedDelivery: "528", date: "Sep 30, 2026", rate: 97.1, scheduleType: "One-time", scheduleStart: "Sep 30, 2026, 9:00 AM", scheduleEnd: "Sep 30, 2026, 5:00 PM", scheduleTimezone: "Africa/Addis_Ababa", scheduleRepeat: "Does not repeat", messageContent: { am: "ሰላም! አዲሱ ምርታችን ደርሷል። አዳዲስ ነገሮችን ይመልከቱ እና የቅርብ ጊዜ ቅናሾችን ያግኙ።", en: "Hi there! Our new product is here. Discover what’s new and explore the latest offers today.", om: "Akkam! Oomishni keenya haaraan dhiyaateera. Har’a wantoota haaraa fi dhiyeessiiwwan yeroo dhiyoo ilaalaa.", so: "Salaan! Badeecaddeenna cusub waa diyaar. Maanta ogow waxa cusub oo eeg dalabyadii ugu dambeeyay.", ti: "ሰላም! ሓድሽ ፍርያትና በጺሑ ኣሎ። ሓድሽ ነገራት ርኣዩን ናይ ቀረባ ግዜ ቅናሻትና ድማ መርምሩ።" }, senderId: "ACME", channel: "SMS", smscAccount: "Primary gateway", executionStartedAt: "Sep 30, 2026, 9:00 AM", executionCompletedAt: "In progress" },
-  { id: "CMP-2047", name: "Fall welcome series", owner: "Marcus Rivera", status: "Active", executionStatus: "Processing", audience: "12,340", audienceValid: "12,340", audienceInvalid: "0", audienceSource: "New customer list", audienceDescription: "New customers registered during the fall campaign period.", type: "Scheduled SMS", sent: "8,756", delivered: "8,521", failedSent: "0", failedDelivery: "235", date: "Sep 30, 2026", rate: 97.3, scheduleType: "Weekly", scheduleStart: "Sep 30, 2026, 10:00 AM", scheduleEnd: "Oct 31, 2026, 4:00 PM", scheduleTimezone: "Africa/Addis_Ababa", scheduleRepeat: "Every Wednesday", messageContent: { am: "እንኳን ደህና መጡ! ስለተቀላቀሉን እናመሰግናለን። እዚህ በመሆንዎ ደስ ብሎናል፤ ወቅታዊ መረጃዎችንም እናሳውቅዎታለን።", en: "Welcome! Thank you for joining us. We’re glad you’re here and look forward to keeping you updated.", om: "Baga nagaan dhuftan! Nu waliin waan makamtaniif galatoomaa. As jiraachuun keessan nu gammachiisa; odeeffannoo haaraas isin beeksisna.", so: "Soo dhawoow! Waad ku mahadsan tahay inaad nagu soo biirtay. Waan ku faraxsanahay inaad nala joogto, wararkana waan kula wadaagi doonnaa.", ti: "እንቋዕ ብደሓን መጻእኩም! ስለ ዝተጸንበርኩምና ነመስግነኩም። ምሳና ምህላውኩም የሐጉሰና፣ ሓድሽ ሓበሬታ እውን ክንህበኩም ኢና።" }, senderId: "BRIGHTLY", channel: "SMS", smscAccount: "Brightly SMS", executionStartedAt: "Sep 30, 2026, 10:00 AM", executionCompletedAt: "In progress" },
-  { id: "CMP-2046", name: "Appointment reminders", owner: "James Okafor", status: "Completed", executionStatus: "Completed", audience: "8,420", audienceValid: "8,186", audienceInvalid: "234", audienceSource: "Upcoming appointments", audienceDescription: "Contacts with appointments scheduled for the reminder period.", type: "Scheduled SMS", sent: "8,420", delivered: "8,186", failedSent: "0", failedDelivery: "234", date: "Sep 29, 2026", rate: 97.2, scheduleType: "One-time", scheduleStart: "Sep 29, 2026, 8:00 AM", scheduleEnd: "Sep 29, 2026, 12:00 PM", scheduleTimezone: "Africa/Addis_Ababa", scheduleRepeat: "Does not repeat", messageContent: { am: "ማስታወሻ፦ ቀጣይ ቀጠሮ አለዎት። ለውጥ ማድረግ ከፈለጉ እባክዎ ያነጋግሩን።", en: "Reminder: you have an upcoming appointment. Please contact us if you need to make a change.", om: "Yaadachiisa: beellamni keessan dhiyaachaa jira. Jijjiirama yoo barbaaddan maaloo nu qunnamaa.", so: "Xusuusin: ballan ayaa kuu soo socda. Fadlan nala soo xiriir haddii aad u baahan tahay inaad wax beddesho.", ti: "መዘኻኸሪ፦ ዝመጽእ ቆጸራ ኣለኩም። ለውጢ ክትገብሩ እንተደሊኹም በጃኹም ርኸቡና።" }, senderId: "MERIDIAN", channel: "SMS", smscAccount: "Meridian backup", executionStartedAt: "Sep 29, 2026, 8:00 AM", executionCompletedAt: "Sep 29, 2026, 11:42 AM" },
-  { id: "CMP-2045", name: "Member rewards update", owner: "Aisha Patel", status: "Completed", executionStatus: "Completed", audience: "16,280", audienceValid: "16,280", audienceInvalid: "0", audienceSource: "Rewards members", audienceDescription: "Active members enrolled in the rewards program.", type: "Bulk SMS", sent: "16,280", delivered: "15,954", failedSent: "0", failedDelivery: "326", date: "Sep 29, 2026", rate: 98.0, scheduleType: "One-time", scheduleStart: "Sep 29, 2026, 1:00 PM", scheduleEnd: "Sep 29, 2026, 6:00 PM", scheduleTimezone: "Africa/Addis_Ababa", scheduleRepeat: "Does not repeat", messageContent: { am: "ሽልማቶችዎ ይጠብቁዎታል! አዳዲስ የአባልነት ጥቅሞችንና ቅናሾችን ለማየት መለያዎን ይመልከቱ።", en: "Your rewards are waiting! Check your account to see the latest member benefits and offers.", om: "Badhaasni keessan isin eeggata! Faayidaalee miseensummaa fi dhiyeessii haaraa ilaaluuf herrega keessan ilaalaa.", so: "Abaalmarinnadaadu way ku sugayaan! Akoonkaaga ka eeg faa'iidooyinka xubinnimada iyo dalabyada cusub.", ti: "ሽልማታትኩም ይጽበዩኹም ኣለዉ! ሓደሽቲ ጥቕምታትን ቅናሻትን ንምርኣይ ኣካውንትኩም ርኣዩ።" }, senderId: "NORTHSTAR", channel: "SMS", smscAccount: "Northstar primary", executionStartedAt: "Sep 29, 2026, 1:00 PM", executionCompletedAt: "Sep 29, 2026, 4:15 PM" },
-  { id: "CMP-2044", name: "October early access", owner: "Daniel Kim", status: "Draft", executionStatus: "Pending", audience: "31,200", audienceValid: "30,940", audienceInvalid: "260", audienceSource: "Early access list", audienceDescription: "Customers registered for early access announcements.", type: "Bulk SMS", sent: "—", delivered: "—", failedSent: "—", failedDelivery: "—", date: "Sep 28, 2026", rate: 0, scheduleType: "One-time", scheduleStart: "Oct 05, 2026, 9:00 AM", scheduleEnd: "Oct 05, 2026, 5:00 PM", scheduleTimezone: "Africa/Addis_Ababa", scheduleRepeat: "Does not repeat", messageContent: { am: "የጥቅምት ስብስባችንን ከሁሉ በፊት ይመልከቱ። አዳዲስ ምርቶችን ለማሰስ ድረ ገጻችንን ይጎብኙ።", en: "Get early access to our October collection. Visit our website to explore what’s new.", om: "Kuusaa Onkololeessaa keenya dursee argadhaa. Wantoota haaraa ilaaluuf marsariitii keenya daawwadhaa.", so: "Hel helitaan hore oo ku saabsan ururintayada Oktoobar. Booqo boggayaga si aad u ogaato waxa cusub.", ti: "ኣብ ናይ ጥቅምቲ ምርታትና ቀዳማይ ፍቓድ ርኸቡ። ሓድሽ ንምርኣይ ናብ ወብሳይትና ብጽሑ።" }, senderId: "PULSE", channel: "SMS", smscAccount: "Primary gateway", executionStartedAt: "Not started", executionCompletedAt: "Not completed" },
-  { id: "CMP-2043", name: "Customer feedback", owner: "Olivia Chen", status: "Paused", executionStatus: "Paused", audience: "5,400", audienceValid: "5,400", audienceInvalid: "0", audienceSource: "Recent purchasers", audienceDescription: "Customers who made a purchase in the last 30 days.", type: "Bulk SMS", sent: "2,150", delivered: "2,093", failedSent: "0", failedDelivery: "57", date: "Sep 27, 2026", rate: 97.3, scheduleType: "One-time", scheduleStart: "Sep 27, 2026, 2:00 PM", scheduleEnd: "Sep 27, 2026, 6:00 PM", scheduleTimezone: "Africa/Addis_Ababa", scheduleRepeat: "Does not repeat", messageContent: { am: "በቅርቡ ግዢ ስለፈጸሙ እናመሰግናለን! እንድንሻሻል እባክዎ አስተያየትዎን ያጋሩን።", en: "Thanks for your recent purchase! Please share your feedback to help us improve.", om: "Dhiyeenya kana waan bitattaniif galatoomaa! Akka fooyyaanuuf yaada keessan nuuf qoodaa.", so: "Waad ku mahadsan tahay iibsigii dhowaa! Fadlan nala wadaag ra'yigaaga si aan u horumarno.", ti: "ስለ ቀረባ ግዝኣትኩም ነመስግነኩም! ንኽንመሓየሽ በጃኹም ርእይቶኹም ኣካፍሉና።" }, senderId: "ACME", channel: "SMS", smscAccount: "Primary gateway", executionStartedAt: "Sep 27, 2026, 2:00 PM", executionCompletedAt: "Paused" },
-];
-
 const navItems: { name: Page; icon: LucideIcon }[] = [
   { name: "Users", icon: Users },
   { name: "Campaigns", icon: Send },
@@ -144,6 +137,44 @@ function fromApiUser(user: ApiUser): User {
     assignedTpsConfigs: user.assigned_tps_configs,
     assignedNAddressConfigs: user.assigned_n_address_configs,
     assignedNAddresses: user.assigned_n_addresses,
+  };
+}
+
+function fromAdminCampaign(campaign: ApiAdminCampaign): Campaign {
+  const status = campaign.status.toLowerCase();
+  const campaignStatus: Campaign["status"] = status === "completed" || status === "archived"
+    ? "Completed"
+    : status === "paused" ? "Paused" : status === "draft" ? "Draft" : "Active";
+  const createdAt = new Date(campaign.created_at);
+  return {
+    id: campaign.campaign_code,
+    name: campaign.name,
+    owner: campaign.campaign_manager,
+    status: campaignStatus,
+    executionStatus: campaign.execution_status,
+    audience: campaign.total_audience.toLocaleString("en-US"),
+    audienceValid: "—",
+    audienceInvalid: "—",
+    audienceSource: "—",
+    audienceDescription: "—",
+    type: campaign.campaign_type,
+    sent: campaignStatus === "Draft" ? "—" : campaign.total_sent.toLocaleString("en-US"),
+    delivered: campaignStatus === "Draft" ? "—" : campaign.total_delivered.toLocaleString("en-US"),
+    failedSent: "—",
+    failedDelivery: "—",
+    date: Number.isNaN(createdAt.getTime()) ? campaign.created_at : createdAt.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+    rate: campaign.total_sent ? Math.round(campaign.total_delivered / campaign.total_sent * 1000) / 10 : 0,
+    scheduleType: campaign.campaign_type,
+    scheduleStart: "—",
+    scheduleEnd: "—",
+    scheduleTimezone: "—",
+    scheduleRepeat: "—",
+    messageContent: { am: "—", en: "—", om: "—", so: "—", ti: "—" },
+    senderId: "—",
+    channel: "SMS",
+    smscAccount: "—",
+    executionStartedAt: "—",
+    executionCompletedAt: campaignStatus === "Completed" ? campaign.execution_status : "—",
   };
 }
 
@@ -408,8 +439,34 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
   });
   const [currentAdmin, setCurrentAdmin] = useState(() => getFreshWorkspaceCache()?.currentAdmin ?? "Admin");
   const [ready, setReady] = useState(() => getFreshWorkspaceCache() !== null);
+  const [configsLoaded, setConfigsLoaded] = useState(() => getFreshWorkspaceCache() !== null);
+  const [configurationLoadError, setConfigurationLoadError] = useState("");
   const [bootError, setBootError] = useState("");
-  const campaigns = campaignsSeed;
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [campaignsLoading, setCampaignsLoading] = useState(true);
+  const [campaignsError, setCampaignsError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const rows: ApiAdminCampaign[] = [];
+        let page = 1;
+        let pageCount = 1;
+        do {
+          const result = await listAdminCampaigns(page);
+          rows.push(...result.results);
+          pageCount = Math.ceil(result.count / 100);
+          page += 1;
+        } while (page <= pageCount);
+        if (active) setCampaigns(rows.map(fromAdminCampaign));
+      } catch (error) {
+        if (active) setCampaignsError(error instanceof Error ? error.message : "Could not load campaigns.");
+      } finally {
+        if (active) setCampaignsLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, []);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [editingUserDetails, setEditingUserDetails] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
@@ -473,6 +530,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
       setCurrentAdmin(cachedWorkspace.currentAdmin);
       setAssignmentOptions(cachedWorkspace.assignmentOptions);
       replaceConfigurationEntries(cachedWorkspace.configEntries);
+      setConfigsLoaded(true);
       setReady(true);
       return () => {
         window.removeEventListener("admin-session-expired", expireSession);
@@ -484,11 +542,21 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     }
 
     void (async () => {
+      let coreWorkspaceLoaded = false;
       try {
-        const [me, apiUsers, smscs, senderIds, channels, tpsConfigs, nAddressConfigs, nAddresses] =
+        const [me, apiUsers] = await Promise.all([getCurrentAdmin(), listUsers()]);
+        if (!active) return;
+        const mappedUsers = apiUsers.map(fromApiUser);
+        const currentAdminName = me.full_name || me.username;
+        setUsers(mappedUsers);
+        setCurrentAdmin(currentAdminName);
+        setReady(true);
+        coreWorkspaceLoaded = true;
+
+        // Configuration lists are only needed for configuration pages and user
+        // assignment forms. Load them after the main Users workspace is visible.
+        const [smscs, senderIds, channels, tpsConfigs, nAddressConfigs, nAddresses] =
           await Promise.all([
-            adminRequest<ApiUser>("/admin/me/"),
-            listUsers(),
             listConfig("smsc-configs"),
             listConfig("sender-ids"),
             listConfig("channels"),
@@ -497,8 +565,6 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
             listConfig("n-addresses"),
           ]);
         if (!active) return;
-        const mappedUsers = apiUsers.map(fromApiUser);
-        const currentAdminName = me.full_name || me.username;
         const options: UserAssignmentOptions = {
           smscs: smscs.map((item) => ({ id: item.id, label: `${String(item.name ?? item.id)} (${String(item.base_url ?? "")})` })),
           senderIds: senderIds.map((item) => ({ id: item.id, label: `${String(item.sender_id ?? "")} — ${String(item.name ?? "")}` })),
@@ -519,15 +585,18 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
           configEntries,
           expiresAt: Date.now() + WORKSPACE_CACHE_TTL_MS,
         };
-        setUsers(mappedUsers);
-        setCurrentAdmin(currentAdminName);
         setAssignmentOptions(options);
         replaceConfigurationEntries(configEntries);
-        setReady(true);
+        setConfigurationLoadError("");
+        setConfigsLoaded(true);
       } catch (reason) {
-        if (active) {
+        if (active && !coreWorkspaceLoaded) {
           setBootError(reason instanceof Error ? reason.message : "Could not load the admin workspace.");
           setReady(true);
+        } else if (active) {
+          console.error("Could not preload admin configuration lists.", reason);
+          setConfigurationLoadError("Configuration data could not be loaded. Check the backend connection and retry.");
+          setConfigsLoaded(true);
         }
       }
     })();
@@ -669,8 +738,8 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
 
   return <div className="flex min-h-screen bg-background font-sans text-foreground">
     {menuOpen && <div className="fixed inset-0 z-30 bg-foreground/40 lg:hidden" onClick={() => setMenuOpen(false)} />}
-    <aside className={`fixed inset-y-0 left-0 z-40 flex w-[248px] flex-col bg-sidebar text-sidebar-foreground lg:translate-x-0 ${sidebarCollapsed ? "lg:w-16" : "lg:w-[248px]"} ${menuOpen ? "translate-x-0" : "-translate-x-full"}`}>
-      <div className={`flex h-[75px] items-center gap-3 border-b border-sidebar-foreground/10 px-5 ${sidebarCollapsed ? "lg:justify-center lg:px-2" : ""}`}><span className={`font-display text-sm font-bold leading-tight text-sidebar-foreground ${sidebarCollapsed ? "lg:hidden" : ""}`}>SMS Campaign Manager</span>{sidebarCollapsed && <span className="hidden rounded bg-sidebar-foreground/10 px-2 py-1 text-xs font-bold text-sidebar-foreground lg:inline-flex" aria-hidden="true">SMS</span>}<Button variant="ghost" size="icon" className="ml-auto text-sidebar-foreground lg:hidden" onClick={() => setMenuOpen(false)} aria-label="Close navigation"><X /></Button></div>
+    <aside style={{ background: "linear-gradient(180deg, #004d33 0%, #003d29 100%)" }} className={`fixed inset-y-0 left-0 z-40 flex w-[248px] flex-col bg-sidebar text-sidebar-foreground lg:translate-x-0 ${sidebarCollapsed ? "lg:w-16" : "lg:w-[248px]"} ${menuOpen ? "translate-x-0" : "-translate-x-full"}`}>
+      <div className={`flex h-[75px] items-center gap-3 border-b border-sidebar-foreground/10 px-5 ${sidebarCollapsed ? "lg:justify-center lg:px-2" : ""}`}><img src="/safaricom-logo.png" alt="Safaricom" className={`h-auto w-24 shrink-0 ${sidebarCollapsed ? "lg:hidden" : ""}`} />{sidebarCollapsed && <span className="hidden rounded bg-sidebar-foreground/10 px-2 py-1 text-xs font-bold text-sidebar-foreground lg:inline-flex" aria-hidden="true">SMS</span>}<Button variant="ghost" size="icon" className="ml-auto text-sidebar-foreground lg:hidden" onClick={() => setMenuOpen(false)} aria-label="Close navigation"><X /></Button></div>
       <nav className="admin-scroll flex-1 overflow-y-auto px-3 py-5"><div className="space-y-0.5">{navItems.map(({ name, icon: Icon }) => <Button key={name} variant="ghost" onClick={() => go(name)} title={sidebarCollapsed ? name : undefined} aria-label={name} className={`h-9 w-full justify-start gap-3 rounded-md px-3 text-[13px] font-medium shadow-none hover:bg-sidebar-active hover:text-sidebar-foreground ${sidebarCollapsed ? "lg:justify-center lg:px-0" : ""} ${page === name ? "bg-sidebar-active text-sidebar-foreground" : "text-sidebar-muted"}`}><Icon className="size-[17px] shrink-0" strokeWidth={1.9} /><span className={sidebarCollapsed ? "lg:sr-only" : ""}>{name}</span>{name === "Campaigns" && <span className={`ml-auto rounded bg-sidebar-foreground/10 px-1.5 py-0.5 text-[10px] ${sidebarCollapsed ? "lg:hidden" : ""}`}>{campaigns.length}</span>}</Button>)}</div></nav>
       <div className="border-t border-sidebar-foreground/10 p-3"><div className={`flex h-12 items-center gap-3 px-2 text-sidebar-foreground ${sidebarCollapsed ? "lg:justify-center lg:px-0" : ""}`} aria-label={`${currentAdmin}, administrator`}><Avatar name={currentAdmin} tone="mint" /><span className={`min-w-0 text-left ${sidebarCollapsed ? "lg:hidden" : ""}`}><span className="block truncate text-xs font-semibold">{currentAdmin}</span><span className="block text-[11px] text-sidebar-muted">Administrator</span></span></div></div>
     </aside>
@@ -726,7 +795,9 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
               <option>All statuses</option><option>Active</option><option>Completed</option><option>Paused</option><option>Draft</option>
             </select>
           </div>
-          <CampaignTable rows={filteredCampaigns} onOpen={viewCampaign} />
+          {campaignsLoading ? <p role="status" className="rounded-md border border-border bg-card p-5 text-sm text-muted-foreground">Loading campaigns…</p>
+            : campaignsError ? <p role="alert" className="rounded-md border border-destructive/30 bg-card p-5 text-sm text-destructive">{campaignsError}</p>
+              : <CampaignTable rows={filteredCampaigns} onOpen={viewCampaign} />}
         </>}
 
         {page === "Campaigns" && selectedCampaign && <>
@@ -762,8 +833,8 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
         </>}
 
         {!["Overview", "Users", "Campaigns"].includes(page) && <><PageTitle title={page} subtitle={pageSubtitle(page)} action={["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses", "Email Config", "System Logs", "Kafka Monitor"].includes(page) ? undefined : <Button onClick={() => openResource(page)}><Plus /> Add configuration</Button>} />
-          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(page) && <BackendConfiguration page={page as BackendConfigPage} users={users} onNotice={flash} />}
-          {page === "TPS & N-Addresses" && <div className="grid gap-8"><section><h2 className="mb-4 font-display text-lg font-bold">TPS limits</h2><BackendConfiguration page="TPS" users={users} onNotice={flash} /></section><section><h2 className="mb-4 font-display text-lg font-bold">N-addresses</h2><BackendConfiguration page="N-Addresses" users={users} onNotice={flash} /></section></div>}
+          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(page) && (!configsLoaded ? <p role="status" className="rounded-md border border-border bg-card p-5 text-sm text-muted-foreground">Loading configuration…</p> : configurationLoadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-card p-5 text-sm text-destructive">{configurationLoadError}</p> : <BackendConfiguration page={page as BackendConfigPage} users={users} onNotice={flash} />)}
+          {page === "TPS & N-Addresses" && (!configsLoaded ? <p role="status" className="rounded-md border border-border bg-card p-5 text-sm text-muted-foreground">Loading configuration…</p> : configurationLoadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-card p-5 text-sm text-destructive">{configurationLoadError}</p> : <div className="grid gap-8"><section><h2 className="mb-4 font-display text-lg font-bold">TPS limits</h2><BackendConfiguration page="TPS" users={users} onNotice={flash} /></section><section><h2 className="mb-4 font-display text-lg font-bold">N-addresses</h2><BackendConfiguration page="N-Addresses" users={users} onNotice={flash} /></section></div>)}
           {page === "Email Config" && <AdminEmailSettings />}
           {page === "System Logs" && <><div className="mb-4 flex flex-wrap gap-2"><div className="relative min-w-[220px] flex-1 sm:max-w-[330px]"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search events..." className="bg-card pl-9" value={query} onChange={e => setQuery(e.target.value)} /></div><select aria-label="Filter log type" className="h-9 rounded-md border border-input bg-card px-3 text-xs" value={filter} onChange={e => setFilter(e.target.value)}><option>All statuses</option><option>Campaign</option><option>SMSC</option><option>System</option></select><select aria-label="Filter log user" className="h-9 rounded-md border border-input bg-card px-3 text-xs" onChange={e => setQuery(e.target.value)}><option value="">All users</option>{[...users.map(u => u.name), "Alex Morgan"].map(n => <option key={n}>{n}</option>)}</select><Input type="date" aria-label="Log date" className="w-[145px] bg-card text-xs" /></div><LogList query={query} category={filter} /></>}
           {page === "Kafka Monitor" && <><div className="mb-5 grid gap-3 sm:grid-cols-3">{[["Topics monitored", "2", Radio], ["Events this hour", "42,861", Zap], ["Consumer health", "Healthy", CheckCircle2]].map(([l,v,Icon]) => { const I = Icon as LucideIcon; return <div key={l as string} className="rounded-md border border-border bg-card p-5"><div className="flex justify-between text-xs text-muted-foreground">{l as string}<I className="size-4 text-primary" /></div><div className="mt-2 font-display text-2xl font-bold">{v as string}</div></div>; })}</div><div className="rounded-md border border-border bg-card"><div className="border-b border-border p-5 font-display text-sm font-bold">Consumer groups</div><div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left text-xs"><thead className="bg-surface text-muted-foreground"><tr>{["TOPIC", "CONSUMER GROUP", "CURRENT LAG", "EVENTS / HOUR", "STATUS"].map(h => <th key={h} className="px-5 py-3">{h}</th>)}</tr></thead><tbody>{[["sent-response", "status-updater", "12", "27,480"], ["delivery-report", "dlr-processor", "4", "15,381"]].map(([t,g,l,e]) => <tr key={t} className="border-t border-border"><td className="px-5 py-4 font-mono font-semibold">{t}</td><td className="px-5 py-4">{g}</td><td className="px-5 py-4">{l}</td><td className="px-5 py-4">{e}</td><td className="px-5 py-4"><Status value="Connected" /></td></tr>)}</tbody></table></div></div><div className="mt-5 rounded-md border border-border bg-card p-5"><SectionHeading title="Events per hour" detail="Last 12 hours across both topics" /><div className="flex h-44 items-end gap-2">{[31,28,35,40,38,44,52,47,41,45,49,43].map((v, i) => <div key={i} className="flex flex-1 flex-col items-center gap-2"><div className="w-full rounded-t bg-primary/80" style={{ height: `${v * 2.6}px` }} title={`${v}k events`} /><span className="text-[10px] text-muted-foreground">{String((i + 23) % 24).padStart(2, "0")}h</span></div>)}</div></div></>}

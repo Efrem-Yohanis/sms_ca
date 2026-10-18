@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download } from "lucide-react";
+import { Download, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,6 +51,7 @@ export function RunHistory({
   const [levels, setLevels] = useState<string[]>([...LEVELS]);
   const [now, setNow] = useState(Date.now());
   const [loadingLogs, setLoadingLogs] = useState(false);
+  const [logRefreshKey, setLogRefreshKey] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -65,24 +66,42 @@ export function RunHistory({
   useEffect(() => {
     if (!run || run.logs.length > 0) return;
     let cancelled = false;
-    setLoadingLogs(true);
-    schedulerApi
-      .getLogs(run.scheduleId, run.id)
-      .then((logs) => {
-        if (!cancelled) actions.updateRunLogs(run.scheduleId, run.id, logs);
-      })
-      .catch((error: unknown) => {
+    let attempts = 0;
+    const maxAttempts = 6;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const fetchLogs = async () => {
+      setLoadingLogs(true);
+      try {
+        const logs = await schedulerApi.getLogs(run.scheduleId, run.id);
+        if (cancelled) return;
+        if (logs.length > 0) {
+          actions.updateRunLogs(run.scheduleId, run.id, logs);
+          return;
+        }
+        attempts += 1;
+        if (attempts < maxAttempts) timer = setTimeout(fetchLogs, 5000);
+      } catch (error: unknown) {
         if (cancelled) return;
         console.error("Unable to load run logs", error);
         toast.error(error instanceof Error ? error.message : "Unable to load run logs");
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoadingLogs(false);
-      });
+      }
+    };
+
+    void fetchLogs();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [run?.id]);
+  }, [run?.id, run?.scheduleId, run?.logs.length, logRefreshKey]);
+
+  const refreshLogs = () => {
+    if (!run) return;
+    actions.updateRunLogs(run.scheduleId, run.id, []);
+    setLogRefreshKey((key) => key + 1);
+  };
 
   const selectRun = (runId: string) => {
     setSelected(runId);
@@ -189,6 +208,17 @@ export function RunHistory({
             {run && <p className="mt-1 font-mono text-xs text-muted-foreground">{run.id}</p>}
           </div>
           <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs"
+              onClick={refreshLogs}
+              disabled={!run || loadingLogs}
+              aria-label="Refresh run logs"
+            >
+              <RefreshCw className={cn("mr-1 h-3.5 w-3.5", loadingLogs && "animate-spin")} />
+              Refresh
+            </Button>
             {LEVELS.map((l) => (
               <Button
                 key={l}

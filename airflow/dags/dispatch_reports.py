@@ -12,10 +12,11 @@ from airflow.operators.python import PythonOperator
 
 log = logging.getLogger(__name__)
 DJANGO_API = os.getenv('AIRFLOW_DJANGO_API', 'http://camaping-manager-backend-app:8000/api/v1').rstrip('/')
+DJANGO_API_HEADERS = {'X-Internal-Service-Token': os.getenv('INTERNAL_SERVICE_API_TOKEN', '')}
 
 
 def dispatch(**context):
-    response = requests.get(f'{DJANGO_API}/report-subscriptions/due-now/', timeout=30)
+    response = requests.get(f'{DJANGO_API}/report-subscriptions/due-now/', headers=DJANGO_API_HEADERS, timeout=30)
     response.raise_for_status()
     body = response.json()
     if body.get('success') is False:
@@ -30,6 +31,7 @@ def dispatch(**context):
             response = requests.post(
                 f'{DJANGO_API}/report-subscriptions/{subscription_id}/send-now/',
                 json={'scheduled': True},
+                headers=DJANGO_API_HEADERS,
                 timeout=180,
             )
             result = response.json()

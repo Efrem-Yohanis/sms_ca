@@ -93,6 +93,7 @@ Environment variables read by the application:
 | `KAFKA_SENT_TOPIC` | `sent-response` | Topic for accepted sends and terminal send failures. |
 | `SMSC_SENDER_SCHEDULER_INTERVAL` | `1` second | Delivery worker tick interval. |
 | `SMSC_SENDER_WORKERS` | `100` | Maximum concurrent outbound SMSC HTTP requests. |
+| `SMSC_SENDER_DB_POOL_MAX_SIZE` | `10` | Maximum PostgreSQL connections reserved by the sender. Keep this below the database's connection limit. |
 | `LOCK_TIMEOUT_SECONDS` | `300` | Duration for which claimed messages are locked before they may be reclaimed. |
 | `SMSC_SENDER_RUN_WORKER` | `true` | Start the continuous background worker automatically at application startup. |
 | `FIELD_ENCRYPTION_KEY` | Empty | Fernet key used to decrypt encrypted SMSC credentials read from the campaign database. |

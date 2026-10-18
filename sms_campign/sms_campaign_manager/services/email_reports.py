@@ -169,6 +169,9 @@ def render_report(report_data, report_format):
         buffer = io.BytesIO()
         document = SimpleDocTemplate(buffer, pagesize=letter)
         styles = getSampleStyleSheet()
+        styles['Title'].textColor = colors.HexColor('#087f5b')
+        styles['Heading2'].textColor = colors.HexColor('#173b32')
+        styles['Normal'].textColor = colors.HexColor('#50665e')
         flow = [Paragraph(escape(title), styles['Title']), Paragraph(
             f"Status: {escape(str(report_data.get('campaign_status', 'Unknown')))}",
             styles['Normal'],
@@ -177,8 +180,9 @@ def render_report(report_data, report_format):
             flow.append(Paragraph(escape(name), styles['Heading2']))
             table = Table([['Metric', 'Value'], *[[label, str(value)] for label, value in rows]])
             table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e8eef2')),
-                ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#aab4bc')),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e2f3e9')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#173b32')),
+                ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#dce7e1')),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
             flow.extend([table, Spacer(1, 12)])
@@ -366,7 +370,7 @@ def render_subscription_report(report_data, report_format):
         campaign_rows = []
         for row in rows:
             cells = ''.join(
-                f'<td style="padding:8px;border-bottom:1px solid #e1e5ea">{escape(str(row[key]))}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #dce7e1">{escape(str(row[key]))}</td>'
                 for key, _ in REPORT_COLUMNS
             )
             campaign_rows.append(f'<tr>{cells}</tr>')

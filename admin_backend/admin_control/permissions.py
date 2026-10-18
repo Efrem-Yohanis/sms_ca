@@ -26,3 +26,17 @@ class IsActivePlatformUser(BasePermission):
             return not user.admin_profile.is_locked
         except UserProfile.DoesNotExist:
             return False
+
+
+class IsCampaignManager(BasePermission):
+    message = "Only Campaign Manager accounts can access this resource."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated or not user.is_active or user.is_superuser:
+            return False
+        try:
+            profile = user.admin_profile
+        except UserProfile.DoesNotExist:
+            return False
+        return profile.role == UserProfile.Role.CAMPAIGN_MANAGER and not profile.is_locked

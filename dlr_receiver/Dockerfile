@@ -22,7 +22,7 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8003
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5m --retries=3 \
     CMD curl -f http://localhost:8003/health || exit 1
 
 CMD ["uvicorn", "dlr_receiver.app:app", "--host", "0.0.0.0", "--port", "8003", "--workers", "4"]

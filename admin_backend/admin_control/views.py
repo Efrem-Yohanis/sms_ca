@@ -7,7 +7,8 @@ from urllib.parse import urlencode
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, IntegerField, OuterRef, Q, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -15,6 +16,7 @@ from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
 from django.utils import timezone
 from rest_framework import generics, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -23,6 +25,11 @@ from .models import (
     AdminAuditLog,
     AdminEmailConfig,
     Campaign,
+    CampaignAudienceRow,
+    CampaignFailedSentRow,
+    CampaignSchedule,
+    CampaignSuccessDeliveryRow,
+    CampaignSuccessSentRow,
     Channel,
     ChannelSMSCBinding,
     GlobalTPSConfig,
@@ -35,7 +42,7 @@ from .models import (
     SenderSMSCBinding,
     UserProfile,
 )
-from .permissions import IsActivePlatformUser, IsPlatformAdmin
+from .permissions import IsCampaignManager, IsPlatformAdmin
 from .serializers import (
     AdminAuditLogSerializer,
     AdminEmailConfigSerializer,
@@ -52,6 +59,7 @@ from .serializers import (
     SenderSMSCBindingSerializer,
     UserCampaignSerializer,
     UserProfileSerializer,
+    AdminCampaignListSerializer,
 )
 from .email_service import AdminEmailNotConfigured, send_admin_email
 
@@ -315,6 +323,58 @@ class UserCampaignListView(generics.ListAPIView):
             context={**self.get_serializer_context(), "channel_names_by_id": channel_names_by_id},
         )
         return Response(serializer.data)
+
+
+class AdminCampaignListPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class AdminCampaignListView(generics.ListAPIView):
+    """Platform-wide campaign read model, restricted to platform admins."""
+    permission_classes = [IsPlatformAdmin]
+    serializer_class = AdminCampaignListSerializer
+    pagination_class = AdminCampaignListPagination
+
+    @staticmethod
+    def _count_by_campaign(model):
+        return (
+            model.objects.filter(campaign_id=OuterRef("pk"))
+            .order_by()
+            .values("campaign_id")
+            .annotate(total=Count("pk"))
+            .values("total")[:1]
+        )
+
+    def get_queryset(self):
+        schedule_type = CampaignSchedule.objects.filter(campaign_id=OuterRef("pk")).values("schedule_type")[:1]
+        queryset = (
+            Campaign.objects.filter(is_deleted=False)
+            .select_related("created_by")
+            .annotate(
+                total_audience=Coalesce(Subquery(self._count_by_campaign(CampaignAudienceRow)), Value(0), output_field=IntegerField()),
+                total_sent=Coalesce(
+                    Subquery(self._count_by_campaign(CampaignSuccessSentRow)), Value(0), output_field=IntegerField()
+                ) + Coalesce(Subquery(self._count_by_campaign(CampaignFailedSentRow)), Value(0), output_field=IntegerField()),
+                total_delivered=Coalesce(Subquery(self._count_by_campaign(CampaignSuccessDeliveryRow)), Value(0), output_field=IntegerField()),
+                schedule_type_value=Subquery(schedule_type),
+            )
+            .order_by("-created_at", "-id")
+        )
+        status_filter = self.request.query_params.get("status")
+        if status_filter and status_filter.lower() != "all":
+            queryset = queryset.filter(status=status_filter.lower())
+        search = self.request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search)
+                | Q(created_by__username__icontains=search)
+                | Q(created_by__first_name__icontains=search)
+                | Q(created_by__last_name__icontains=search)
+                | Q(created_by__email__icontains=search)
+            )
+        return queryset
 
 
 class UserPasswordResetView(APIView):
@@ -812,7 +872,7 @@ class ChannelSMSCBindingDetailView(ConfigCRUDMixin, generics.RetrieveUpdateDestr
 
 
 class AssignedConfigurationsView(APIView):
-    permission_classes = [IsActivePlatformUser]
+    permission_classes = [IsCampaignManager]
 
     def get(self, request):
         try:

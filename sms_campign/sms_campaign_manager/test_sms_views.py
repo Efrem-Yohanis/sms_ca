@@ -53,13 +53,15 @@ def _config_missing_response():
     }, status=status.HTTP_502_BAD_GATEWAY)
 
 
-def _validate_submission(data):
+def _validate_submission(data, user):
     serializer = CreateTestMessageSerializer(data=data)
     if not serializer.is_valid():
         return None, Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
     values = serializer.validated_data
-    if not SenderID.objects.filter(sender_id=values['sender_id'], is_active=True).exists():
+    if not SenderID.objects.filter(
+        sender_id=values['sender_id'], is_active=True, created_by=user,
+    ).exists():
         error = f"'{values['sender_id']}' is not a registered, active Sender ID."
         return None, Response({'success': False, 'errors': {'sender_id': [error]}}, status=status.HTTP_400_BAD_REQUEST)
     if not Channel.objects.filter(code=values['channel_code'], is_active=True).exists():
@@ -71,7 +73,7 @@ def _validate_submission(data):
 class TestMessageListCreateView(APIView):
     @extend_schema(tags=['Test SMS'], summary='List recent standalone SMS tests')
     def get(self, request):
-        queryset = TestMessage.objects.all()
+        queryset = TestMessage.objects.filter(created_by=request.user)
         search = request.query_params.get('search', '').strip()
         if search:
             queryset = queryset.filter(Q(recipient__icontains=search) | Q(message_content__icontains=search))
@@ -105,7 +107,7 @@ class TestMessageListCreateView(APIView):
 
     @extend_schema(tags=['Test SMS'], summary='Send and record a test SMS', request=CreateTestMessageSerializer, responses={201: TestMessageSerializer, 400: OpenApiResponse(description='Validation error.'), 502: OpenApiResponse(description='No active SMSC configuration.')})
     def post(self, request):
-        values, error_response = _validate_submission(request.data)
+        values, error_response = _validate_submission(request.data, request.user)
         if error_response:
             return error_response
         row = _store_test_message(request, values)

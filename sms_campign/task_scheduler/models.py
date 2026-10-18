@@ -62,7 +62,7 @@ class Schedule(models.Model):
     interval_unit = models.CharField(
         max_length=12, choices=IntervalUnit.choices, default=IntervalUnit.MINUTES
     )
-    timezone = models.CharField(max_length=64, default="Africa/Nairobi")
+    timezone = models.CharField(max_length=64, default="Africa/Addis_Ababa")
     days_of_week = models.JSONField(default=list, blank=True)
     window_start = models.TimeField(null=True, blank=True)
     window_end = models.TimeField(null=True, blank=True)

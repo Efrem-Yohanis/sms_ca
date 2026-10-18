@@ -19,9 +19,9 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import status
-from rest_framework.generics import CreateAPIView, ListCreateAPIView, RetrieveUpdateDestroyAPIView, UpdateAPIView
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView, UpdateAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -60,6 +60,11 @@ from .models import (
 	SMSCConfig,
 )
 from .pagination import StandardPagination
+from .permissions import (
+	IsCampaignManager,
+	IsCampaignManagerOrInternalService,
+	has_valid_internal_service_token,
+)
 from .platform_accounts import clear_password_change_requirement, get_platform_profile
 from .serializers import (
 	CampaignCreateUpdateSerializer,
@@ -99,10 +104,8 @@ from .serializers import (
 	ReportSubscriptionSerializer,
 	ReportDeliveryLogSerializer,
 	CampaignProgressReportSerializer,
-	 UserRegistrationSerializer,
 	 CampaignTokenObtainPairSerializer,
 	UserSerializer,
-	UserAdminUpdateSerializer,
 	PasswordChangeSerializer,
 	LanguageSerializer,
 	MessageContentCreateUpdateSerializer,
@@ -487,13 +490,8 @@ def _campaign_record_count(model, **filters):
 	)
 
 
-class UserRegistrationView(CreateAPIView):
-	serializer_class = UserRegistrationSerializer
-	permission_classes = [AllowAny]
-
-
 class CurrentUserView(APIView):
-	permission_classes = [IsAuthenticated]
+	permission_classes = [IsCampaignManager]
 
 	@extend_schema(tags=['User Management'], summary='Get current user', responses={200: UserSerializer})
 	def get(self, request):
@@ -508,7 +506,7 @@ class CurrentUserView(APIView):
 
 
 class PasswordChangeView(APIView):
-	permission_classes = [IsAuthenticated]
+	permission_classes = [IsCampaignManager]
 
 	@extend_schema(tags=['User Management'], summary='Change current user password', request=PasswordChangeSerializer, responses={200: OpenApiResponse(description='Password changed.')})
 	def post(self, request):
@@ -521,54 +519,18 @@ class PasswordChangeView(APIView):
 		return Response({'success': True, 'message': 'Password changed successfully.'})
 
 
-class UserAdminListCreateView(ListCreateAPIView):
-	queryset = get_user_model().objects.all().order_by('username')
-	permission_classes = [IsAdminUser]
-	serializer_class = UserSerializer
-
-	@extend_schema(tags=['User Management'], summary='List users', responses={200: UserSerializer(many=True)})
-	def get(self, request, *args, **kwargs):
-		return super().get(request, *args, **kwargs)
-
-	@extend_schema(tags=['User Management'], summary='Create user', request=UserRegistrationSerializer, responses={201: UserSerializer})
-	def post(self, request, *args, **kwargs):
-		serializer = UserRegistrationSerializer(data=request.data)
-		serializer.is_valid(raise_exception=True)
-		return Response(UserSerializer(serializer.save()).data, status=status.HTTP_201_CREATED)
-
-
-class UserAdminDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = get_user_model().objects.all()
-	permission_classes = [IsAdminUser]
-	serializer_class = UserAdminUpdateSerializer
-
-	@extend_schema(tags=['User Management'], summary='Get user', responses={200: UserSerializer})
-	def get(self, request, *args, **kwargs):
-		return Response(UserSerializer(self.get_object()).data)
-
-	@extend_schema(tags=['User Management'], summary='Update user', request=UserAdminUpdateSerializer, responses={200: UserSerializer})
-	def put(self, request, *args, **kwargs):
-		return super().put(request, *args, **kwargs)
-
-	@extend_schema(tags=['User Management'], summary='Patch user', request=UserAdminUpdateSerializer, responses={200: UserSerializer})
-	def patch(self, request, *args, **kwargs):
-		return super().patch(request, *args, **kwargs)
-
-	@extend_schema(tags=['User Management'], summary='Delete user', responses={204: OpenApiResponse(description='Deleted.')})
-	def delete(self, request, *args, **kwargs):
-		return super().delete(request, *args, **kwargs)
-
-
 class SenderIDListCreateView(ListCreateAPIView):
-	queryset = SenderID.objects.all()
 	serializer_class = SenderIDSerializer
 
 	def get_queryset(self):
-		queryset = super().get_queryset()
+		queryset = SenderID.objects.filter(created_by=self.request.user)
 		active = self.request.query_params.get('is_active')
 		if active is not None and active.lower() in {'true', 'false'}:
 			queryset = queryset.filter(is_active=(active.lower() == 'true'))
 		return queryset
+
+	def perform_create(self, serializer):
+		serializer.save(created_by=self.request.user)
 
 	@extend_schema(tags=['Sender IDs'], summary='List sender IDs', responses={200: SenderIDSerializer(many=True)})
 	def get(self, request, *args, **kwargs):
@@ -580,8 +542,10 @@ class SenderIDListCreateView(ListCreateAPIView):
 
 
 class SenderIDDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = SenderID.objects.all()
 	serializer_class = SenderIDSerializer
+
+	def get_queryset(self):
+		return SenderID.objects.filter(created_by=self.request.user)
 
 	@extend_schema(tags=['Sender IDs'], summary='Get sender ID', responses={200: SenderIDSerializer})
 	def get(self, request, *args, **kwargs):
@@ -601,8 +565,10 @@ class SenderIDDetailView(RetrieveUpdateDestroyAPIView):
 
 
 class GlobalTPSConfigListCreateView(ListCreateAPIView):
-	queryset = GlobalTPSConfig.objects.all()
 	serializer_class = GlobalTPSConfigSerializer
+
+	def get_queryset(self):
+		return GlobalTPSConfig.objects.filter(created_by=self.request.user)
 
 	def perform_create(self, serializer):
 		user = self.request.user
@@ -618,14 +584,22 @@ class GlobalTPSConfigListCreateView(ListCreateAPIView):
 
 
 class GlobalTPSConfigDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = GlobalTPSConfig.objects.all()
 	serializer_class = GlobalTPSConfigSerializer
+
+	def get_queryset(self):
+		return GlobalTPSConfig.objects.filter(created_by=self.request.user)
 
 
 class GlobalTPSConfigActiveView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Global TPS Config'], summary='Get active global TPS configuration')
 	def get(self, request):
-		config = GlobalTPSConfig.get_active()
+		if has_valid_internal_service_token(request):
+			config = GlobalTPSConfig.get_active()
+		else:
+			config = GlobalTPSConfig.objects.filter(
+				is_active=True, created_by=request.user,
+			).order_by('-is_default', '-updated_at').first()
 		if config is None:
 			return Response({'success': False, 'detail': 'No active global TPS config.'}, status=status.HTTP_404_NOT_FOUND)
 		return Response({'success': True, 'data': {
@@ -637,8 +611,10 @@ class GlobalTPSConfigActiveView(APIView):
 
 
 class NAddressesConfigListCreateView(ListCreateAPIView):
-	queryset = NAddressesConfig.objects.all()
 	serializer_class = NAddressesConfigSerializer
+
+	def get_queryset(self):
+		return NAddressesConfig.objects.filter(created_by=self.request.user)
 
 	def perform_create(self, serializer):
 		user = self.request.user
@@ -654,14 +630,22 @@ class NAddressesConfigListCreateView(ListCreateAPIView):
 
 
 class NAddressesConfigDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = NAddressesConfig.objects.all()
 	serializer_class = NAddressesConfigSerializer
+
+	def get_queryset(self):
+		return NAddressesConfig.objects.filter(created_by=self.request.user)
 
 
 class NAddressesConfigActiveView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['N-Addresses Config'], summary='Get active N-addresses configuration')
 	def get(self, request):
-		config = NAddressesConfig.get_active()
+		if has_valid_internal_service_token(request):
+			config = NAddressesConfig.get_active()
+		else:
+			config = NAddressesConfig.objects.filter(
+				is_active=True, created_by=request.user,
+			).order_by('-is_default', '-updated_at').first()
 		if config is None:
 			return Response({'success': False, 'detail': 'No active N-addresses config.'}, status=status.HTTP_404_NOT_FOUND)
 		return Response({'success': True, 'data': {
@@ -673,8 +657,13 @@ class NAddressesConfigActiveView(APIView):
 
 
 class SMSCConfigListCreateView(ListCreateAPIView):
-	queryset = SMSCConfig.objects.all()
 	serializer_class = SMSCConfigSerializer
+
+	def get_queryset(self):
+		return SMSCConfig.objects.filter(created_by=self.request.user)
+
+	def perform_create(self, serializer):
+		serializer.save(created_by=self.request.user)
 
 	@extend_schema(tags=['SMSC Config'], summary='List SMSC configurations', responses={200: SMSCConfigSerializer(many=True)})
 	def get(self, request, *args, **kwargs):
@@ -686,8 +675,10 @@ class SMSCConfigListCreateView(ListCreateAPIView):
 
 
 class SMSCConfigDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = SMSCConfig.objects.all()
 	serializer_class = SMSCConfigSerializer
+
+	def get_queryset(self):
+		return SMSCConfig.objects.filter(created_by=self.request.user)
 
 	@extend_schema(tags=['SMSC Config'], summary='Get SMSC configuration', responses={200: SMSCConfigSerializer})
 	def get(self, request, *args, **kwargs):
@@ -876,7 +867,7 @@ class CampaignEmailReportView(APIView):
 		if not request.user.is_superuser:
 			campaigns = campaigns.filter(created_by=request.user)
 		campaign = get_object_or_404(campaigns, id=campaign_id)
-		serializer = CampaignEmailReportCreateSerializer(data=request.data)
+		serializer = CampaignEmailReportCreateSerializer(data=request.data, context={'request': request})
 		serializer.is_valid(raise_exception=True)
 		payload = serializer.validated_data
 		recipients = payload.get('recipients') or campaign.owner_emails or []
@@ -953,7 +944,7 @@ class ReportSubscriptionListCreateView(APIView):
 
 	@extend_schema(tags=['Email Reports'], summary='Create a report subscription', request=ReportSubscriptionSerializer)
 	def post(self, request):
-		serializer = ReportSubscriptionSerializer(data=request.data)
+		serializer = ReportSubscriptionSerializer(data=request.data, context={'request': request})
 		serializer.is_valid(raise_exception=True)
 		user = getattr(request, 'user', None)
 		instance = serializer.save(created_by=user if getattr(user, 'is_authenticated', False) else None)
@@ -985,6 +976,7 @@ class ReportSubscriptionDetailView(RetrieveUpdateDestroyAPIView):
 
 
 class ReportSubscriptionDueNowView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Email Reports'], summary='List due scheduled report subscriptions')
 	def get(self, request):
 		now = timezone.now()
@@ -994,6 +986,8 @@ class ReportSubscriptionDueNowView(APIView):
 			next_run_at__isnull=False,
 			next_run_at__lte=now,
 		).order_by('next_run_at', 'id')
+		if request.user.is_authenticated:
+			subscriptions = subscriptions.filter(created_by=request.user)
 		data = [{
 			'id': subscription.id,
 			'name': subscription.name,
@@ -1004,6 +998,7 @@ class ReportSubscriptionDueNowView(APIView):
 
 
 class ReportSubscriptionSendNowView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Email Reports'], summary='Render and send a report subscription now')
 	def post(self, request, pk):
 		with transaction.atomic():
@@ -1532,6 +1527,7 @@ class DatabaseAudienceApiView(APIView):
 
 
 class AudienceBuildView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Audience Management'], summary='Start asynchronous audience build', responses={202: OpenApiResponse(description='Audience build started.')})
 	def post(self, request, pk):
 		config = get_object_or_404(AudienceConfig, id=pk)
@@ -1602,6 +1598,7 @@ class AudienceBuildView(APIView):
 
 
 class AudienceConfigProgressView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Audience Management'], summary='Get audience build progress', responses={200: OpenApiResponse(description='Progress snapshot.')})
 	def get(self, request, pk):
 		config = get_object_or_404(AudienceConfig, id=pk)
@@ -1630,6 +1627,7 @@ class AudienceConfigProgressView(APIView):
 
 
 class AudienceBuildJobView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Audience Management'], summary='Get audience build job status', responses={200: OpenApiResponse(description='Audience build job status.')})
 	def get(self, request, pk):
 		job = get_object_or_404(AudienceBuildJob, pk=pk)
@@ -1671,7 +1669,7 @@ class AudienceConfigCreateView(APIView):
 				campaign=campaign,
 				default_language_id=default_language_id,
 			)
-		serializer = AudienceConfigSerializer(config, data=request.data, partial=True)
+		serializer = AudienceConfigSerializer(config, data=request.data, partial=True, context={'request': request})
 		serializer.is_valid(raise_exception=True)
 		serializer.save()
 		return Response({'success': True, 'data': AudienceConfigSerializer(config).data}, status=status.HTTP_201_CREATED)
@@ -1684,7 +1682,7 @@ class AudienceConfigPreviewView(APIView):
 		if campaign.status != 'draft':
 			return Response({'detail': 'Only draft campaigns can have their audience changed.'}, status=status.HTTP_400_BAD_REQUEST)
 		config, _ = AudienceConfig.objects.get_or_create(campaign=campaign)
-		serializer = AudienceConfigSerializer(config, data=request.data, partial=True)
+		serializer = AudienceConfigSerializer(config, data=request.data, partial=True, context={'request': request})
 		serializer.is_valid(raise_exception=True)
 		serializer.save()
 		rows = []
@@ -1761,6 +1759,7 @@ class CampaignValidateView(APIView):
 
 
 class CampaignActivateView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Activate campaign', request=None, responses={200: OpenApiResponse(description='Activation result.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
@@ -1785,11 +1784,13 @@ class CampaignActivateView(APIView):
 
 
 class CampaignDeactivateView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	def post(self, request, campaign_id):
 		return _campaign_action_response(campaign_id, 'deactivate_campaign')
 
 
 class CampaignStartView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Start an active campaign', request=None, responses={200: OpenApiResponse(description='Start result.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
@@ -1801,6 +1802,7 @@ class CampaignStartView(APIView):
 
 
 class CampaignSendNowView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Start the SMS sender immediately', request=None, responses={202: OpenApiResponse(description='Sender started.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
@@ -1886,31 +1888,38 @@ class CampaignSendNowView(APIView):
 
 
 class CampaignPauseView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Pause campaign', request=None, responses={200: OpenApiResponse(description='Pause result.')})
 	def post(self, request, campaign_id):
-		return _campaign_action_response(campaign_id, 'pause_campaign')
+		return _campaign_action_response(request, campaign_id, 'pause_campaign')
 
 
 class CampaignResumeView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Resume campaign', request=None, responses={200: OpenApiResponse(description='Resume result.')})
 	def post(self, request, campaign_id):
-		return _campaign_action_response(campaign_id, 'resume_campaign')
+		return _campaign_action_response(request, campaign_id, 'resume_campaign')
 
 
 class CampaignCompleteView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Complete campaign', request=None, responses={200: OpenApiResponse(description='Completion result.')})
 	def post(self, request, campaign_id):
-		return _campaign_action_response(campaign_id, 'complete_campaign')
+		return _campaign_action_response(request, campaign_id, 'complete_campaign')
 
 
 class CampaignCancelView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Cancel campaign', request=None, responses={200: OpenApiResponse(description='Cancellation result.')})
 	def post(self, request, campaign_id):
-		return _campaign_action_response(campaign_id, 'cancel_campaign')
+		return _campaign_action_response(request, campaign_id, 'cancel_campaign')
 
 
-def _campaign_action_response(campaign_id, action):
-	campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+def _campaign_action_response(request, campaign_id, action):
+	campaigns = Campaign.objects.filter(is_deleted=False)
+	if request.user.is_authenticated:
+		campaigns = campaigns.filter(created_by=request.user)
+	campaign = get_object_or_404(campaigns, id=campaign_id)
 	result = getattr(CampaignActionsService(campaign), action)()
 	return Response(result, status=status.HTTP_200_OK if result['success'] else status.HTTP_400_BAD_REQUEST)
 
@@ -2253,11 +2262,10 @@ class CustomerProfilePreviewView(APIView):
 	post=extend_schema(tags=['Channel Manager'], summary='Create a channel', request=ChannelSerializer, responses={201: ChannelSerializer}),
 )
 class ChannelListCreateView(ListCreateAPIView):
-	queryset = Channel.objects.all()
 	serializer_class = ChannelSerializer
 
 	def get_queryset(self):
-		queryset = super().get_queryset()
+		queryset = self.request.user.admin_profile.channels.all()
 		active = self.request.query_params.get('is_active')
 		if active is not None and active.lower() in {'true', 'false'}:
 			queryset = queryset.filter(is_active=(active.lower() == 'true'))
@@ -2271,8 +2279,10 @@ class ChannelListCreateView(ListCreateAPIView):
 	delete=extend_schema(tags=['Channel Manager'], summary='Delete a channel', responses={204: OpenApiResponse(description='Channel deleted.')}),
 )
 class ChannelDetailView(RetrieveUpdateDestroyAPIView):
-	queryset = Channel.objects.all()
 	serializer_class = ChannelSerializer
+
+	def get_queryset(self):
+		return self.request.user.admin_profile.channels.all()
 
 	def destroy(self, request, *args, **kwargs):
 		channel = self.get_object()
@@ -2309,7 +2319,7 @@ class ChannelDetailView(RetrieveUpdateDestroyAPIView):
 	),
 )
 class DashboardView(APIView):
-	permission_classes = [IsAuthenticated]
+	permission_classes = [IsCampaignManager]
 
 	@extend_schema(
 		tags=['Campaigns Manager'],
@@ -3200,6 +3210,7 @@ def _scheduler_round_number(schedule, campaign, audience_config, should_run, loc
 
 
 class ScheduleDueNowView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Schedule Management'], summary='List campaign schedules due now')
 	def get(self, request):
 		rows = []
@@ -3377,6 +3388,7 @@ class ScheduleResetView(APIView):
 
 
 class CampaignBuildMessagesView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Messages'], summary='Build MessageObject rows for a campaign', responses={201: OpenApiResponse(description='Build result.')})
 	def post(self, request, pk):
 		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)
@@ -3404,6 +3416,7 @@ class CampaignBuildMessagesView(APIView):
 
 
 class CampaignMessageBuildProgressView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Messages'], summary='Get latest message-object build progress', responses={200: OpenApiResponse(description='Message build progress.')})
 	def get(self, request, pk):
 		campaign = get_object_or_404(Campaign, pk=pk, is_deleted=False)

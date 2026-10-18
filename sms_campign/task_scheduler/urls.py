@@ -11,6 +11,7 @@ urlpatterns = [
 
     # Collections
     path("schedules/", views.schedules, name="schedules"),
+    path("connections/", views.connections, name="connections"),
     path("runs/", views.all_runs, name="all-runs"),
 
     # Run-related routes must be registered BEFORE the generic detail route,
@@ -34,6 +35,11 @@ urlpatterns = [
         "schedules/<str:schedule_id>/pause/",
         views.pause_schedule,
         name="schedule-pause",
+    ),
+    path(
+        "schedules/<str:schedule_id>/notifications/",
+        views.schedule_notification_callback,
+        name="schedule-notification-callback",
     ),
     path(
         "schedules/<str:schedule_id>/",

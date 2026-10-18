@@ -1,7 +1,7 @@
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { Check, ChevronDown, ChevronUp, Copy, Pencil, Play } from "lucide-react";
 import { toast } from "sonner";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { RunHistory } from "@/components/task-scheduler/run-history";
@@ -30,6 +30,24 @@ export default function TaskScheduleDetail() {
   const [codeExpanded, setCodeExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void actions.refreshSchedule(id).catch((error) => {
+        if (active) console.error("Unable to refresh task schedule", error);
+      });
+    };
+
+    refresh();
+    const needsSync = s?.status === "Pending" || Boolean(s?.airflowSyncError);
+    const timer = needsSync ? window.setInterval(refresh, 15_000) : undefined;
+    window.addEventListener("focus", refresh);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [id, s?.status, s?.airflowSyncError]);
   if (!s && !loaded) return <div className="py-20 text-center text-muted-foreground">Loading task schedule…</div>;
   if (!s) return <NotFound />;
   return (

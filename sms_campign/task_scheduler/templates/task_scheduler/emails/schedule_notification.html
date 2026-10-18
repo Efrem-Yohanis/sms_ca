@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ event_label }} | Task Scheduler</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f1f5f3;font-family:Arial,Helvetica,sans-serif;color:#173b32;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f1f5f3;">
+      <tr>
+        <td align="center" style="padding:32px 16px;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #dce7e1;">
+            <tr>
+              <td style="padding:25px 32px 23px;background-color:#087f5b;border-bottom:4px solid #43b649;">
+                <div style="font-size:19px;font-weight:bold;letter-spacing:1.2px;color:#ffffff;">SAFARICOM</div>
+                <div style="margin-top:5px;font-size:12px;letter-spacing:0.5px;color:#d9f3e3;">SMS CAMPAIGN PLATFORM</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:34px 32px 32px;">
+                <p style="margin:0 0 10px;color:#16834a;font-size:11px;font-weight:bold;letter-spacing:1.3px;text-transform:uppercase;">Task Scheduler</p>
+                <h1 style="margin:0 0 14px;color:#173b32;font-size:25px;line-height:1.25;">{{ event_label }}</h1>
+                <p style="margin:0 0 22px;color:#50665e;font-size:15px;line-height:1.7;">{{ message }}</p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;background-color:#f5f9f6;border:1px solid #dce9df;">
+                  <tr>
+                    <td style="padding:19px 20px 17px;">
+                      <p style="margin:0 0 5px;color:#70827b;font-size:10px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;">Task details</p>
+                      <p style="margin:13px 0 4px;color:#70827b;font-size:11px;">TASK</p>
+                      <p style="margin:0;color:#173b32;font-size:15px;font-weight:bold;line-height:1.5;word-break:break-word;">{{ schedule.name }}</p>
+                      <p style="margin:14px 0 4px;color:#70827b;font-size:11px;">SCHEDULE</p>
+                      <p style="margin:0;color:#173b32;font-size:14px;line-height:1.5;">{{ schedule.schedule_type }}{% if schedule.schedule_type == "Cron" %}: {{ schedule.effective_cron }}{% elif schedule.schedule_type == "Interval" %}: every {{ schedule.interval_value }} {{ schedule.interval_unit }}{% endif %}</p>
+                      {% if run_id %}
+                        <p style="margin:14px 0 4px;color:#70827b;font-size:11px;">RUN ID</p>
+                        <p style="margin:0;color:#173b32;font-family:Consolas,Monaco,monospace;font-size:12px;line-height:1.5;word-break:break-word;">{{ run_id }}</p>
+                      {% endif %}
+                      <p style="margin:14px 0 4px;color:#70827b;font-size:11px;">TIME</p>
+                      <p style="margin:0;color:#173b32;font-size:14px;line-height:1.5;">{{ sent_at|date:"Y-m-d H:i T" }}</p>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:0;color:#70827b;font-size:11px;line-height:1.7;">This is an automated notification from the Safaricom SMS Campaign Platform. You can manage task notifications in the schedule settings.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:19px 32px;background-color:#f8faf9;border-top:1px solid #e6ecea;color:#70827b;font-size:11px;line-height:1.7;">
+                Please do not reply to this automated message.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

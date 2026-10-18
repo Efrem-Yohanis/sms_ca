@@ -13,13 +13,14 @@ from airflow.operators.python import PythonOperator
 
 log = logging.getLogger(__name__)
 DJANGO_API = os.getenv('AIRFLOW_DJANGO_API', 'http://camaping-manager-backend-app:8000/api/v1').rstrip('/')
+DJANGO_API_HEADERS = {'X-Internal-Service-Token': os.getenv('INTERNAL_SERVICE_API_TOKEN', '')}
 SENDER_API = os.getenv('AIRFLOW_SENDER_API', 'http://sms_sender_app:8001').rstrip('/')
 AUDIENCE_BUILD_TIMEOUT_SECONDS = int(os.getenv('AIRFLOW_AUDIENCE_BUILD_TIMEOUT', '1800'))
 AUDIENCE_POLL_INTERVAL_SECONDS = int(os.getenv('AIRFLOW_AUDIENCE_POLL_INTERVAL', '5'))
 
 
 def _get_json(url, *, timeout=30):
-    response = requests.get(url, timeout=timeout)
+    response = requests.get(url, headers=DJANGO_API_HEADERS, timeout=timeout)
     response.raise_for_status()
     body = response.json()
     if isinstance(body, dict) and body.get('success') is False:
@@ -28,7 +29,7 @@ def _get_json(url, *, timeout=30):
 
 
 def _post_json(url, payload, *, timeout=60):
-    response = requests.post(url, json=payload, timeout=timeout)
+    response = requests.post(url, json=payload, headers=DJANGO_API_HEADERS, timeout=timeout)
     try:
         body = response.json()
     except ValueError:

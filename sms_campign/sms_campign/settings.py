@@ -196,7 +196,7 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+        'sms_campaign_manager.permissions.IsCampaignManager',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
@@ -206,6 +206,8 @@ AIRFLOW_API_URL = os.environ.get('AIRFLOW_API_URL', 'http://localhost:8080').rst
 AIRFLOW_API_USERNAME = os.environ.get('AIRFLOW_API_USERNAME', 'admin')
 AIRFLOW_API_PASSWORD = os.environ.get('AIRFLOW_API_PASSWORD', '')
 AIRFLOW_DAGS_DIR = os.environ.get('AIRFLOW_DAGS_DIR', str(BASE_DIR / 'task_scheduler_dags'))
+TASK_SCHEDULER_CALLBACK_TOKEN = os.environ.get('TASK_SCHEDULER_CALLBACK_TOKEN', '')
+INTERNAL_SERVICE_API_TOKEN = os.environ.get('INTERNAL_SERVICE_API_TOKEN', '')
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'SMS Campaign Manager API',

@@ -167,6 +167,42 @@ class Campaign(SharedConfigModel):
         db_table = "sms_campaign_manager_campaign"
 
 
+class CampaignAudienceRow(SharedConfigModel):
+    campaign_id = models.BigIntegerField()
+
+    class Meta(SharedConfigModel.Meta):
+        db_table = "sms_campaign_manager_audience"
+
+
+class CampaignSuccessSentRow(SharedConfigModel):
+    campaign_id = models.BigIntegerField()
+
+    class Meta(SharedConfigModel.Meta):
+        db_table = "sms_campaign_manager_successsent"
+
+
+class CampaignFailedSentRow(SharedConfigModel):
+    campaign_id = models.BigIntegerField()
+
+    class Meta(SharedConfigModel.Meta):
+        db_table = "sms_campaign_manager_failedsent"
+
+
+class CampaignSuccessDeliveryRow(SharedConfigModel):
+    campaign_id = models.BigIntegerField()
+
+    class Meta(SharedConfigModel.Meta):
+        db_table = "sms_campaign_manager_successdelivery"
+
+
+class CampaignSchedule(SharedConfigModel):
+    campaign_id = models.BigIntegerField(unique=True)
+    schedule_type = models.CharField(max_length=20)
+
+    class Meta(SharedConfigModel.Meta):
+        db_table = "sms_campaign_manager_schedule"
+
+
 class UserProfile(models.Model):
     class Role(models.TextChoices):
         ADMIN = "ADMIN", "Admin"

@@ -104,6 +104,8 @@ services:
       AIRFLOW_API_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
       AIRFLOW_API_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-change-this-local-password}
       AIRFLOW_DAGS_DIR: /shared-task-dags
+      TASK_SCHEDULER_CALLBACK_TOKEN: ${TASK_SCHEDULER_CALLBACK_TOKEN:?Set TASK_SCHEDULER_CALLBACK_TOKEN in your environment}
+      INTERNAL_SERVICE_API_TOKEN: ${INTERNAL_SERVICE_API_TOKEN:?Set INTERNAL_SERVICE_API_TOKEN in your environment}
     volumes:
       - audience_uploads:/app/sms_campign/audience
       - task_scheduler_dags:/shared-task-dags
@@ -120,6 +122,8 @@ services:
         condition: service_healthy
       airflow-webserver:
         condition: service_healthy
+      scduler_app:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       default:
@@ -130,7 +134,7 @@ services:
     build:
       context: ./admin_backend
       dockerfile: Dockerfile
-    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8002"
+    command: sh -c "python manage.py migrate && python manage.py bootstrap_default_admin && python manage.py runserver 0.0.0.0:8002"
     environment:
       DB_ENGINE: postgresql
       DB_NAME: ${POSTGRES_DB:-campaign_manager}
@@ -140,6 +144,9 @@ services:
       DB_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-docker-only}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-admin}
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-admin}
+      ADMIN_BOOTSTRAP_EMAIL: ${ADMIN_BOOTSTRAP_EMAIL:-admin@example.com}
       DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},admin_backend_app"
       ADMIN_BACKEND_CORS_ORIGINS: "${ADMIN_BACKEND_CORS_ORIGINS:-http://localhost:5173,http://localhost:4173,http://localhost:5123,http://localhost:3000}"
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-SPPzmCFeMC2o0d3B4yaC094nDeE2ryKvKLR60OkUJC0=}
@@ -234,16 +241,16 @@ services:
       DB_HOST: main_db
       DB_PORT: 5432
       SMSC_SENDER_DJANGO_API: http://camaping-manager-backend-app:8000/api/v1
+      INTERNAL_SERVICE_API_TOKEN: ${INTERNAL_SERVICE_API_TOKEN:?Set INTERNAL_SERVICE_API_TOKEN in your environment}
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_SENT_TOPIC: sent-response
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-SPPzmCFeMC2o0d3B4yaC094nDeE2ryKvKLR60OkUJC0=}
       SMSC_SENDER_RUN_WORKER: "true"
+      SMSC_SENDER_DB_POOL_MAX_SIZE: ${SMSC_SENDER_DB_POOL_MAX_SIZE:-10}
     ports:
       - "${SMS_SENDER_HOST_PORT:-8001}:8001"
     depends_on:
       main_db:
-        condition: service_healthy
-      camaping_manager_backend_app:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
@@ -323,6 +330,10 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__DEFAULT_TIMEZONE: Africa/Addis_Ababa
       AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Africa/Addis_Ababa
+      AIRFLOW__CORE__PARALLELISM: ${AIRFLOW_PARALLELISM:-4}
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: ${AIRFLOW_MAX_ACTIVE_TASKS_PER_DAG:-4}
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: ${AIRFLOW_MAX_ACTIVE_RUNS_PER_DAG:-1}
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "True"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
@@ -330,12 +341,18 @@ services:
       AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300"
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-campaign_manager}:${POSTGRES_PASSWORD:-campaign_manager_dev}@main_db:5432/${POSTGRES_DB:-campaign_manager}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: ${AIRFLOW_DB_POOL_SIZE:-5}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: ${AIRFLOW_DB_MAX_OVERFLOW:-2}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: "1800"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: "True"
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-sms-airflow-local-secret-change-before-deploy}
       AIRFLOW_DJANGO_API: http://camaping-manager-backend-app:8000/api/v1
       AIRFLOW_SENDER_API: http://sms_sender_app:8001
+      AIRFLOW_SCHEDULER_CALLBACK_TOKEN: ${TASK_SCHEDULER_CALLBACK_TOKEN:?Set TASK_SCHEDULER_CALLBACK_TOKEN in your environment}
       AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
       AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-change-this-local-password}
       AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+      INTERNAL_SERVICE_API_TOKEN: ${INTERNAL_SERVICE_API_TOKEN:?Set INTERNAL_SERVICE_API_TOKEN in your environment}
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - task_scheduler_dags:/opt/airflow/dags/task-scheduler
@@ -368,10 +385,14 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-      camaping_manager_backend_app:
-        condition: service_healthy
       sms_sender_app:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8974/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 60s
     restart: unless-stopped
 
   standalone_scheduler_api:

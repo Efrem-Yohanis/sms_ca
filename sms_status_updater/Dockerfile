@@ -6,6 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY sms_status_updater/requirements.txt /tmp/status-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/status-requirements.txt
 

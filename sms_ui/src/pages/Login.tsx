@@ -16,7 +16,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Eye, EyeOff } from "lucide-react";
+import { Lock, Mail, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Login() {
@@ -24,7 +24,6 @@ export default function Login() {
   const { setAuth } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<
     "signin" | "force-change" | "forgot" | "email-sent"
@@ -101,9 +100,9 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
+    <main className="flex min-h-screen items-center justify-center bg-background px-4 py-8">
       <div className="w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
+        <header className="text-center space-y-2">
           <img
             src="/safaricom-logo.png"
             alt="Safaricom"
@@ -113,29 +112,33 @@ export default function Login() {
             SMS Campaign Manager
           </h1>
           <p className="text-sm text-muted-foreground">
-            Safaricom Ethiopia campaign management
+            Safaricom Ethiopia administration portal
           </p>
-        </div>
+        </header>
 
-        <Card className="shadow-elevated border-0">
-          <CardContent className="pt-6">
+        <Card className="border-0 shadow-elevated">
+          <CardContent className="p-6">
             {view === "signin" && (
-              <form onSubmit={handleLogin} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="username">Username</Label>
+              <form onSubmit={handleLogin} noValidate>
+                <div className="space-y-4">
+                  <label htmlFor="username" className="block text-xs font-semibold">
+                    Email or username
+                    <div className="relative mt-2">
+                      <Mail className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     id="username"
                     type="text"
-                    placeholder="Enter your username"
+                    placeholder="Email or username"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     required
-                    className="h-10"
+                    className="pl-9 font-normal"
                   />
-                </div>
-                <div className="space-y-2">
+                    </div>
+                  </label>
+                  <div>
                   <div className="flex justify-between">
-                    <Label htmlFor="password">Password</Label>
+                    <label htmlFor="password" className="text-xs font-semibold">Password</label>
                     <button
                       type="button"
                       className="text-xs text-primary hover:underline"
@@ -148,41 +151,32 @@ export default function Login() {
                       Forgot password?
                     </button>
                   </div>
-                  <div className="relative">
+                  <div className="relative mt-2">
+                    <Lock className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                     <Input
                       id="password"
-                      type={showPassword ? "text" : "password"}
+                      type="password"
                       placeholder="••••••••"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       required
-                      className="h-10 pr-10"
+                      className="pl-9 font-normal"
                     />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      {showPassword ? (
-                        <EyeOff className="h-4 w-4" />
-                      ) : (
-                        <Eye className="h-4 w-4" />
-                      )}
-                    </button>
                   </div>
-                </div>
+                  </div>
                 {error && (
-                  <p role="alert" className="text-sm text-destructive">
+                  <p role="alert" className="text-xs text-destructive">
                     {error}
                   </p>
                 )}
                 <Button
                   type="submit"
-                  className="w-full h-10 shadow-soft"
+                  className="w-full"
                   disabled={loading}
                 >
-                  {loading ? "Signing in…" : "Sign in"}
+                  <ShieldCheck /> {loading ? "Signing in…" : "Sign in"}
                 </Button>
+                </div>
               </form>
             )}
             {view === "force-change" && (
@@ -295,6 +289,6 @@ export default function Login() {
           © {new Date().getFullYear()} Safaricom Ethiopia
         </p>
       </div>
-    </div>
+    </main>
   );
 }

@@ -5,6 +5,8 @@ const API_BASE = (import.meta.env.VITE_ADMIN_API_URL || "http://localhost:8002/a
 const ACCESS_TOKEN_KEY = "sms-admin-access-token";
 const REFRESH_TOKEN_KEY = "sms-admin-refresh-token";
 const LAST_ACTIVITY_KEY = "sms-admin-last-activity";
+const ADMIN_IDENTITY_CACHE_MS = 30_000;
+let adminIdentityCache: { token: string; expiresAt: number; request: Promise<ApiUser> } | null = null;
 
 export type ApiUser = {
   id: number;
@@ -50,6 +52,20 @@ export type ApiUserCampaign = {
   is_deleted: boolean;
   created_at: string;
   updated_at: string;
+};
+
+export type ApiAdminCampaign = {
+  id: number;
+  campaign_code: string;
+  name: string;
+  campaign_manager: string;
+  status: string;
+  execution_status: string;
+  total_audience: number;
+  campaign_type: string;
+  total_sent: number;
+  total_delivered: number;
+  created_at: string;
 };
 
 export type ApiConfig = {
@@ -126,10 +142,26 @@ export function getAccessToken() {
 }
 
 export function clearAdminTokens() {
+  adminIdentityCache = null;
   window.localStorage.removeItem(ACCESS_TOKEN_KEY);
   window.localStorage.removeItem(REFRESH_TOKEN_KEY);
   window.localStorage.removeItem(LAST_ACTIVITY_KEY);
   window.dispatchEvent(new Event("admin-workspace-invalidated"));
+}
+
+export function getCurrentAdmin() {
+  const token = getAccessToken();
+  if (!token) return Promise.reject(new AdminApiError("Authentication required.", 401));
+  if (adminIdentityCache?.token === token && adminIdentityCache.expiresAt > Date.now()) {
+    return adminIdentityCache.request;
+  }
+
+  const request = adminRequest<ApiUser>("/admin/me/", { signal: AbortSignal.timeout(10_000) });
+  adminIdentityCache = { token, expiresAt: Date.now() + ADMIN_IDENTITY_CACHE_MS, request };
+  void request.catch(() => {
+    if (adminIdentityCache?.request === request) adminIdentityCache = null;
+  });
+  return request;
 }
 
 export async function adminRequest<T>(
@@ -224,7 +256,7 @@ export async function adminLogin(username: string, password: string) {
   window.localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access);
   window.localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh);
   window.localStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
-  return { user: await adminRequest<ApiUser>("/admin/me/") };
+  return { user: await getCurrentAdmin() };
 }
 
 export function changeInitialAdminPassword(
@@ -331,6 +363,12 @@ export function listUsers() {
 
 export function listUserCampaigns(profileId: number) {
   return adminRequest<ApiUserCampaign[]>(`/admin/users/${profileId}/campaigns/`);
+}
+
+export function listAdminCampaigns(page = 1) {
+  return adminRequest<{ count: number; next: string | null; previous: string | null; results: ApiAdminCampaign[] }>(
+    `/admin/campaigns/?page=${page}&page_size=100`,
+  );
 }
 
 export function saveUser(profileId: number | null, user: UserInput) {

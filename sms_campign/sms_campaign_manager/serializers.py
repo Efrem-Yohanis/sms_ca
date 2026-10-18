@@ -88,11 +88,9 @@ class CampaignTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
         platform_profile = get_platform_profile(self.user.pk)
-        if platform_profile is None:
-            return data
+        if platform_profile is None or platform_profile[0] != "CAMPAIGN_MANAGER":
+            raise AuthenticationFailed("Use a Campaign Manager account to sign in here.")
         role, require_password_change = platform_profile
-        if role == "ADMIN":
-            raise AuthenticationFailed("Use the administrator sign-in page.")
         if require_password_change:
             return {"must_change_password": True}
         return data
@@ -166,6 +164,13 @@ class CustomerProfileConfigSerializer(serializers.ModelSerializer):
         model = CustomerProfileConfig
         fields = ['id', 'name', 'description', 'database_config', 'database_name', 'table_name', 'msisdn_column', 'language_column', 'default_language', 'is_active', 'created_at', 'updated_at']
         read_only_fields = ['id', 'database_name', 'created_at', 'updated_at']
+
+    def validate_database_config(self, value):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user and getattr(user, 'is_authenticated', False) and value.created_by_id != user.pk:
+            raise serializers.ValidationError('Select a database configuration you own.')
+        return value
 
 
 class AudienceConfigSerializer(serializers.ModelSerializer):
@@ -242,6 +247,16 @@ class AudienceConfigSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user and getattr(user, 'is_authenticated', False):
+            for field_name, error_field in (
+                ('source_database', 'source_database_id'),
+                ('mapper_database', 'mapper_database_id'),
+            ):
+                database = attrs.get(field_name)
+                if database and database.created_by_id != user.pk:
+                    raise serializers.ValidationError({error_field: ['Select a database configuration you own.']})
         if 'rebuild_on_each_round' in attrs and 'rebuild_before_each_run' not in attrs:
             attrs['rebuild_before_each_run'] = attrs['rebuild_on_each_round']
         elif 'rebuild_before_each_run' in attrs and 'rebuild_on_each_round' not in attrs:
@@ -527,7 +542,7 @@ class SenderIDSerializer(serializers.ModelSerializer):
             'is_default', 'is_active', 'created_by',
             'created_by_username', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by_username']
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at', 'created_by_username']
 
 
 class SenderIDCreateUpdateSerializer(serializers.ModelSerializer):
@@ -592,7 +607,7 @@ class SMSCConfigSerializer(serializers.ModelSerializer):
             'last_test_status', 'last_test_message', 'created_by',
             'created_by_username', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by_username']
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at', 'created_by_username']
         extra_kwargs = {
             'api_key': {'write_only': True, 'required': False, 'allow_blank': True},
             'api_secret': {'write_only': True, 'required': False, 'allow_blank': True},
@@ -743,6 +758,14 @@ class CampaignEmailReportCreateSerializer(serializers.Serializer):
                 normalized.append(email)
         return normalized
 
+    def validate(self, attrs):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        email_config = attrs.get('email_config')
+        if user and getattr(user, 'is_authenticated', False) and email_config and email_config.created_by_id != user.pk:
+            raise serializers.ValidationError({'email_config_id': 'Select an email configuration you own.'})
+        return attrs
+
 
 class ReportSubscriptionSerializer(serializers.ModelSerializer):
     name = serializers.CharField(max_length=150, min_length=1, trim_whitespace=True)
@@ -803,12 +826,16 @@ class ReportSubscriptionSerializer(serializers.ModelSerializer):
         return normalized
 
     def validate(self, attrs):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
         campaigns = attrs.get('campaigns')
         if campaigns is None and self.instance:
             campaigns = list(self.instance.campaigns.all())
             if self.instance.campaign_id and not self.instance.campaign.is_deleted:
                 campaigns.append(self.instance.campaign)
         campaigns = list({campaign.id: campaign for campaign in campaigns or []}.values())
+        if user and getattr(user, 'is_authenticated', False) and any(campaign.created_by_id != user.pk for campaign in campaigns):
+            raise serializers.ValidationError({'campaign_ids': ['Select campaigns you own.']})
         if not campaigns:
             raise serializers.ValidationError({'campaign_ids': ['Select at least one eligible campaign.']})
         recipients = attrs.get('recipients', self.instance.recipients if self.instance else []) or []
@@ -816,6 +843,9 @@ class ReportSubscriptionSerializer(serializers.ModelSerializer):
             'include_campaign_owners',
             self.instance.include_campaign_owners if self.instance else True,
         )
+        email_config = attrs.get('email_config', self.instance.email_config if self.instance else None)
+        if user and getattr(user, 'is_authenticated', False) and email_config and email_config.created_by_id != user.pk:
+            raise serializers.ValidationError({'email_config_id': ['Select an email configuration you own.']})
         owner_emails = [
             email
             for campaign in campaigns

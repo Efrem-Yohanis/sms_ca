@@ -54,7 +54,11 @@ def make_producer() -> Any:
 class DLRReceiver:
     def __init__(self, producer_factory: Callable[[], Any] = make_producer):
         self.producer_factory = producer_factory
-        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=DLR_QUEUE_MAX)
+        # The callback must not acknowledge an event just because it reached
+        # this process's RAM queue. Each request waits for Kafka's broker ack.
+        self.queue: asyncio.Queue[tuple[dict[str, Any], asyncio.Future[bool] | None]] = asyncio.Queue(
+            maxsize=DLR_QUEUE_MAX,
+        )
         self.producer: Any | None = None
         self.kafka_connected = False
         self.received_total = 0
@@ -123,7 +127,11 @@ class DLRReceiver:
         except Exception:
             logger.exception('Failed to stop Kafka producer after connection failure')
 
-    def enqueue(self, payload: dict[str, Any]) -> bool:
+    def enqueue(
+        self,
+        payload: dict[str, Any],
+        acknowledgement: asyncio.Future[bool] | None = None,
+    ) -> bool:
         if not self.kafka_connected or self.queue.full():
             return False
         event = {
@@ -137,7 +145,7 @@ class DLRReceiver:
             'received_at': received_timestamp(),
         }
         try:
-            self.queue.put_nowait(event)
+            self.queue.put_nowait((event, acknowledgement))
         except asyncio.QueueFull:
             return False
         self.received_total += 1
@@ -152,58 +160,73 @@ class DLRReceiver:
             for _ in batch:
                 self.queue.task_done()
 
-    async def _next_batch(self) -> list[dict[str, Any]]:
+    async def _next_batch(self) -> list[tuple[dict[str, Any], asyncio.Future[bool] | None]]:
         try:
             first = await asyncio.wait_for(self.queue.get(), timeout=DLR_FLUSH_INTERVAL)
         except asyncio.TimeoutError:
             return []
 
-        batch = [first]
+        batch = [first if isinstance(first, tuple) else (first, None)]
         deadline = asyncio.get_running_loop().time() + DLR_FLUSH_INTERVAL
         while len(batch) < DLR_BATCH_SIZE:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 break
             try:
-                batch.append(await asyncio.wait_for(self.queue.get(), timeout=remaining))
+                item = await asyncio.wait_for(self.queue.get(), timeout=remaining)
+                batch.append(item if isinstance(item, tuple) else (item, None))
             except asyncio.TimeoutError:
                 break
         return batch
 
-    async def _publish_with_retry(self, batch: list[dict[str, Any]]) -> None:
-        retrying = False
+    async def _publish_with_retry(self, batch: list[Any]) -> None:
+        pending = [item if isinstance(item, tuple) else (item, None) for item in batch]
+        retrying_count = 0
         try:
             for attempt in range(1, DLR_MAX_RETRIES + 1):
-                try:
-                    if self.producer is None:
-                        raise RuntimeError('Kafka producer is not connected')
+                if not pending:
+                    return
+                if self.producer is None:
+                    results = [RuntimeError('Kafka producer is not connected')] * len(pending)
+                else:
                     results = await asyncio.gather(*[
                         self.producer.send_and_wait(
                             KAFKA_DELIVERY_TOPIC,
                             event,
                             key=event['provider_message_id'],
                         )
-                        for event in batch
+                        for event, _ in pending
                     ], return_exceptions=True)
-                    errors = [result for result in results if isinstance(result, BaseException)]
-                    if errors:
-                        raise errors[0]
-                    self.published_total += len(batch)
+
+                retry = []
+                for item, result in zip(pending, results):
+                    event, acknowledgement = item
+                    if isinstance(result, BaseException):
+                        retry.append(item)
+                        continue
+                    self.published_total += 1
+                    if acknowledgement is not None and not acknowledgement.done():
+                        acknowledgement.set_result(True)
+
+                if not retry:
                     return
-                except Exception:
-                    if attempt >= DLR_MAX_RETRIES:
-                        logger.exception('Dropping %s DLR events after %s attempts', len(batch), attempt)
-                        self.failed_total += len(batch)
-                        return
-                    if not retrying:
-                        self.retrying_total += len(batch)
-                        retrying = True
-                    delay = DLR_RETRY_BACKOFF * (2 ** (attempt - 1))
-                    logger.exception('Kafka publish failed; retry %s/%s in %.1fs', attempt, DLR_MAX_RETRIES, delay)
-                    await asyncio.sleep(delay)
+                if attempt >= DLR_MAX_RETRIES:
+                    logger.error('Kafka publish failed for %s DLR events after %s attempts', len(retry), attempt)
+                    self.failed_total += len(retry)
+                    for _, acknowledgement in retry:
+                        if acknowledgement is not None and not acknowledgement.done():
+                            acknowledgement.set_result(False)
+                    return
+
+                self.retrying_total += len(retry) - retrying_count
+                retrying_count = len(retry)
+                pending = retry
+                delay = DLR_RETRY_BACKOFF * (2 ** (attempt - 1))
+                logger.warning('Kafka publish failed for %s DLR events; retry %s/%s in %.1fs', len(retry), attempt, DLR_MAX_RETRIES, delay)
+                await asyncio.sleep(delay)
         finally:
-            if retrying:
-                self.retrying_total -= len(batch)
+            if retrying_count:
+                self.retrying_total -= retrying_count
 
 
 receiver = DLRReceiver()
@@ -252,7 +275,8 @@ async def receive_delivery_report(request: Request) -> Any:
                 return bad_request(f'Missing {field}')
         return bad_request('Invalid request body')
 
-    if not receiver.enqueue(raw_payload):
+    acknowledgement = asyncio.get_running_loop().create_future()
+    if not receiver.enqueue(raw_payload, acknowledgement):
         return JSONResponse(
             status_code=503,
             content={
@@ -260,6 +284,14 @@ async def receive_delivery_report(request: Request) -> Any:
                 'error': 'Service Unavailable',
                 'message': 'Queue full. Retry shortly.' if receiver.kafka_connected else 'Kafka is not connected. Retry shortly.',
             },
+        )
+
+    # A success response means Kafka acknowledged the event. This avoids
+    # silently losing callbacks if this receiver process exits after queueing.
+    if not await acknowledgement:
+        return JSONResponse(
+            status_code=503,
+            content={'success': False, 'error': 'Service Unavailable', 'message': 'Could not persist delivery report. Retry shortly.'},
         )
 
     return {

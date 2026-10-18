@@ -770,6 +770,54 @@ class UserCampaignSerializer(serializers.ModelSerializer):
         ]
 
 
+class AdminCampaignListSerializer(serializers.ModelSerializer):
+    campaign_code = serializers.SerializerMethodField()
+    campaign_manager = serializers.SerializerMethodField()
+    execution_status = serializers.SerializerMethodField()
+    total_audience = serializers.IntegerField(read_only=True)
+    total_sent = serializers.IntegerField(read_only=True)
+    total_delivered = serializers.IntegerField(read_only=True)
+    campaign_type = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Campaign
+        fields = (
+            "id", "campaign_code", "name", "campaign_manager", "status",
+            "execution_status", "total_audience", "campaign_type", "total_sent",
+            "total_delivered", "created_at",
+        )
+
+    def get_campaign_code(self, campaign):
+        return f"CMP-{campaign.pk:04d}"
+
+    def get_campaign_manager(self, campaign):
+        manager = campaign.created_by
+        if manager is None:
+            return "Unassigned"
+        return manager.get_full_name().strip() or manager.username
+
+    def get_execution_status(self, campaign):
+        return {
+            "draft": "Pending",
+            "active": "Pending",
+            "in_progress": "Processing",
+            "paused": "Paused",
+            "stopped": "Stopped",
+            "completed": "Completed",
+            "invalid_schedule": "Failed",
+            "archived": "Completed",
+        }.get(campaign.status, "Pending")
+
+    def get_campaign_type(self, campaign):
+        schedule_type = getattr(campaign, "schedule_type_value", None)
+        return {
+            "once": "One-time",
+            "daily": "Daily",
+            "weekly": "Weekly",
+            "monthly": "Monthly",
+        }.get(schedule_type, "Unscheduled")
+
+
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)

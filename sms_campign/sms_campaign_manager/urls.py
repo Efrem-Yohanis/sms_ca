@@ -3,13 +3,10 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .test_sms_views import TestMessageDetailView, TestMessageListCreateView, TestMessageResendView
 
 from .views import (
-	UserRegistrationView,
 	CampaignLoginView,
 	CampaignInitialPasswordChangeView,
 	CurrentUserView,
 	PasswordChangeView,
-	UserAdminListCreateView,
-	UserAdminDetailView,
 	CampaignDetailView,
 	CampaignHardDeleteView,
 	CampaignListCreateView,
@@ -105,14 +102,11 @@ urlpatterns = [
 	path('test-sms/', TestMessageListCreateView.as_view(), name='test-sms-list-create'),
 	path('test-sms/<int:pk>/', TestMessageDetailView.as_view(), name='test-sms-detail'),
 	path('test-sms/<int:pk>/resend/', TestMessageResendView.as_view(), name='test-sms-resend'),
-	path('auth/register/', UserRegistrationView.as_view(), name='user-register'),
 	path('auth/login/', CampaignLoginView.as_view(), name='token-obtain-pair'),
 	path('auth/initial-password/', CampaignInitialPasswordChangeView.as_view(), name='initial-password-change'),
 	path('auth/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
 	path('auth/me/', CurrentUserView.as_view(), name='current-user'),
 	path('auth/password/', PasswordChangeView.as_view(), name='password-change'),
-	path('auth/users/', UserAdminListCreateView.as_view(), name='user-admin-list-create'),
-	path('auth/users/<int:pk>/', UserAdminDetailView.as_view(), name='user-admin-detail'),
 	path('databases/', DatabaseConfigListCreateView.as_view(), name='database-list-create'),
 	path('databases/test-params/', DatabaseConfigTestParamsView.as_view(), name='database-test-params'),
 	path('databases/<int:pk>/', DatabaseConfigDetailView.as_view(), name='database-detail'),

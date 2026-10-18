@@ -3,6 +3,11 @@ import type { Run, Schedule } from "@/lib/task-scheduler/store";
 
 const BASE = `${API_V1_BASE}/task-scheduler`;
 
+export interface AirflowConnectionOption {
+  id: string;
+  type: string;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await authFetch(`${BASE}/${path.replace(/^\/+/, "")}`, {
     ...init,
@@ -12,6 +17,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const schedulerApi = {
+  listConnections: () => request<AirflowConnectionOption[]>("connections/"),
+  getSchedule: (scheduleId: string) =>
+    request<Schedule>(`schedules/${encodeURIComponent(scheduleId)}/`),
   async listSchedules(): Promise<Schedule[]> {
     const schedules: Schedule[] = [];
     let offset = 0;

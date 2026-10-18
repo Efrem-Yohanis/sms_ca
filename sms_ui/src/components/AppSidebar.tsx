@@ -31,7 +31,6 @@ const NAV_ITEMS = [
   { title: "Campaigns", url: "/campaigns", icon: Megaphone },
   { title: "Audiences", url: "/audiences", icon: Users },
   { title: "Schedules", url: "/schedules", icon: CalendarClock },
-  { title: "Task Scheduler", url: "/task-scheduler", icon: ClipboardList },
   { title: "Messages", url: "/messages", icon: MessageSquareText },
   { title: "Reports", url: "/reports", icon: BarChart3 },
   { title: "Configurations", url: "/configurations", icon: Settings },
@@ -39,6 +38,7 @@ const NAV_ITEMS = [
 
 const TOOL_ITEMS = [
   { title: "Test SMS", url: "/test-sms", icon: Send },
+  { title: "Task Scheduler", url: "/task-scheduler", icon: ClipboardList },
 ];
 
 export function AppSidebar() {

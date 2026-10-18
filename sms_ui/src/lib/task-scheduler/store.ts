@@ -15,7 +15,7 @@ export interface Schedule {
   scheduleType: "Cron" | "Interval" | "Manual";
   cron: string;
   intervalValue: number;
-  intervalUnit: "minutes" | "hours";
+  intervalUnit: "minutes" | "hours" | "days";
   timezone: string;
   daysOfWeek: number[];
   windowStart: string | null;
@@ -46,8 +46,6 @@ export interface Run {
   trigger: "Scheduled" | "Manual";
   logs: { ts: number; level: "INFO" | "WARN" | "ERROR"; msg: string }[];
 }
-
-export const CONNECTIONS = ["warehouse_pg", "analytics_snowflake", "crm_mysql", "reporting_mssql"];
 
 interface State {
   schedules: Schedule[];
@@ -146,6 +144,25 @@ export const actions = {
   async refresh() {
     await loadScheduler(true);
   },
+  async refreshSchedules() {
+    try {
+      const schedules = await schedulerApi.listSchedules();
+      update((current) => ({ ...current, schedules, loaded: true }));
+      loaded = true;
+      return schedules;
+    } catch (error) {
+      console.error("Unable to refresh schedules from the scheduler API", error);
+      return state.schedules;
+    }
+  },
+  async refreshSchedule(id: string) {
+    const schedule = await schedulerApi.getSchedule(id);
+    update((current) => ({
+      ...current,
+      schedules: current.schedules.map((item) => item.id === id ? schedule : item),
+    }));
+    return schedule;
+  },
   async loadRuns(scheduleId?: string) {
     const runs = await schedulerApi.listRuns(scheduleId);
     update((current) => ({
@@ -178,7 +195,7 @@ export function newSchedule(): Schedule {
     cron: "0 2 * * *",
     intervalValue: 15,
     intervalUnit: "minutes",
-    timezone: "Africa/Nairobi",
+    timezone: "Africa/Addis_Ababa",
     daysOfWeek: [],
     windowStart: null,
     windowEnd: null,
@@ -235,10 +252,11 @@ export function fmtDuration(ms: number) {
 
 export function fmtTime(ts?: number) {
   if (!ts) return "—";
-  return new Date(ts).toLocaleString(undefined, {
+  return new Date(ts).toLocaleString("en-ET", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "Africa/Addis_Ababa",
   });
 }

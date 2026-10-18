@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CalendarClock,
   Plus,
@@ -49,19 +49,28 @@ type Pending = { kind: "run" | "delete" | "bulkDelete"; items: Schedule[] } | nu
 
 export function SchedulesPage() {
   const schedules = useScheduler((s) => s.schedules);
-  const owners = [...new Set(schedules.map((schedule) => schedule.owner))];
+  const hasSchedulesNeedingSync = schedules.some(
+    (schedule) => schedule.status === "Pending" || Boolean(schedule.airflowSyncError),
+  );
+  useEffect(() => {
+    if (!hasSchedulesNeedingSync) return;
+    void actions.refreshSchedules();
+    const timer = window.setInterval(() => void actions.refreshSchedules(), 15_000);
+    const refreshOnFocus = () => void actions.refreshSchedules();
+    window.addEventListener("focus", refreshOnFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+    };
+  }, [hasSchedulesNeedingSync]);
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
-  const [type, setType] = useState("all");
-  const [owner, setOwner] = useState("all");
-  const [from, setFrom] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "name", asc: true });
   const [sel, setSel] = useState<string[]>([]);
   const [pending, setPending] = useState<Pending>(null);
 
   const rows = useMemo(() => {
     const term = q.toLowerCase();
-    const fromTs = from ? new Date(from).getTime() : 0;
     return schedules
       .filter(
         (s) =>
@@ -71,16 +80,13 @@ export function SchedulesPage() {
           s.ownerEmail.toLowerCase().includes(term),
       )
       .filter((s) => status === "all" || s.status === status)
-      .filter((s) => type === "all" || s.type === type)
-      .filter((s) => owner === "all" || s.owner === owner)
-      .filter((s) => !fromTs || (s.lastRun ?? 0) >= fromTs)
       .sort((a, b) => {
         const av = a[sort.key] ?? Infinity,
           bv = b[sort.key] ?? Infinity;
         const c = av < bv ? -1 : av > bv ? 1 : 0;
         return sort.asc ? c : -c;
       });
-  }, [schedules, q, status, type, owner, from, sort]);
+  }, [schedules, q, status, sort]);
 
   const toggleSort = (key: SortKey) =>
     setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }));
@@ -166,20 +172,6 @@ export function SchedulesPage() {
               value={status}
               onChange={setStatus}
               options={["Active", "Paused", "Failed", "Pending", "Draft"]}
-            />
-            <FilterSelect
-              label="Type"
-              value={type}
-              onChange={setType}
-              options={["Python", "SQL"]}
-            />
-            <FilterSelect label="Owner" value={owner} onChange={setOwner} options={owners} />
-            <Input
-              type="date"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              className="w-40"
-              aria-label="Last run since"
             />
             {sel.length > 0 && (
               <div className="ml-auto flex items-center gap-2">

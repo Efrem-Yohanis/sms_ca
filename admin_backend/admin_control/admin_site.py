@@ -15,7 +15,7 @@ class AdminBackendSite(AdminSite):
         try:
             return user.admin_profile.role == UserProfile.Role.ADMIN
         except UserProfile.DoesNotExist:
-            return user.is_superuser
+            return False
 
 
 admin_site = AdminBackendSite(name="admin_backend")

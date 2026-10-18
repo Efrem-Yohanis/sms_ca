@@ -120,6 +120,10 @@ class ScheduleSerializer(serializers.ModelSerializer):
         return value
 
     def validate_timezone(self, value):
+        if value != "Africa/Addis_Ababa":
+            raise serializers.ValidationError(
+                "Task schedules must use the Africa/Addis_Ababa timezone."
+            )
         try:
             ZoneInfo(value)
         except ZoneInfoNotFoundError:

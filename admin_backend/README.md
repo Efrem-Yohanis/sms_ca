@@ -29,7 +29,7 @@ From this directory, set `DJANGO_SECRET_KEY` and the same
 
 ```powershell
 python manage.py migrate
-python manage.py createsuperuser
+python manage.py bootstrap_default_admin
 python manage.py runserver 8002
 ```
 
@@ -42,8 +42,14 @@ the full stack, including the campaign UI, admin backend, and admin UI:
 
 ```powershell
 docker compose up --build -d
-docker compose exec admin_backend_app python manage.py createsuperuser
 ```
+
+On startup, Docker Compose creates the default platform administrator if it
+does not exist: username `admin`, password `admin`. The account is a Django
+superuser and has an Admin profile. Existing account passwords are not reset on
+restart. Set `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD`, and
+`ADMIN_BOOTSTRAP_EMAIL` to override these local defaults; non-debug deployments
+must provide a non-default password.
 
 The campaign UI is at `http://localhost:3000`, the admin UI is at
 `http://localhost:4173`, and the admin API and Django admin are at

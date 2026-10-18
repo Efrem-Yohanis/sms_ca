@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react";
 import { toast } from "sonner";
@@ -18,14 +18,13 @@ import {
 import { cn } from "@/lib/utils";
 import {
   actions,
-  CONNECTIONS,
   scheduleToHuman,
   useScheduler,
   type Schedule,
 } from "@/lib/task-scheduler/store";
+import { schedulerApi } from "@/lib/task-scheduler/api";
 
 const STEPS = ["Basic Info", "Schedule", "Task"];
-const TIMEZONES = ["UTC", "Africa/Nairobi", "Europe/London", "America/New_York", "Asia/Singapore"];
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const RUN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const CRON_FIELDS = ["Minute", "Hour", "Day", "Month", "Weekday"];
@@ -82,6 +81,9 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
   const [excludedDateInput, setExcludedDateInput] = useState("");
   const [codeSource, setCodeSource] = useState<"upload" | "type">("type");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [connections, setConnections] = useState<{ id: string; type: string }[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(false);
+  const [connectionsError, setConnectionsError] = useState("");
   const [saving, setSaving] = useState(false);
   const cronParts = schedule.cron.trim().split(/\s+/);
   const windowStart = schedule.windowStart?.slice(0, 5) ?? "";
@@ -126,6 +128,31 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
   };
   const update = <K extends keyof Schedule>(key: K, value: Schedule[K]) =>
     setSchedule((current) => ({ ...current, [key]: value }));
+
+  useEffect(() => {
+    if (schedule.type !== "SQL") return;
+    let active = true;
+    setConnectionsLoading(true);
+    setConnectionsError("");
+    void schedulerApi
+      .listConnections()
+      .then((items) => {
+        if (active) setConnections(items);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setConnectionsError(
+            error instanceof Error ? error.message : "Could not load Airflow connections.",
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setConnectionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [schedule.type]);
 
   const applyPreset = (
     preset: CronPreset,
@@ -182,7 +209,7 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
     const status = isNew ? "Active" : initial.status;
     setSaving(true);
     try {
-      await actions.save(
+      const saved = await actions.save(
         {
           ...schedule,
           name: schedule.name.trim(),
@@ -192,7 +219,13 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
         },
         isNew,
       );
-      toast.success(isNew ? "Schedule created" : "Schedule updated");
+      toast.success(
+        saved.status === "Pending"
+          ? "Schedule saved; waiting for Airflow to register it"
+          : isNew
+            ? "Schedule created"
+            : "Schedule updated",
+      );
       navigate("/task-scheduler");
     } catch (error) {
       console.error("Unable to save schedule", error);
@@ -403,7 +436,14 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                     <p className="font-mono text-sm">{schedule.cron}</p>
                     <p className="text-sm text-muted-foreground">{scheduleToHuman(schedule)}</p>
                   </div>
-                  <div className="space-y-4 border p-4">
+                  <details className="rounded-md border">
+                    <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+                      Advanced schedule rules
+                      <span className="ml-2 text-xs font-normal text-muted-foreground">
+                        Weekday limits and time windows
+                      </span>
+                    </summary>
+                    <div className="space-y-4 border-t p-4">
                     <div className="space-y-2">
                       <p className="text-sm font-medium">Allowed weekdays</p>
                       <p className="text-xs text-muted-foreground">
@@ -449,9 +489,10 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Both times are required together. Cron triggers outside this same-day window
-                      are skipped using the selected timezone.
+                      are skipped using Addis Ababa time.
                     </p>
-                  </div>
+                    </div>
+                  </details>
                 </>
               )}
               {schedule.scheduleType === "Interval" && (
@@ -472,7 +513,7 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                       onChange={(value) =>
                         update("intervalUnit", value as Schedule["intervalUnit"])
                       }
-                      options={["minutes", "hours"]}
+                      options={["minutes", "hours", "days"]}
                     />
                   </Field>
                 </div>
@@ -482,13 +523,19 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                   This job runs only when you choose Run Now.
                 </p>
               )}
-              <div className="space-y-3 border p-4">
-                <div>
-                  <p className="text-sm font-medium">Excluded dates</p>
+              <details className="rounded-md border">
+                <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+                  Excluded dates
+                  {schedule.excludedDates.length > 0 && (
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      {schedule.excludedDates.length} set
+                    </span>
+                  )}
+                </summary>
+                <div className="space-y-3 border-t p-4">
                   <p className="text-xs text-muted-foreground">
-                    Runs on these dates are skipped. Dates use the schedule timezone.
+                    Runs are skipped on these dates in Africa/Addis_Ababa time.
                   </p>
-                </div>
                 <div className="flex gap-2">
                   <Input
                     aria-label="Date to exclude"
@@ -529,16 +576,9 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                     ))}
                   </ul>
                 )}
-              </div>
-              <div className="grid gap-4 sm:grid-cols-3">
-                <Field label="Timezone" id="timezone">
-                  <Pick
-                    id="timezone"
-                    value={schedule.timezone}
-                    onChange={(value) => update("timezone", value)}
-                    options={TIMEZONES}
-                  />
-                </Field>
+                </div>
+              </details>
+              <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Start date" id="start-date">
                   <Input
                     id="start-date"
@@ -556,6 +596,9 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                   />
                 </Field>
               </div>
+              <p className="text-xs text-muted-foreground">
+                All schedule times use Africa/Addis_Ababa.
+              </p>
               {errors[1] && <p className="text-sm text-destructive">{errors[1]}</p>}
             </>
           )}
@@ -575,9 +618,28 @@ export function ScheduleWizard({ initial, isNew }: { initial: Schedule; isNew: b
                     id="connection"
                     value={schedule.connection ?? ""}
                     onChange={(value) => update("connection", value)}
-                    options={CONNECTIONS}
-                    placeholder="Choose a connection"
+                    options={connections.map((item) => `${item.id}|${item.type}`)}
+                    formatOption={(option) => {
+                      const [id, type] = option.split("|");
+                      return type ? `${id} (${type})` : id;
+                    }}
+                    placeholder={
+                      connectionsLoading
+                        ? "Loading Airflow connections..."
+                        : "Choose an Airflow connection"
+                    }
                   />
+                  {connectionsError && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {connectionsError}
+                    </p>
+                  )}
+                  {!connectionsLoading && !connectionsError && connections.length === 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      No Airflow connections are configured. Add one in Airflow before creating a
+                      SQL task.
+                    </p>
+                  )}
                 </Field>
               )}
               <Field label="Script source" id="script-source">

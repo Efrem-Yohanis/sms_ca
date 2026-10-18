@@ -27,13 +27,16 @@ DB_NAME = os.getenv('DB_NAME', 'campaign_db')
 DB_USER = os.getenv('DB_USER', 'postgres')
 DB_PASSWORD = os.getenv('DB_PASSWORD', '')
 DJANGO_API = os.getenv('SMSC_SENDER_DJANGO_API', 'http://camaping-manager-backend-app:8000/api/v1').rstrip('/')
+INTERNAL_API_HEADERS = {'X-Internal-Service-Token': os.getenv('INTERNAL_SERVICE_API_TOKEN', '')}
 KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'kafka:9092')
 KAFKA_SENT_TOPIC = os.getenv('KAFKA_SENT_TOPIC', 'sent-response')
 TICK_INTERVAL = float(os.getenv('SMSC_SENDER_SCHEDULER_INTERVAL', '1'))
 SENDER_WORKERS = max(1, int(os.getenv('SMSC_SENDER_WORKERS', '100')))
+SENDER_DB_POOL_MAX_SIZE = max(1, int(os.getenv('SMSC_SENDER_DB_POOL_MAX_SIZE', '10')))
 LOCK_TIMEOUT_SECONDS = max(1, int(os.getenv('LOCK_TIMEOUT_SECONDS', '300')))
 RUN_WORKER = os.getenv('SMSC_SENDER_RUN_WORKER', 'true').lower() in {'1', 'true', 'yes'}
 FIELD_ENCRYPTION_KEY = os.getenv('FIELD_ENCRYPTION_KEY', '')
+NO_ACTIVE_SMSC_CONFIG = 'No active SMSCConfig found'
 
 
 class CampaignRequest(BaseModel):
@@ -123,7 +126,7 @@ class Sender:
         self.pool = AsyncConnectionPool(
             conninfo=conninfo,
             min_size=1,
-            max_size=max(4, SENDER_WORKERS),
+            max_size=SENDER_DB_POOL_MAX_SIZE,
             kwargs={'row_factory': dict_row},
             open=False,
         )
@@ -181,7 +184,9 @@ class Sender:
         return self.django_http
 
     async def fetch_active_config(self, endpoint: str, key: str) -> Any:
-        response = await self.require_django_http().get(f'{DJANGO_API}/{endpoint}/active/')
+        response = await self.require_django_http().get(
+            f'{DJANGO_API}/{endpoint}/active/', headers=INTERNAL_API_HEADERS,
+        )
         if response.status_code != 200:
             raise RuntimeError(f'{endpoint} active config returned HTTP {response.status_code}: {response.text[:300]}')
         body = response.json()
@@ -202,7 +207,7 @@ class Sender:
                 )
                 row = await cursor.fetchone()
         if row is None:
-            raise RuntimeError('No active SMSCConfig found')
+            raise RuntimeError(NO_ACTIVE_SMSC_CONFIG)
         config = dict(row)
         config['api_key'] = decrypt_database_secret(config.get('api_key'))
         config['api_secret'] = decrypt_database_secret(config.get('api_secret'))
@@ -233,6 +238,7 @@ class Sender:
         response = await self.require_django_http().post(
             f'{DJANGO_API}/campaigns/{campaign_id}/{action}/',
             json={},
+            headers=INTERNAL_API_HEADERS,
         )
         try:
             body = response.json()
@@ -619,9 +625,29 @@ class Sender:
         return report
 
     async def tick(self) -> dict[str, Any]:
-        global_config, addresses_config, smsc_config, channels = await self.load_tick_config()
         if not self.active_campaigns:
-            return {'success': True, 'tick_at': iso_now(), 'campaigns_processed': 0, 'reports': []}
+            return {
+                'success': True,
+                'status': 'idle',
+                'reason': 'no_active_campaigns',
+                'tick_at': iso_now(),
+                'campaigns_processed': 0,
+                'reports': [],
+            }
+
+        try:
+            global_config, addresses_config, smsc_config, channels = await self.load_tick_config()
+        except RuntimeError as exc:
+            if str(exc) != NO_ACTIVE_SMSC_CONFIG:
+                raise
+            return {
+                'success': True,
+                'status': 'idle',
+                'reason': 'no_active_smsc_config',
+                'tick_at': iso_now(),
+                'campaigns_processed': 0,
+                'reports': [],
+            }
 
         reports = []
         allocations = allocate_tps(
@@ -782,6 +808,8 @@ async def sender_start(payload: CampaignRequest) -> Any:
             content={'success': False, 'detail': 'Campaign is already running'},
         )
     try:
+        # Check required provider configuration before marking the campaign active.
+        smsc_config = await sender.load_smsc_config()
         activation_response = await sender.activate_campaign(campaign_id)
         campaign_response = await sender.start_campaign(campaign_id)
         sender.active_campaigns[campaign_id] = {
@@ -790,7 +818,6 @@ async def sender_start(payload: CampaignRequest) -> Any:
         }
         sender.ensure_worker()
         global_config = await sender.fetch_active_config('global-tps-config', 'global_tps')
-        smsc_config = await sender.load_smsc_config()
         allocations = allocate_tps(
             int(global_config['global_tps']),
             list(sender.active_campaigns),
@@ -885,6 +912,17 @@ async def health() -> Any:
             'kafka_connected': sender.kafka_connected,
             'last_report': sender.last_report,
         }
+    except RuntimeError as exc:
+        if str(exc) == NO_ACTIVE_SMSC_CONFIG:
+            return {
+                'success': True,
+                'status': 'ok',
+                'worker_running': sender.worker_task is not None and not sender.worker_task.done(),
+                'active_campaigns': sorted(sender.active_campaigns),
+                'smsc_configured': False,
+                'last_report': sender.last_report,
+            }
+        return JSONResponse(status_code=503, content={'success': False, 'detail': f'DB/config error: {exc}'})
     except Exception as exc:
         return JSONResponse(status_code=503, content={'success': False, 'detail': f'DB/config error: {exc}'})
 

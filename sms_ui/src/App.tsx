@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import type { ReactNode } from "react";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -35,8 +36,16 @@ import TestSms from "@/pages/TestSms";
 import ResetPassword from "@/pages/ResetPassword";
 import NotFound from "./pages/NotFound.tsx";
 import Login from "./pages/Login";
+import { useAuth } from "@/context/AuthContext";
 
 const queryClient = new QueryClient();
+
+function CampaignManagerOnly({ children }: { children: ReactNode }) {
+  const { isAuthenticated, isLoading } = useAuth();
+  if (isLoading) return <div className="min-h-screen bg-background" />;
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -51,8 +60,9 @@ const App = () => (
             <Route
               path="/*"
               element={
-                <CampaignProvider>
-                  <AppShell>
+                <CampaignManagerOnly>
+                  <CampaignProvider>
+                    <AppShell>
                     <Routes>
                       <Route path="/" element={<Dashboard />} />
                       <Route path="/dashboard" element={<Dashboard />} />
@@ -125,8 +135,9 @@ const App = () => (
                       />
                       <Route path="*" element={<NotFound />} />
                     </Routes>
-                  </AppShell>
-                </CampaignProvider>
+                    </AppShell>
+                  </CampaignProvider>
+                </CampaignManagerOnly>
               }
             />
           </Routes>
