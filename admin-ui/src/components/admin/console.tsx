@@ -253,7 +253,6 @@ function AssignedResources({
     Channels: [{ label: "Channels", key: "assignedChannels", options: options.channels }],
     TPS: [{ label: "TPS configurations", key: "assignedTpsConfigs", options: options.tpsConfigs }],
     "N-Addresses": [
-      { label: "N-address configurations", key: "assignedNAddressConfigs", options: options.nAddressConfigs },
       { label: "N-addresses", key: "assignedNAddresses", options: options.nAddresses },
     ],
   };
@@ -747,7 +746,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     <div className={`min-w-0 flex-1 ${sidebarCollapsed ? "lg:pl-16" : "lg:pl-[248px]"}`}>
       <header className="sticky top-0 z-20 flex h-[75px] items-center justify-between gap-4 border-b border-border bg-card px-5 md:px-8 lg:px-10"><div className="flex min-w-0 items-center gap-3"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMenuOpen(true)} aria-label="Open navigation"><Menu /></Button><Button variant="ghost" size="icon" className="hidden lg:inline-flex" onClick={() => setSidebarCollapsed(collapsed => !collapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>{sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</Button><span className="hidden text-xs text-muted-foreground sm:inline">Workspace</span><ChevronRight className="hidden size-3 text-muted-foreground sm:inline" /><span className="truncate text-sm font-semibold">{selectedUser ? selectedUser.name : selectedCampaign ? selectedCampaign.name : page}</span></div><div className="flex items-center gap-2 md:gap-4"><Avatar name={currentAdmin} /><Link to="/login" onClick={() => clearAdminTokens()} className="text-xs font-medium text-muted-foreground hover:text-foreground">Sign out</Link></div></header>
 
-      <main className="mx-auto max-w-[1600px] px-5 pb-12 pt-8 md:px-8 lg:px-10">
+      <main className="w-full px-5 pb-12 pt-8 md:px-8 lg:px-10">
         {page === "Overview" && <>
           <div className="mb-8 flex flex-wrap items-start justify-between gap-4"><div><h1 className="font-display text-[27px] font-bold leading-tight md:text-[32px]">Welcome, {currentAdmin} <span className="font-normal">✳</span></h1><p className="mt-1.5 text-sm text-muted-foreground">Here’s what’s happening across your messaging platform today.</p></div><div className="flex items-center gap-2"><span className="flex h-9 items-center gap-2 rounded-md border border-border bg-card px-3 text-xs font-medium text-muted-foreground"><Clock3 className="size-3.5" /> Sep 30, 2026</span></div></div>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[

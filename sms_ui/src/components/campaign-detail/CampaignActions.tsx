@@ -125,8 +125,11 @@ export function CampaignActions({
   const status = campaign.status?.toLowerCase();
   const isRecurring = campaign.schedule?.schedule_type !== "once";
 
-  const isRunning =
-    status === "running" || status === "active";
+  const isInProgress = status === "in_progress";
+  const canPause = campaign.can_pause ?? isInProgress;
+  const canResume = campaign.can_resume ?? status === "paused";
+  const canStop = campaign.can_stop ?? ["active", "in_progress", "paused"].includes(status || "");
+  const canStart = campaign.can_start ?? status === "active";
 
   const isPaused = status === "paused";
 
@@ -134,19 +137,12 @@ export function CampaignActions({
 
   const isArchived = status === "archived";
 
-  const isStopped = status === "stopped";
-
-  const isScheduled =
-    status === "scheduled" ||
-    status === "ready" ||
-    status === "pending";
-
   return (
     <div className="flex items-center gap-2 flex-wrap">
       {/* RUNNING: Pause and Stop */}
-      {isRunning && (
+      {(isInProgress || status === "active") && (
         <>
-          {campaign.can_pause && (
+          {canPause && (
             <Button
               size="sm"
               variant="outline"
@@ -161,7 +157,7 @@ export function CampaignActions({
             </Button>
           )}
 
-          {campaign.can_stop && (
+          {canStop && (
             <Button
               size="sm"
               variant="destructive"
@@ -181,7 +177,7 @@ export function CampaignActions({
       {/* PAUSED: Resume and Stop */}
       {isPaused && (
         <>
-          {campaign.can_resume && (
+          {canResume && (
             <Button
               size="sm"
               disabled={acting}
@@ -195,7 +191,7 @@ export function CampaignActions({
             </Button>
           )}
 
-          {campaign.can_stop && (
+          {canStop && (
             <Button
               size="sm"
               variant="destructive"
@@ -213,7 +209,7 @@ export function CampaignActions({
       )}
 
       {/* SCHEDULED OR STOPPED: Start */}
-      {(isScheduled || isStopped) && campaign.can_start && (
+      {canStart && (
         <Button
           size="sm"
           disabled={acting}

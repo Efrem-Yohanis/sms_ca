@@ -71,7 +71,6 @@ export interface CampaignMessageQueueStats {
     total: number;
     pending: number;
     processing: number;
-    language_breakdown: Record<string, number>;
   };
 }
 

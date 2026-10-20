@@ -1,6 +1,6 @@
-export type CampaignStatus = "draft" | "active" | "paused" | "completed" | "archived";
+export type CampaignStatus = "draft" | "active" | "in_progress" | "paused" | "stopped" | "completed" | "invalid_schedule" | "archived";
 export type ScheduleType = "once" | "daily" | "weekly" | "monthly";
-export type ScheduleStatus = "pending" | "running" | "stop" | "completed";
+export type ScheduleStatus = "active" | "paused" | "stopped" | "completed";
 export type Channel = "sms" | "app_notification" | "flash_sms";
 export type Language = "en" | "am" | "ti" | "om" | "so";
 
@@ -11,9 +11,9 @@ export const CHANNEL_LABELS: Record<Channel, string> = {
 };
 
 export const SCHEDULE_STATUS_LABELS: Record<ScheduleStatus, string> = {
-  pending: "Pending",
-  running: "Running",
-  stop: "Stopped",
+  active: "Active",
+  paused: "Paused",
+  stopped: "Stopped",
   completed: "Completed",
 };
 
@@ -155,7 +155,12 @@ export interface Campaign {
 
 /* ---------- Wizard ---------- */
 
-export type AudienceSource = "manual" | "file" | "database";
+export type AudienceSource = "manual" | "file" | "database" | "sql";
+
+export interface AudienceSqlSelection {
+  source_database_id: number;
+  source_sql: string;
+}
 
 export interface WizardData {
   name: string;
@@ -173,6 +178,7 @@ export interface WizardData {
   default_language: Language;
   audience_source: AudienceSource;
   audience_database_config: AudienceDatabaseSelection | null;
+  audience_sql_config: AudienceSqlSelection | null;
   source_file: File | null;
   recipients: Recipient[];
   db_query: string;
@@ -194,6 +200,7 @@ export const EMPTY_WIZARD: WizardData = {
   default_language: "en",
   audience_source: "manual",
   audience_database_config: null,
+  audience_sql_config: null,
   source_file: null,
   recipients: [],
   db_query: "",

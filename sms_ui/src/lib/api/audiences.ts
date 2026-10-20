@@ -53,7 +53,6 @@ export interface AudienceStatistics {
   valid_percentage: number;
   invalid_percentage: number;
   language_distribution: Record<string, number>;
-  invalid_samples: { msisdn: string; lang: string; error: string }[];
   database_table: string;
   id_field: string;
   created_at: string;
@@ -143,7 +142,8 @@ export interface AudienceBuildProgress {
 export interface CampaignAudienceConfig {
   id: number;
   campaign: number;
-  source_type: "manual" | "file_import" | "database";
+  source_type: "manual" | "file_import" | "database" | "sql";
+  source_sql: string;
   source_database_id: number | null;
   source_table: string;
   source_msisdn_column: string;

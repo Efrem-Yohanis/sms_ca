@@ -124,6 +124,7 @@ SOURCE_TYPE_CHOICES = [
     ('manual', 'Manual Entry'),
     ('file_import', 'File Import'),
     ('database', 'Database Source'),
+    ('sql', 'SQL Query'),
 ]
 LANGUAGE_SOURCE_CHOICES = [
     ('source', 'From Source'),

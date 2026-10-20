@@ -56,7 +56,7 @@ function mapApiCampaign(api: ApiCampaign): Campaign {
       timezone: s.timezone || "Africa/Addis_Ababa",
       auto_reset: s.auto_reset,
       is_active: s.is_active,
-      status: (s.campaign_status || "pending") as Schedule["status"],
+      status: (s.current_window_status || "active") as Schedule["status"],
     };
   }
 

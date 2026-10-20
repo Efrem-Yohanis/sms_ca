@@ -198,11 +198,6 @@ def _audience_campaign_payload(campaign):
 	percentage = valid * 100 / total if total else 0
 	created_at = config.created_at if config else campaign.created_at
 	updated_at = config.updated_at if config else campaign.updated_at
-	preview = [
-		{'msisdn': member.msisdn, 'lang': member.language.code}
-		for member in AudienceMember.objects.filter(campaign=campaign)
-		.select_related('language').order_by('sequence_number')[:20]
-	]
 	payload = {
 		'id': campaign.id,
 		'campaign': campaign.id,
@@ -222,7 +217,6 @@ def _audience_campaign_payload(campaign):
 		'filter_condition': config.source_filter_clause if config else '',
 		'created_at': created_at,
 		'updated_at': updated_at,
-		'recipients_preview': preview,
 	}
 	if config:
 		latest_job = config.build_jobs.order_by('-created_at').first()
@@ -235,6 +229,7 @@ def _audience_campaign_payload(campaign):
 			'source_msisdn_column': config.source_msisdn_column,
 			'source_language_column': config.source_language_column,
 			'source_filter_clause': config.source_filter_clause,
+			'source_sql': config.source_sql,
 			'mapper_enabled': config.mapper_enabled,
 			'mapper_database_id': config.mapper_database_id,
 			'mapper_database_name': config.mapper_database.name if config.mapper_database_id else '',
@@ -411,10 +406,6 @@ class AudienceStatisticsView(APIView):
 			row['language__code']: row['count']
 			for row in members.filter(is_valid=True).values('language__code').annotate(count=Count('id'))
 		}
-		invalid_samples = [
-			{'msisdn': member.msisdn, 'lang': member.language.code, 'error': member.validation_error}
-			for member in members.filter(is_valid=False).select_related('language').order_by('sequence_number')[:10]
-		]
 		return Response({
 			'audience_id': campaign.id,
 			'campaign_id': campaign.id,
@@ -425,7 +416,6 @@ class AudienceStatisticsView(APIView):
 			'valid_percentage': valid * 100 / total if total else 0,
 			'invalid_percentage': (counts['invalid'] or 0) * 100 / total if total else 0,
 			'language_distribution': languages,
-			'invalid_samples': invalid_samples,
 		})
 
 
@@ -436,27 +426,30 @@ class AudienceRecipientsPreviewView(APIView):
 		if not request.user.is_superuser:
 			campaigns = campaigns.filter(created_by=request.user)
 		campaign = get_object_or_404(campaigns, id=pk)
-		members = AudienceMember.objects.filter(campaign=campaign).select_related('language').order_by('sequence_number')
-		total = members.count()
+		members = AudienceMember.objects.filter(campaign=campaign).select_related('language')
+		config = AudienceConfig.objects.filter(campaign=campaign).only('round_number').first()
+		if config:
+			members = members.filter(round_number=config.round_number)
 		search = ''.join(char for char in request.query_params.get('search', '').strip() if char.isdigit())
-		searching = bool(search)
-		matching_members = members.filter(msisdn__icontains=search) if searching else members
-		matching_count = matching_members.count() if searching else total
+		if not search:
+			return Response({'detail': 'Provide an MSISDN to search.'}, status=status.HTTP_400_BAD_REQUEST)
+		from .utils import normalize_msisdn
+		normalized = normalize_msisdn(search)
+		if not normalized:
+			return Response({'detail': 'Enter a valid MSISDN.'}, status=status.HTTP_400_BAD_REQUEST)
+		matching_members = members.filter(msisdn=normalized)
 		preview = [
 			{'msisdn': member.msisdn, 'lang': member.language.code}
-			for member in matching_members[:50 if searching else 100]
+			for member in matching_members[:10]
 		]
 		return Response({
 			'audience_id': campaign.id,
 			'campaign_id': campaign.id,
 			'campaign_name': campaign.name,
-			'total_recipients': total,
-			'matching_count': matching_count,
-			'valid_recipients': members.filter(is_valid=True).count(),
-			'invalid_recipients': members.filter(is_valid=False).count(),
+			'matching_count': len(preview),
 			'preview': preview,
 			'preview_count': len(preview),
-			'has_more': total > len(preview),
+			'has_more': False,
 		})
 
 
@@ -1773,6 +1766,11 @@ class CampaignActivateView(APIView):
 					'messages_built': 0,
 				},
 			})
+		if campaign.status != 'draft':
+			return Response({
+				'success': False,
+				'message': f"Cannot activate campaign in '{campaign.status}' status. Resume paused campaigns or create a new campaign.",
+			}, status=status.HTTP_409_CONFLICT)
 		build = request.data.get('build_messages', True)
 		if isinstance(build, str):
 			build = build.lower() not in ('false', '0', 'no')
@@ -1786,19 +1784,28 @@ class CampaignActivateView(APIView):
 class CampaignDeactivateView(APIView):
 	permission_classes = [IsCampaignManagerOrInternalService]
 	def post(self, request, campaign_id):
-		return _campaign_action_response(campaign_id, 'deactivate_campaign')
+		return _campaign_action_response(request, campaign_id, 'deactivate_campaign')
+
+
+class CampaignRestartView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
+	@extend_schema(tags=['Campaign Actions'], summary='Restart a stopped campaign', request=None, responses={200: OpenApiResponse(description='Restart result.')})
+	def post(self, request, campaign_id):
+		return _campaign_action_response(request, campaign_id, 'restart_campaign')
 
 
 class CampaignStartView(APIView):
 	permission_classes = [IsCampaignManagerOrInternalService]
 	@extend_schema(tags=['Campaign Actions'], summary='Start an active campaign', request=None, responses={200: OpenApiResponse(description='Start result.')})
 	def post(self, request, campaign_id):
-		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
-		method = request.data.get('start_method', 'manual')
-		if method not in {'manual', 'scheduled'}:
-			return Response({'success': False, 'message': 'start_method must be manual or scheduled.'}, status=status.HTTP_400_BAD_REQUEST)
-		result = CampaignActionsService(campaign).start_campaign(start_method=method)
-		return Response(result, status=status.HTTP_200_OK if result['success'] else status.HTTP_400_BAD_REQUEST)
+		response = CampaignSendNowView().post(request, campaign_id)
+		if response.data.get('success'):
+			data = response.data.get('data')
+			response.data['data'] = {
+				**(data if isinstance(data, dict) else {}),
+				'owner_notification_sent': response.data.get('owner_notification_sent'),
+			}
+		return response
 
 
 class CampaignSendNowView(APIView):
@@ -1806,29 +1813,32 @@ class CampaignSendNowView(APIView):
 	@extend_schema(tags=['Campaign Actions'], summary='Start the SMS sender immediately', request=None, responses={202: OpenApiResponse(description='Sender started.')})
 	def post(self, request, campaign_id):
 		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
-		if campaign.status not in {'active', 'in_progress', 'paused'}:
+		if campaign.status not in {'active', 'in_progress'}:
 			return Response(
 				{'success': False, 'message': f"Cannot start sender for campaign in '{campaign.status}' status."},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
-		if not campaign.is_ready_to_execute:
+		if not campaign.refresh_readiness_flag():
 			return Response(
 				{'success': False, 'message': 'Campaign is not ready to execute.'},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
-		start_method = request.data.get('start_method', 'manual')
+		start_method = request.data.get('start_method', 'scheduled')
 		if start_method not in {'manual', 'scheduled'}:
 			return Response({'success': False, 'message': 'start_method must be manual or scheduled.'}, status=status.HTTP_400_BAD_REQUEST)
-
-		if not campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
-			return Response(
-				{'success': False, 'message': 'Campaign has no queued messages to send.'},
-				status=status.HTTP_400_BAD_REQUEST,
-			)
+		schedule = getattr(campaign, 'schedule', None)
+		if not schedule:
+			return Response({'success': False, 'message': 'Campaign has no schedule.'}, status=status.HTTP_400_BAD_REQUEST)
+		in_window, _ = _schedule_window_is_open(schedule)
+		if not in_window:
+			return Response({'success': False, 'message': 'Campaign is outside its scheduled execution window.'}, status=status.HTTP_409_CONFLICT)
 
 		round_number_value = request.data.get('round_number')
 		if round_number_value in (None, ''):
-			round_number = Schedule.objects.filter(campaign=campaign).values_list('current_round', flat=True).first() or 1
+			latest_message_round = campaign.messages.aggregate(
+				latest_round=Max('round_number'),
+			)['latest_round'] or 0
+			round_number = max(schedule.current_round, latest_message_round, 1)
 		else:
 			try:
 				round_number = int(round_number_value)
@@ -1836,6 +1846,14 @@ class CampaignSendNowView(APIView):
 				return Response({'success': False, 'message': 'round_number must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
 			if round_number < 1:
 				return Response({'success': False, 'message': 'round_number must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
+		if not campaign.messages.filter(
+			round_number=round_number,
+			sent_status__in=['PENDING', 'FAILED'],
+		).exists():
+			return Response(
+				{'success': False, 'message': f'Campaign has no queued messages for round {round_number}.'},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
 		try:
 			sender_response = requests.post(
 				f'{settings.SMSC_SENDER_API}/sender/start',
@@ -1849,7 +1867,15 @@ class CampaignSendNowView(APIView):
 				status=status.HTTP_503_SERVICE_UNAVAILABLE,
 			)
 		except ValueError:
-			body = {'detail': sender_response.text[:500]}
+			return Response(
+				{'success': False, 'message': 'SMS sender returned invalid JSON.', 'data': sender_response.text[:500]},
+				status=status.HTTP_502_BAD_GATEWAY,
+			)
+		if not isinstance(body, dict):
+			return Response(
+				{'success': False, 'message': 'SMS sender returned an invalid response.'},
+				status=status.HTTP_502_BAD_GATEWAY,
+			)
 
 		if sender_response.status_code == 409:
 			sender_message = 'Campaign sender is already running.'
@@ -1866,10 +1892,11 @@ class CampaignSendNowView(APIView):
 		previous_status = campaign.status
 		if not was_in_progress:
 			transitioned = Campaign.objects.filter(
-				pk=campaign.pk, status__in=['active', 'paused'],
+				pk=campaign.pk, status='active',
 			).update(status='in_progress', updated_at=timezone.now())
 			if transitioned:
 				campaign.status = 'in_progress'
+				was_in_progress = True
 			else:
 				campaign.refresh_from_db(fields=['status'])
 				was_in_progress = campaign.status == 'in_progress'
@@ -1879,10 +1906,14 @@ class CampaignSendNowView(APIView):
 			owner_notification_sent = send_campaign_started_email(campaign, start_method=start_method)
 		else:
 			owner_notification_sent = None
+		sender_data = body.get('data')
+		if not isinstance(sender_data, dict):
+			sender_data = {'campaign_id': campaign.pk, 'round_number': round_number}
+		sender_data = {**sender_data, 'status': campaign.status}
 		return Response({
 			'success': True,
 			'message': sender_message,
-			'data': body.get('data', body),
+			'data': sender_data,
 			'owner_notification_sent': owner_notification_sent,
 		}, status=status.HTTP_200_OK if sender_response.status_code == 409 else status.HTTP_202_ACCEPTED)
 
@@ -1913,6 +1944,24 @@ class CampaignCancelView(APIView):
 	@extend_schema(tags=['Campaign Actions'], summary='Cancel campaign', request=None, responses={200: OpenApiResponse(description='Cancellation result.')})
 	def post(self, request, campaign_id):
 		return _campaign_action_response(request, campaign_id, 'cancel_campaign')
+
+
+class CampaignArchiveView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
+	def post(self, request, campaign_id):
+		return _campaign_action_response(request, campaign_id, 'archive_campaign')
+
+
+class CampaignScheduledWindowClosedView(APIView):
+	permission_classes = [IsCampaignManagerOrInternalService]
+	def post(self, request, campaign_id):
+		campaign = get_object_or_404(Campaign, id=campaign_id, is_deleted=False)
+		if campaign.status == 'in_progress':
+			Campaign.objects.filter(pk=campaign.pk, status='in_progress').update(
+				status='active', updated_at=timezone.now(),
+			)
+			campaign.refresh_from_db(fields=['status'])
+		return Response({'success': True, 'campaign_id': campaign.pk, 'status': campaign.status})
 
 
 def _campaign_action_response(request, campaign_id, action):
@@ -2351,13 +2400,18 @@ class DashboardView(APIView):
 				return Response({'success': False, 'error': 'campaign_id must be an integer.'}, status=400)
 
 		status_filter = request.query_params.get('status', '').strip().lower()
-		allowed_statuses = {'active', 'in_progress', 'draft', 'paused', 'completed', 'cancelled', 'stopped', 'archived'}
+		allowed_statuses = {
+			'active', 'in_progress', 'draft', 'paused', 'completed',
+			'cancelled', 'stopped', 'invalid_schedule', 'archived',
+		}
 		if status_filter and status_filter not in allowed_statuses:
 			return Response({'success': False, 'error': 'Unsupported campaign status.'}, status=400)
 		if status_filter == 'active':
 			campaigns = campaigns.filter(status__in=['active', 'in_progress'])
 		elif status_filter == 'completed':
 			campaigns = campaigns.filter(status__in=['completed', 'archived'])
+		elif status_filter == 'cancelled':
+			campaigns = campaigns.filter(status='stopped')
 		elif status_filter:
 			campaigns = campaigns.filter(status=status_filter)
 
@@ -2424,7 +2478,8 @@ class DashboardView(APIView):
 			'draft': status_counts.get('draft', 0),
 			'paused': status_counts.get('paused', 0),
 			'completed': completed_count,
-			'cancelled': status_counts.get('cancelled', 0),
+			'stopped': status_counts.get('stopped', 0),
+			'invalid_schedule': status_counts.get('invalid_schedule', 0),
 		}
 
 		sort = request.query_params.get('sort', '-updated_at')
@@ -2440,6 +2495,8 @@ class DashboardView(APIView):
 				When(status='paused', then=Value('PAUSED')),
 				When(status='completed', then=Value('COMPLETED')),
 				When(status='stopped', then=Value('STOPPED')),
+				When(status='invalid_schedule', then=Value('FAILED')),
+				When(status='archived', then=Value('COMPLETED')),
 				default=Value('PENDING'), output_field=CharField(),
 			),
 			'target_audience': 'target_audience', 'success_sent': 'success_sent',
@@ -2620,7 +2677,15 @@ class CampaignListCreateView(ListCreateAPIView):
 
 		execution_status = self.request.query_params.get('execution_status')
 		if execution_status:
-			queryset = queryset.filter(execution_status=execution_status)
+			status_by_execution = {
+				'PENDING': ['draft', 'active'],
+				'PROCESSING': ['in_progress'],
+				'PAUSED': ['paused'],
+				'STOPPED': ['stopped'],
+				'COMPLETED': ['completed', 'archived'],
+				'FAILED': ['invalid_schedule'],
+			}
+			queryset = queryset.filter(status__in=status_by_execution.get(execution_status.upper(), []))
 
 		created_by = self.request.query_params.get('created_by')
 		if created_by:
@@ -3220,13 +3285,15 @@ class ScheduleDueNowView(APIView):
 	).select_related('campaign', 'campaign__audience_config').order_by('campaign_id')
 		for schedule in schedules:
 			campaign = schedule.campaign
-			should_run, local_date = _schedule_window_is_open(schedule)
+			window_open, local_date = _schedule_window_is_open(schedule)
+			eligible_status = campaign.status in {'active', 'in_progress'}
+			is_ready = campaign.has_execution_prerequisites
 			try:
 				audience_config = campaign.audience_config
 			except AudienceConfig.DoesNotExist:
 				audience_config = None
 			round_number = _scheduler_round_number(
-				schedule, campaign, audience_config, should_run, local_date,
+				schedule, campaign, audience_config, window_open and eligible_status, local_date,
 			)
 			active_build = audience_config and AudienceBuildJob.objects.filter(
 				audience_config=audience_config,
@@ -3243,21 +3310,39 @@ class ScheduleDueNowView(APIView):
 				round_number__lt=round_number,
 				is_valid=True,
 			).exists()
+			active_message_build = MessageBuildJob.objects.filter(
+				campaign=campaign,
+				round_number=round_number,
+				status='RUNNING',
+			).exists()
+			audience_needs_rebuild = bool(
+				audience_config
+				and audience_config.rebuild_on_each_round
+				and audience_config.last_rebuild_round < round_number
+				and not active_build
+			)
+			messages_need_build = bool(
+				reusable_audience_exists
+				and not active_message_build
+				and not MessageObject.objects.filter(campaign=campaign, batch_id=batch_id).exists()
+			)
+			pending_messages = MessageObject.objects.filter(
+				campaign=campaign, round_number=round_number,
+				sent_status__in=['PENDING', 'FAILED'],
+			).exists()
+			should_run = bool(
+				window_open and eligible_status and is_ready
+				and not active_build and not active_message_build
+				and (pending_messages or messages_need_build or audience_needs_rebuild)
+			)
 			rows.append({
 				'campaign_id': campaign.id,
+				'campaign_status': campaign.status,
 				'round_number': round_number,
 				'should_run': should_run,
-				'is_ready': campaign.is_ready_to_execute,
-				'audience_needs_rebuild': bool(
-					audience_config
-					and audience_config.rebuild_on_each_round
-					and audience_config.last_rebuild_round < round_number
-					and not active_build
-				),
-				'messages_need_build': bool(
-					reusable_audience_exists
-					and not MessageObject.objects.filter(campaign=campaign, batch_id=batch_id).exists()
-				),
+				'is_ready': is_ready,
+				'audience_needs_rebuild': audience_needs_rebuild,
+				'messages_need_build': messages_need_build,
 				'audience_config_id': audience_config.id if audience_config else None,
 			})
 		return Response({'success': True, 'data': rows})
@@ -3403,6 +3488,11 @@ class CampaignBuildMessagesView(APIView):
 			return Response({'success': False, 'message': 'batch_id must be a string of at most 50 characters.'}, status=status.HTTP_400_BAD_REQUEST)
 		try:
 			result = MessageBuilder(campaign=campaign, round_number=round_number, batch_id=batch_id).build()
+			schedule = getattr(campaign, 'schedule', None)
+			if schedule and campaign.messages.filter(round_number=round_number).exists():
+				if round_number > schedule.current_round:
+					schedule.current_round = round_number
+					schedule.save(update_fields=['current_round', 'updated_at'])
 			result['is_ready_to_execute'] = (
 				campaign.refresh_readiness_flag()
 				if campaign.status == 'draft'
@@ -3480,14 +3570,11 @@ class CampaignMessagesStatsView(APIView):
 		if not request.user.is_superuser:
 			campaigns = campaigns.filter(created_by=request.user)
 		campaign = get_object_or_404(campaigns, pk=pk)
-		qs = MessageObject.objects.filter(campaign=campaign).select_related('language')
+		qs = MessageObject.objects.filter(campaign=campaign)
 		agg = qs.aggregate(
 			total=Count('id'),
 			pending=Count('id', filter=Q(sent_status='PENDING')),
 			processing=Count('id', filter=Q(sent_status='PROCESSING')),
-		)
-		lang_breakdown = dict(
-			qs.values_list('language__code').annotate(c=Count('id')).values_list('language__code', 'c')
 		)
 		return Response({
 			'success': True,
@@ -3496,7 +3583,6 @@ class CampaignMessagesStatsView(APIView):
 				'total': agg['total'] or 0,
 				'pending': agg['pending'] or 0,
 				'processing': agg['processing'] or 0,
-				'language_breakdown': lang_breakdown,
 			},
 		})
 
@@ -3592,7 +3678,6 @@ class CampaignProgressView(APIView):
 				'status': campaign.status,
 			},
 			'batches': batch_counts,
-			'recent_batches': batches[:10],
 		})
 
 

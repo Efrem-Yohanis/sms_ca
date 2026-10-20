@@ -355,6 +355,19 @@ export async function deactivateCampaign(id: number) {
   return handleResponse(res);
 }
 
+export async function restartCampaign(id: number) {
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/restart/`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse<{
+    success: boolean;
+    status?: string;
+    message: string;
+    campaign_id?: number;
+  }>(res);
+}
+
 export async function pauseCampaign(id: number) {
   const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/pause/`, {
     method: "POST",
@@ -369,7 +382,7 @@ export async function pauseCampaign(id: number) {
 }
 
 export async function resumeCampaign(id: number) {
-  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/send-now/`, {
+  const res = await authFetch(`${API_V1_BASE}/campaigns/${id}/resume/`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -562,6 +575,7 @@ export interface AudiencePayload {
   default_language: string;
   source_type: AudienceSource;
   database_config?: AudienceDatabaseSelection | null;
+  sql_config?: { source_database_id: number; source_sql: string } | null;
   source_file?: File | null;
 }
 
@@ -602,6 +616,21 @@ export async function saveCampaignAudience(
       rebuild_timeout_minutes: 30,
     });
     configId = response.data.id;
+  } else if (data.source_type === "sql") {
+    if (!data.sql_config) throw new Error("Choose a database and enter a SQL query before building the audience");
+    const res = await authFetch(`${API_V1_BASE}/campaigns/${campaignId}/audience-config/`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        source_type: "sql",
+        source_database_id: data.sql_config.source_database_id,
+        source_sql: data.sql_config.source_sql,
+        default_language_id: defaultLanguage.id,
+        mapper_enabled: false,
+      }),
+    });
+    const config = await handleApiResponse<{ id: number }>(res);
+    configId = config.id;
   } else if (data.source_type === "file") {
     if (data.source_file) {
       const response = await configureFileAudience(campaignId, {

@@ -16,15 +16,16 @@ import { fetchDashboard, type DashboardCampaign, type DashboardData } from "@/li
 
 const STATUS_COLORS: Record<string, string> = {
   active: "#22c55e", draft: "#3b82f6", paused: "#f59e0b",
-  completed: "#8b5cf6", cancelled: "#ef4444",
+  completed: "#8b5cf6", stopped: "#ef4444", invalid_schedule: "#dc2626",
 };
-const STATUSES = ["active", "draft", "paused", "completed", "cancelled"] as const;
+const STATUSES = ["active", "draft", "paused", "completed", "stopped", "invalid_schedule"] as const;
 const STATUS_BADGES: Record<string, string> = {
   active: "border-green-200 bg-green-50 text-green-800",
   in_progress: "border-green-200 bg-green-50 text-green-800",
   draft: "border-slate-200 bg-slate-100 text-slate-700",
   paused: "border-amber-200 bg-amber-50 text-amber-800",
   stopped: "border-red-200 bg-red-50 text-red-800",
+  invalid_schedule: "border-red-200 bg-red-50 text-red-800",
   completed: "border-violet-200 bg-violet-50 text-violet-800",
   cancelled: "border-red-200 bg-red-50 text-red-800",
   archived: "border-slate-200 bg-slate-100 text-slate-700",
@@ -138,14 +139,19 @@ export default function DashboardHome() {
   };
 
   if (isLoading) return <DashboardLoading />;
-  if (error || !data) return <div className="mx-auto max-w-5xl border border-red-200 bg-card p-8 text-center" role="alert">
+  if (error || !data) return <div className="w-full border border-red-200 bg-card p-8 text-center" role="alert">
     <CircleAlert className="mx-auto mb-3 h-6 w-6 text-red-600" />
     <h1 className="text-lg font-semibold">Could not load dashboard</h1>
     <p className="mt-2 text-sm text-muted-foreground">{error instanceof Error ? error.message : "Please try again."}</p>
     <Button className="mt-5" variant="outline" onClick={() => refetch()}>Retry</Button>
   </div>;
 
-  const statusData = STATUSES.map((key) => ({ key, name: key[0].toUpperCase() + key.slice(1), value: data.status_distribution[key] ?? 0, fill: STATUS_COLORS[key] }));
+  const statusData = STATUSES.map((key) => ({
+    key,
+    name: key.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" "),
+    value: data.status_distribution[key] ?? 0,
+    fill: STATUS_COLORS[key],
+  }));
   const statusTotal = statusData.reduce((total, item) => total + item.value, 0);
   const activityData = [
     { name: "Success Sent", count: data.sent_vs_delivery.success_sent, fill: "#15803d" },

@@ -7,32 +7,22 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { LANGUAGE_LABELS } from "@/types/campaign";
 import type { Language } from "@/types/campaign";
-import { Search, Users, ArrowLeft, BarChart3, Pencil, Trash2, Copy } from "lucide-react";
-import { fetchAudienceDetail, fetchAudienceStatistics, fetchRecipientsPreview } from "@/lib/api/audiences";
-import type { ApiAudienceDetail, AudienceStatistics, RecipientsPreview } from "@/lib/api/audiences";
-import AudienceFormDialog from "@/components/AudienceFormDialog";
+import { Search, Users, ArrowLeft, Trash2, Copy } from "lucide-react";
+import { fetchAudienceDetail, fetchRecipientsPreview } from "@/lib/api/audiences";
+import type { ApiAudienceDetail, RecipientsPreview } from "@/lib/api/audiences";
 import DeleteAudienceDialog from "@/components/DeleteAudienceDialog";
 import { toast } from "sonner";
-
-const LANG_COLORS: Record<string, string> = {
-  EN: "bg-blue-100 text-blue-700 border-blue-200",
-  AM: "bg-emerald-100 text-emerald-700 border-emerald-200",
-  TI: "bg-orange-100 text-orange-700 border-orange-200",
-  OM: "bg-purple-100 text-purple-700 border-purple-200",
-  SO: "bg-red-100 text-red-700 border-red-200",
-};
 
 export default function AudienceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [audience, setAudience] = useState<ApiAudienceDetail | null>(null);
-  const [stats, setStats] = useState<AudienceStatistics | null>(null);
   const [preview, setPreview] = useState<RecipientsPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [searchError, setSearchError] = useState("");
 
   // Dialogs
-  const [formOpen, setFormOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   useEffect(() => {
@@ -43,11 +33,22 @@ export default function AudienceDetail() {
   useEffect(() => {
     const query = search.replace(/\D/g, "");
     if (!id) return;
+    if (query.length < 9) {
+      setPreview(null);
+      setSearchError("");
+      return;
+    }
     let cancelled = false;
     const timer = setTimeout(() => {
+      setSearchError("");
       fetchRecipientsPreview(Number(id), query || undefined)
         .then((result) => { if (!cancelled) setPreview(result); })
-        .catch((error) => { if (!cancelled) console.error("Failed to search audience recipients", error); });
+        .catch((error) => {
+          if (!cancelled) {
+            setPreview(null);
+            setSearchError(error instanceof Error ? error.message : "Search failed. Check the MSISDN and try again.");
+          }
+        });
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [id, search]);
@@ -56,14 +57,9 @@ export default function AudienceDetail() {
     setLoading(true);
     try {
       const numId = Number(id);
-      const [detail, statsRes, previewRes] = await Promise.all([
-        fetchAudienceDetail(numId),
-        fetchAudienceStatistics(numId).catch(() => null),
-        fetchRecipientsPreview(numId).catch(() => null),
-      ]);
+      const detail = await fetchAudienceDetail(numId);
       setAudience(detail);
-      setStats(statsRes);
-      setPreview(previewRes);
+      setPreview(null);
     } catch (e) {
       console.error("Failed to load audience", e);
     } finally {
@@ -97,12 +93,11 @@ export default function AudienceDetail() {
     );
   }
 
-  const recipients = preview?.preview ?? audience.recipients_preview ?? [];
-  // Keep the detail view lightweight while showing a representative 10% sample.
-  const previewLimit = Math.min(50, Math.max(10, Math.ceil((preview?.total_recipients ?? audience.total_count) * 0.1)));
+  const recipients = preview?.preview ?? [];
   const normalizedSearch = search.replace(/\D/g, "");
-  const visibleRecipients = normalizedSearch ? recipients : recipients.slice(0, previewLimit);
-  const resultCount = normalizedSearch ? (preview?.matching_count ?? recipients.length) : (preview?.total_recipients ?? audience.total_count);
+  const lookupReady = normalizedSearch.length >= 9;
+  const visibleRecipients = normalizedSearch ? recipients : [];
+  const matchCount = preview?.matching_count ?? visibleRecipients.length;
 
   return (
     <div className="space-y-6">
@@ -116,9 +111,6 @@ export default function AudienceDetail() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setFormOpen(true)}>
-            <Pencil className="h-3.5 w-3.5" /> Edit
-          </Button>
           <Button variant="outline" size="sm" className="gap-1.5 text-destructive hover:text-destructive" onClick={() => setDeleteOpen(true)}>
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </Button>
@@ -147,26 +139,6 @@ export default function AudienceDetail() {
         </Card>
       </div>
 
-      {/* Language distribution */}
-      {stats?.language_distribution && (
-        <Card className="p-5 shadow-card">
-          <div className="flex items-center gap-2 mb-3">
-            <BarChart3 className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium">Language Distribution</h3>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            {Object.entries(stats.language_distribution).map(([lang, count]) => (
-              <div key={lang} className="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-2">
-                <Badge variant="outline" className={`text-xs ${LANG_COLORS[lang.toUpperCase()] || ""}`}>
-                  {LANGUAGE_LABELS[lang as Language] ?? lang}
-                </Badge>
-                <span className="text-sm font-medium">{count.toLocaleString()}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
       {/* Database info */}
       {audience.database_info && (
         <Card className="p-5 shadow-card">
@@ -192,7 +164,7 @@ export default function AudienceDetail() {
       <Card className="shadow-card overflow-hidden">
         <div className="px-5 py-3 border-b bg-muted/40 flex items-center justify-between">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            {normalizedSearch ? `Search Results (showing ${visibleRecipients.length} of ${resultCount.toLocaleString()} matches)` : `Recipients Preview (showing ${visibleRecipients.length} of ${(preview?.total_recipients ?? audience.total_count).toLocaleString()})`}
+            {normalizedSearch ? `Search Results (showing ${visibleRecipients.length} of ${matchCount})` : "Search recipients by MSISDN"}
           </span>
         </div>
 
@@ -217,18 +189,17 @@ export default function AudienceDetail() {
             {visibleRecipients.length === 0 && (
               <tr>
                 <td colSpan={4} className="px-5 py-8 text-center text-muted-foreground">
-                  {normalizedSearch ? "No recipients match your search." : "No recipients preview available."}
+                  {searchError || (lookupReady ? "No recipients match your search." : "Enter a full MSISDN to search the audience.")}
                 </td>
               </tr>
             )}
             {visibleRecipients.map((r, i) => {
-              const langKey = r.lang?.toUpperCase() || "";
               return (
                 <tr key={r.msisdn} className="border-b last:border-b-0 hover:bg-accent/30 transition-colors">
                   <td className="px-5 py-3 text-muted-foreground">{i + 1}</td>
                   <td className="px-5 py-3 font-mono text-xs">{r.msisdn}</td>
                   <td className="px-5 py-3">
-                    <Badge variant="outline" className={`text-xs ${LANG_COLORS[langKey] || ""}`}>
+                    <Badge variant="outline" className="text-xs">
                       {LANGUAGE_LABELS[r.lang as Language] ?? r.lang}
                     </Badge>
                   </td>
@@ -245,42 +216,7 @@ export default function AudienceDetail() {
         </div>
       </Card>
 
-      {/* Invalid samples */}
-      {stats?.invalid_samples && stats.invalid_samples.length > 0 && (
-        <Card className="shadow-card overflow-hidden">
-          <div className="px-5 py-3 border-b bg-destructive/5">
-            <span className="text-xs font-medium text-destructive uppercase tracking-wider">
-              Invalid Samples ({stats.invalid_samples.length})
-            </span>
-          </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b">
-                <th className="text-left px-5 py-2 font-medium text-muted-foreground text-xs uppercase">MSISDN</th>
-                <th className="text-left px-5 py-2 font-medium text-muted-foreground text-xs uppercase">Lang</th>
-                <th className="text-left px-5 py-2 font-medium text-muted-foreground text-xs uppercase">Error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.invalid_samples.map((s, i) => (
-                <tr key={i} className="border-b last:border-b-0">
-                  <td className="px-5 py-2.5 font-mono text-xs">{s.msisdn}</td>
-                  <td className="px-5 py-2.5 text-xs">{s.lang}</td>
-                  <td className="px-5 py-2.5 text-xs text-destructive">{s.error}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      )}
-
       {/* Dialogs */}
-      <AudienceFormDialog
-        open={formOpen}
-        onOpenChange={setFormOpen}
-        audienceId={Number(id)}
-        onSuccess={loadData}
-      />
       <DeleteAudienceDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}

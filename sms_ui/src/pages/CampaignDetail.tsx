@@ -12,21 +12,19 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle
 } from "@/components/ui/alert-dialog";
-import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { useState, useCallback } from "react";
 import {
-  fetchCampaign, fetchCampaignProgress, fetchCampaignBatches,
-  activateCampaign, startCampaign, pauseCampaign, resumeCampaign, stopCampaign,
+  fetchCampaign, fetchCampaignProgress,
+  activateCampaign, startCampaign, pauseCampaign, resumeCampaign, stopCampaign, restartCampaign,
   completeCampaign, archiveCampaign, softDeleteCampaign, deactivateCampaign,
   type ApiCampaign
 } from "@/lib/api";
 import {
-  buildCampaignMessages, clearCampaignMessages, fetchCampaignMessages,
+  buildCampaignMessages, clearCampaignMessages,
   fetchCampaignMessageStats, fetchCampaignMessageBuildProgress, fetchMessageContentDetail,
 } from "@/lib/api/messages";
-import type { CampaignMessageQueueItem } from "@/lib/api/messages";
 import type { CampaignStatus, Channel } from "@/types/campaign";
 import { CHANNEL_LABELS, SCHEDULE_TYPE_LABELS, LANGUAGE_LABELS, DAY_LABELS } from "@/types/campaign";
 import { Section, Field } from "@/components/campaign-detail/Section";
@@ -38,6 +36,8 @@ const STATUS_COLORS: Record<string, string> = {
   active: "bg-green-100 text-green-800",
   in_progress: "bg-green-100 text-green-800",
   paused: "bg-yellow-100 text-yellow-800",
+  stopped: "bg-destructive/10 text-destructive",
+  invalid_schedule: "bg-destructive/10 text-destructive",
   completed: "bg-blue-100 text-blue-800",
   archived: "bg-secondary text-secondary-foreground",
 };
@@ -48,6 +48,12 @@ const EXEC_STATUS_COLORS: Record<string, string> = {
   PAUSED: "bg-yellow-100 text-yellow-800",
   COMPLETED: "bg-blue-100 text-blue-800",
   FAILED: "bg-destructive/10 text-destructive",
+};
+const SCHEDULE_STATUS_COLORS: Record<string, string> = {
+  active: "bg-green-100 text-green-800",
+  paused: "bg-yellow-100 text-yellow-800",
+  stopped: "bg-muted text-muted-foreground",
+  completed: "bg-blue-100 text-blue-800",
   STOPPED: "bg-yellow-100 text-yellow-800",
 };
 
@@ -69,7 +75,6 @@ export default function CampaignDetail() {
   } | null>(null);
   const [acting, setActing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [batchPage, setBatchPage] = useState(1);
 
   // Campaign detail
   const { data: campaign, isLoading, error } = useQuery({
@@ -93,18 +98,9 @@ export default function CampaignDetail() {
     refetchInterval: 300000,
   });
 
-  // Batches
-  const { data: batchesData } = useQuery({
-    queryKey: ["campaign-batches", numId, batchPage],
-    queryFn: () => fetchCampaignBatches(numId),
-    enabled: !!numId,
-    refetchInterval: 300000,
-  });
-
   const invalidate = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["campaign", numId] });
     queryClient.invalidateQueries({ queryKey: ["campaign-progress", numId] });
-    queryClient.invalidateQueries({ queryKey: ["campaign-batches", numId] });
     queryClient.invalidateQueries({ queryKey: ["campaign-message-stats", numId] });
     queryClient.invalidateQueries({ queryKey: ["campaign-messages", numId] });
     queryClient.invalidateQueries({ queryKey: ["campaign-message-build-progress", numId] });
@@ -116,7 +112,6 @@ export default function CampaignDetail() {
       await Promise.all([
         queryClient.refetchQueries({ queryKey: ["campaign", numId] }),
         queryClient.refetchQueries({ queryKey: ["campaign-progress", numId] }),
-        queryClient.refetchQueries({ queryKey: ["campaign-batches", numId] }),
         queryClient.refetchQueries({ queryKey: ["campaign-message-stats", numId] }),
         queryClient.refetchQueries({ queryKey: ["campaign-messages", numId] }),
         queryClient.refetchQueries({ queryKey: ["campaign-message-build-progress", numId] }),
@@ -171,8 +166,6 @@ export default function CampaignDetail() {
   const messageContent = c.message_content ?? linkedMessageContent;
   const p = progressData?.progress;
   const batches = progressData?.batches;
-  const recentBatches = (progressData as any)?.recent_batches || [];
-  const batchList = Array.isArray(batchesData) ? batchesData : (batchesData as any)?.results || recentBatches;
 
   const channels: string[] = Array.isArray(c.channels)
     ? c.channels
@@ -206,7 +199,7 @@ export default function CampaignDetail() {
             <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             Refresh
           </Button>
-          <Badge className={STATUS_COLORS[c.status] || "bg-muted"}>{c.status}</Badge>
+          <Badge className={STATUS_COLORS[c.status] || "bg-muted"}>{c.status_display || c.status.replaceAll("_", " ")}</Badge>
           {c.execution_status_display && (
             <Badge className={EXEC_STATUS_COLORS[c.execution_status] || ""} variant="outline">
               {c.execution_status_display}
@@ -216,70 +209,13 @@ export default function CampaignDetail() {
       </div>
 
       {/* ─── Action Buttons ─── */}
-      {/* <div className="flex items-center gap-2 flex-wrap">
-        <Button size="sm" disabled={acting || c.status !== "draft" || !c.is_ready_to_execute} onClick={() => confirmAndExec(
-          "Activate Campaign",
-          "This builds the message queue, confirms the campaign is ready to execute, and activates it. It will not start sending until you choose Start.",
-          () => activateCampaign(numId),
-        )} className="gap-1.5">
-          <CheckCircle2 className="h-3.5 w-3.5" /> Activate
-        </Button>
-        <Button size="sm" disabled={acting || !["active", "in_progress", "paused", "stopped"].includes(c.status)} onClick={() => confirmAndExec(
-          "Start Campaign",
-          "Start the SMS sender immediately for queued messages, regardless of the schedule window.",
-          () => startCampaign(numId),
-        )} className="gap-1.5">
-          <Play className="h-3.5 w-3.5" /> Start
-        </Button>
-        <Button size="sm" variant="outline" disabled={acting || c.status !== "in_progress"} onClick={() => confirmAndExec(
-          "Stop Campaign",
-          "Stop the running campaign and mark it completed. This does not cancel or delete it.",
-          () => completeCampaign(numId),
-        )} className="gap-1.5">
-          <Square className="h-3.5 w-3.5" /> Stop
-        </Button>
-        <Button size="sm" variant="outline" disabled={acting || c.status !== "in_progress"} onClick={() => confirmAndExec(
-          "Pause Campaign",
-          "Temporarily suspend sending. You can resume this campaign later.",
-          () => pauseCampaign(numId),
-        )} className="gap-1.5">
-          <Pause className="h-3.5 w-3.5" /> Pause
-        </Button>
-        <Button size="sm" disabled={acting || c.status !== "paused"} onClick={() => confirmAndExec(
-          "Resume Campaign",
-          "Continue sending queued messages from where this campaign paused.",
-          () => resumeCampaign(numId),
-        )} className="gap-1.5">
-          <Play className="h-3.5 w-3.5" /> Resume
-        </Button>
-        <Button size="sm" variant="destructive" disabled={acting || !["active", "in_progress", "paused"].includes(c.status)} onClick={() => confirmAndExec(
-          "Cancel Campaign",
-          "Abort this campaign. It will not resume sending.",
-          () => stopCampaign(numId),
-          "destructive",
-        )} className="gap-1.5">
-          <Square className="h-3.5 w-3.5" /> Cancel
-        </Button>
-        <Button size="sm" variant="outline" disabled={acting || c.status !== "draft"} onClick={() => navigate(`/campaigns/${c.id}/edit`)} className="gap-1.5">
-          <Edit className="h-3.5 w-3.5" /> Edit
-        </Button>
-        <Button size="sm" variant="outline" disabled={acting} onClick={() => confirmAndExec(
-          "Delete Campaign",
-          "Move this campaign to trash. This does not permanently erase its records.",
-          async () => { await softDeleteCampaign(numId); navigate("/campaigns"); },
-          "destructive",
-        )} className="gap-1.5">
-          <Trash2 className="h-3.5 w-3.5" /> Delete
-        </Button>
-      </div> */}
-      
 <div className="flex items-center gap-2 flex-wrap">
-  {/* DRAFT: Activate and Edit */}
+  {/* DRAFT: Activate, Edit, and Delete */}
   {c.status === "draft" && (
     <>
       <Button
         size="sm"
-        disabled={acting || !c.is_ready_to_execute}
+        disabled={acting}
         onClick={() =>
           confirmAndExec(
             "Activate Campaign",
@@ -303,12 +239,48 @@ export default function CampaignDetail() {
         <Edit className="h-3.5 w-3.5" />
         Edit
       </Button>
+
+      <Button
+        size="sm"
+        variant="destructive"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Delete Campaign",
+            "Move this draft campaign to trash. This does not permanently erase its records.",
+            async () => {
+              await softDeleteCampaign(numId);
+              navigate("/campaigns");
+            },
+            "destructive"
+          )
+        }
+        className="gap-1.5"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+        Delete
+      </Button>
     </>
   )}
 
-  {/* ACTIVE: Deactivate and Start when ready */}
+  {/* ACTIVE: Start now or deactivate */}
   {c.status === "active" && (
     <>
+      <Button
+        size="sm"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Start Campaign",
+            "Start sending queued messages now. The campaign must be inside its configured schedule window.",
+            () => startCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        <Play className="h-3.5 w-3.5" />
+        Start
+      </Button>
       <Button
         size="sm"
         variant="outline"
@@ -316,7 +288,7 @@ export default function CampaignDetail() {
         onClick={() =>
           confirmAndExec(
             "Deactivate Campaign",
-            "Remove this campaign from scheduled execution. This should not interrupt an already-running execution unless the backend explicitly supports that behavior.",
+            "Deactivate this campaign and remove it from scheduled execution. It will return to Draft.",
             () => deactivateCampaign(numId)
           )
         }
@@ -325,23 +297,6 @@ export default function CampaignDetail() {
         Deactivate
       </Button>
 
-      {c.is_ready_to_execute && (
-        <Button
-          size="sm"
-          disabled={acting}
-          onClick={() =>
-            confirmAndExec(
-              "Start Campaign",
-              "Start sending queued messages immediately. Verify that the campaign's schedule permits execution.",
-              () => startCampaign(numId)
-            )
-          }
-          className="gap-1.5"
-        >
-          <Play className="h-3.5 w-3.5" />
-          Start
-        </Button>
-      )}
     </>
   )}
 
@@ -372,7 +327,7 @@ export default function CampaignDetail() {
         onClick={() =>
           confirmAndExec(
             "Stop Campaign",
-            "Stop the current execution. Confirm whether your backend treats this as a permanent stop or marks the campaign completed.",
+            "Stop sending and deactivate the schedule. You can restart it later from this page.",
             () => stopCampaign(numId),
             "destructive"
           )
@@ -381,6 +336,13 @@ export default function CampaignDetail() {
       >
         <Square className="h-3.5 w-3.5" />
         Stop
+      </Button>
+      <Button size="sm" variant="outline" disabled={acting} onClick={() => confirmAndExec(
+        "Complete Campaign",
+        "Mark this campaign as completed and prevent any further scheduled execution.",
+        () => completeCampaign(numId)
+      )} className="gap-1.5">
+        <CheckCircle2 className="h-3.5 w-3.5" /> Complete
       </Button>
     </>
   )}
@@ -394,7 +356,7 @@ export default function CampaignDetail() {
         onClick={() =>
           confirmAndExec(
             "Resume Campaign",
-            "Resume message delivery from the existing queue.",
+            "Reactivate this campaign. It will resume during its next scheduled window.",
             () => resumeCampaign(numId)
           )
         }
@@ -411,7 +373,7 @@ export default function CampaignDetail() {
         onClick={() =>
           confirmAndExec(
             "Stop Campaign",
-            "Stop the current execution. This action may not be reversible.",
+            "Stop sending and deactivate the schedule. You can restart it later from this page.",
             () => stopCampaign(numId),
             "destructive"
           )
@@ -424,23 +386,40 @@ export default function CampaignDetail() {
     </>
   )}
 
-  {/* STOPPED: Restart only if the backend permits it */}
-  {c.status === "stopped" && c.is_ready_to_execute && (
-    <Button
-      size="sm"
-      disabled={acting}
-      onClick={() =>
-        confirmAndExec(
-          "Restart Campaign",
-          "Restart this campaign if its schedule and backend state permit a new execution.",
-          () => startCampaign(numId)
-        )
-      }
-      className="gap-1.5"
-    >
-      <Play className="h-3.5 w-3.5" />
-      Restart
-    </Button>
+  {/* STOPPED: Restart the schedule or deactivate */}
+  {c.status === "stopped" && (
+    <>
+      <Button
+        size="sm"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Restart Campaign",
+            "Reactivate this campaign and its schedule. It will run in the next scheduled window; use Start to begin sending now during an open window.",
+            () => restartCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        <Play className="h-3.5 w-3.5" />
+        Restart
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={acting}
+        onClick={() =>
+          confirmAndExec(
+            "Deactivate Campaign",
+            "Deactivate this stopped campaign and return it to Draft.",
+            () => deactivateCampaign(numId)
+          )
+        }
+        className="gap-1.5"
+      >
+        Deactivate
+      </Button>
+    </>
   )}
 
   {/* COMPLETED: Archive */}
@@ -531,44 +510,6 @@ export default function CampaignDetail() {
         </Section>
       )}
 
-      {/* ─── Batches Table ─── */}
-      {batchList.length > 0 && (
-        <Section icon={Layers} title="Recent Batches">
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Batch ID</TableHead>
-                  <TableHead className="text-right">Total</TableHead>
-                  <TableHead className="text-right">Success</TableHead>
-                  <TableHead className="text-right">Failed</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {batchList.map((b: any, i: number) => (
-                  <TableRow key={b.batch_id || i}>
-                    <TableCell className="font-mono text-xs">{b.batch_id || `#${i + 1}`}</TableCell>
-                    <TableCell className="text-right">{b.total_messages?.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-green-600">{b.success_count?.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-destructive">{b.failed_count?.toLocaleString()}</TableCell>
-                    <TableCell>
-                      <Badge className={`text-xs ${EXEC_STATUS_COLORS[b.status] || "bg-muted"}`}>
-                        {b.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {b.created_at ? new Date(b.created_at).toLocaleString() : "—"}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </Section>
-      )}
-
       {/* ─── Campaign Info ─── */}
       <Section icon={Radio} title="Campaign Info">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
@@ -609,7 +550,13 @@ export default function CampaignDetail() {
       <CampaignReports campaignId={numId} campaignName={c.name} ownerEmails={c.owner_emails ?? []} />
 
       {/* ─── Message Queue ─── */}
-      {(messageContent || c.message_content_id) && <CampaignMessageQueue campaignId={numId} activationWorking={acting} />}
+      {(messageContent || c.message_content_id) && (
+        <CampaignMessageQueue
+          campaignId={numId}
+          activationWorking={acting}
+          batchCount={batches?.total_batches ?? 0}
+        />
+      )}
 
       {/* ─── Confirm Dialog ─── */}
       <AlertDialog open={!!confirmAction} onOpenChange={(open) => !open && setConfirmAction(null)}>
@@ -680,6 +627,8 @@ function ScheduleInfo({ schedule: s }: { schedule: NonNullable<ApiCampaign["sche
   const isOneTime = s.schedule_type === "once";
   const tw = s.time_windows;
   const windows = Array.isArray(tw) ? tw : Object.values(tw || {});
+  const scheduleStatus = s.current_window_status || s.schedule_status || (s.is_active ? "active" : "paused");
+  const scheduleStatusLabel = scheduleStatus[0].toUpperCase() + scheduleStatus.slice(1);
 
   return (
     <Section icon={CalendarClock} title="Schedule">
@@ -691,15 +640,15 @@ function ScheduleInfo({ schedule: s }: { schedule: NonNullable<ApiCampaign["sche
           {s.schedule_summary && (
             <span className="text-muted-foreground">— {s.schedule_summary}</span>
           )}
-          <Badge className={`ml-auto ${s.is_active ? "bg-green-100 text-green-800" : "bg-muted text-muted-foreground"}`}>
-            {s.is_active ? "Active" : "Inactive"}
+          <Badge className={`ml-auto ${SCHEDULE_STATUS_COLORS[scheduleStatus] || "bg-muted text-muted-foreground"}`}>
+            {scheduleStatusLabel}
           </Badge>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="Start Date" value={s.start_date} />
           {s.end_date && <Field label="End Date" value={s.end_date} />}
-          <Field label="Timezone" value="Ethiopian time" />
+          <Field label="Timezone" value={s.timezone} />
           {s.next_run_date && <Field label="Next Run" value={s.next_run_date} />}
         </div>
 
@@ -776,18 +725,21 @@ function MessageInfo({ mc }: { mc: NonNullable<ApiCampaign["message_content"]> }
   );
 }
 
-function CampaignMessageQueue({ campaignId, activationWorking }: { campaignId: number; activationWorking: boolean }) {
+function CampaignMessageQueue({
+  campaignId,
+  activationWorking,
+  batchCount,
+}: {
+  campaignId: number;
+  activationWorking: boolean;
+  batchCount: number;
+}) {
   const queryClient = useQueryClient();
   const [confirmAction, setConfirmAction] = useState<"build" | "clear" | null>(null);
   const [working, setWorking] = useState(false);
   const statsQuery = useQuery({
     queryKey: ["campaign-message-stats", campaignId],
     queryFn: () => fetchCampaignMessageStats(campaignId),
-    refetchInterval: 300000,
-  });
-  const messagesQuery = useQuery({
-    queryKey: ["campaign-messages", campaignId],
-    queryFn: () => fetchCampaignMessages(campaignId, 1, 5),
     refetchInterval: 300000,
   });
   const buildProgressQuery = useQuery({
@@ -797,7 +749,6 @@ function CampaignMessageQueue({ campaignId, activationWorking }: { campaignId: n
       working || activationWorking || query.state.data?.data?.status === "RUNNING" ? 1000 : 300000,
   });
   const stats = statsQuery.data?.data;
-  const messages = messagesQuery.data?.results ?? [];
   const messageBuild = buildProgressQuery.data?.data;
 
   async function runQueueAction() {
@@ -828,8 +779,7 @@ function CampaignMessageQueue({ campaignId, activationWorking }: { campaignId: n
     <Section icon={Layers} title="Message Queue">
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 flex-1">
-            <StatBox icon={Mail} label="Queued" value={stats?.total ?? 0} color="text-foreground" />
+          <div className="grid grid-cols-2 gap-3 flex-1">
             <StatBox icon={Clock} label="Pending" value={stats?.pending ?? 0} color="text-muted-foreground" />
             <StatBox icon={Loader2} label="Processing" value={stats?.processing ?? 0} color="text-yellow-600" />
           </div>
@@ -876,48 +826,10 @@ function CampaignMessageQueue({ campaignId, activationWorking }: { campaignId: n
           </div>
         )}
 
-        {messages.length > 0 ? (
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Recipient</TableHead>
-                  <TableHead>Language</TableHead>
-                  <TableHead>Message</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Batch</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {messages.map((message: CampaignMessageQueueItem) => (
-                  <TableRow key={message.id}>
-                    <TableCell className="font-mono text-xs">{message.recipient}</TableCell>
-                    <TableCell>{message.language_code ? LANGUAGE_LABELS[message.language_code as keyof typeof LANGUAGE_LABELS] || message.language_code : "—"}</TableCell>
-                    <TableCell className="max-w-[320px] truncate">{message.message_content}</TableCell>
-                    <TableCell><Badge variant="outline">{message.status}</Badge></TableCell>
-                    <TableCell className="font-mono text-xs">{message.batch_id}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No message rows have been built for this campaign.</p>
-        )}
-        {(stats?.total ?? 0) > 0 && (
-          <div className="flex justify-end border-t pt-3">
-            <Link to={`/campaigns/${campaignId}/messages`} className="text-sm font-medium text-primary hover:underline">
-              View all {stats?.total} messages
-            </Link>
-          </div>
-        )}
-        {stats?.language_breakdown && Object.keys(stats.language_breakdown).length > 0 && (
-          <div className="flex flex-wrap gap-2 border-t pt-3 text-xs text-muted-foreground">
-            {Object.entries(stats.language_breakdown).map(([language, count]) => (
-              <span key={language}>{LANGUAGE_LABELS[language as keyof typeof LANGUAGE_LABELS] || language}: {count}</span>
-            ))}
-          </div>
-        )}
+        <div className="grid grid-cols-2 gap-3 border-t pt-4">
+          <StatBox icon={Mail} label="Message Objects" value={stats?.total ?? 0} color="text-foreground" />
+          <StatBox icon={Layers} label="Batches" value={batchCount} color="text-foreground" />
+        </div>
       </div>
 
       <AlertDialog open={Boolean(confirmAction)} onOpenChange={(open) => !open && setConfirmAction(null)}>

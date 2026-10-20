@@ -251,20 +251,30 @@ with DAG(
 
 def write_dag(schedule):
     folder = settings.AIRFLOW_DAGS_DIR
-    os.makedirs(folder, exist_ok=True)
-    destination = dag_file_path(schedule)
-    fd, temporary_path = tempfile.mkstemp(prefix=".schedule-", suffix=".tmp", dir=folder, text=True)
+    temporary_path = None
     try:
+        os.makedirs(folder, exist_ok=True)
+        destination = dag_file_path(schedule)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=".schedule-", suffix=".tmp", dir=folder, text=True
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             output.write(render_dag(schedule))
         os.chmod(temporary_path, 0o644)
         os.replace(temporary_path, destination)
     except OSError as exc:
-        try:
-            os.unlink(temporary_path)
-        except FileNotFoundError:
-            pass
-        raise AirflowError(f"Unable to publish Airflow DAG: {exc}", 503) from exc
+        cleanup_error = None
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_exc:
+                cleanup_error = cleanup_exc
+        message = f"Unable to publish Airflow DAG: {exc}"
+        if cleanup_error:
+            message += f"; unable to clean up temporary DAG file: {cleanup_error}"
+        raise AirflowError(message, 503) from exc
 
 
 def remove_dag_file(schedule):
@@ -396,7 +406,11 @@ def all_dag_runs(limit=200):
 
 
 def delete_dag_by_id(dag_id):
-    airflow_request("DELETE", f"dags/{dag_id}")
+    try:
+        airflow_request("DELETE", f"dags/{dag_id}")
+    except AirflowError as exc:
+        if exc.status_code != 404:
+            raise
 
 
 def remove_dag_file_by_id(dag_id):

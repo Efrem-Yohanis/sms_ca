@@ -82,6 +82,8 @@ class AudienceBuildService:
             rows = self._file_rows()
         elif source_type == 'database':
             rows = self._database_rows()
+        elif source_type == 'sql':
+            rows = self._sql_rows()
         else:
             raise ValueError(f'Unsupported source type: {source_type}')
 
@@ -442,6 +444,29 @@ class AudienceBuildService:
                             'msisdn': values.get('msisdn'),
                             'language': values.get('language') or '',
                             'mapper_language': values.get('mapper_language') or '',
+                        }
+            finally:
+                cursor.close()
+
+    def _sql_rows(self):
+        connector = DatabaseConnector(self.config.source_database)
+        with connector._connect() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(self.config.source_sql)
+                columns = [str(column[0]).lower() for column in cursor.description or []]
+                if 'msisdn' not in columns:
+                    raise ValueError("SQL query must return a column named 'msisdn'.")
+                msisdn_index = columns.index('msisdn')
+                language_index = columns.index('language') if 'language' in columns else None
+                while True:
+                    records = cursor.fetchmany(self.chunk_size)
+                    if not records:
+                        break
+                    for record in records:
+                        yield {
+                            'msisdn': record[msisdn_index],
+                            'language': record[language_index] if language_index is not None else '',
                         }
             finally:
                 cursor.close()

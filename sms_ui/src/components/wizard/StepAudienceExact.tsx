@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Database, Keyboard, Upload } from "lucide-react";
+import { Code2, Database, Keyboard, Upload } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -8,6 +8,7 @@ import type { AudienceRecord, AudienceSourceType } from "@/types/audience";
 import ManualInsertTab from "@/components/audience-create/ManualInsertTab";
 import CsvUploadTab from "@/components/audience-create/CsvUploadTab";
 import DatabaseTab from "@/components/audience-create/DatabaseTab";
+import SqlQueryTab from "@/components/audience-create/SqlQueryTab";
 
 interface Props {
   data: WizardData;
@@ -19,6 +20,7 @@ const SOURCES: { value: AudienceSourceType; label: string; desc: string; icon: t
   { value: "manual", label: "Manual Entry", desc: "Type MSISDNs one by one", icon: Keyboard },
   { value: "file", label: "Import from File", desc: "Upload CSV or Excel", icon: Upload },
   { value: "database", label: "Database Source", desc: "Query an existing table", icon: Database },
+  { value: "sql", label: "SQL Query", desc: "Write a SELECT query", icon: Code2 },
 ];
 
 function toAudienceRecords(data: WizardData): AudienceRecord[] {
@@ -45,14 +47,14 @@ export default function StepAudienceExact({ data, errors, update }: Props) {
 
   function switchSource(next: AudienceSourceType) {
     setRecords([]);
-    update({ audience_source: next, recipients: [], db_query: "", audience_database_config: null, source_file: null });
+    update({ audience_source: next, recipients: [], db_query: "", audience_database_config: null, audience_sql_config: null, source_file: null });
   }
 
   return (
     <div className="space-y-5">
       <Card className="p-5 shadow-card space-y-3">
         <Label className="text-base font-medium">Audience Source</Label>
-        <RadioGroup value={source} onValueChange={(value) => switchSource(value as AudienceSourceType)} className="grid gap-3 sm:grid-cols-3">
+        <RadioGroup value={source} onValueChange={(value) => switchSource(value as AudienceSourceType)} className="grid gap-3 sm:grid-cols-4">
           {SOURCES.map((item) => (
             <label key={item.value} htmlFor={`wizard-src-${item.value}`} className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${source === item.value ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}>
               <RadioGroupItem value={item.value} id={`wizard-src-${item.value}`} className="mt-0.5" />
@@ -81,6 +83,7 @@ export default function StepAudienceExact({ data, errors, update }: Props) {
             onConfigChange={(audience_database_config) => update({ audience_database_config })}
           />
         )}
+        {source === "sql" && <SqlQueryTab initialConfig={data.audience_sql_config} onConfigChange={(audience_sql_config) => update({ audience_sql_config })} defaultLanguage={data.default_language} onDefaultLanguageChange={(default_language) => update({ default_language })} />}
       </Card>
       {errors.recipients && <p className="text-sm text-destructive">{errors.recipients}</p>}
     </div>

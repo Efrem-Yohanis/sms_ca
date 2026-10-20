@@ -21,7 +21,7 @@ interface Props {
 export default function ConfigFormModal({ open, onClose, title, readOnly, onSubmit, loading, children }: Props) {
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto rounded-none">
+      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto rounded-lg">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>

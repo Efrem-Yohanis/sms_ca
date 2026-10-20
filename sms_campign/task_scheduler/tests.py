@@ -8,7 +8,15 @@ from rest_framework.test import APIClient
 
 from sms_campaign_manager.models import EmailConfig
 
-from .airflow import AirflowError, connection_exists, list_connections, logs_for_run, render_dag, set_paused
+from .airflow import (
+    AirflowError,
+    connection_exists,
+    delete_dag_by_id,
+    list_connections,
+    logs_for_run,
+    render_dag,
+    set_paused,
+)
 from .models import Schedule
 from .notifications import send_schedule_notification
 from .views import _sync_one
@@ -83,6 +91,85 @@ class ScheduleApiTests(TestCase):
         write_dag.assert_called_once_with(schedule)
         set_paused.assert_called_once_with(schedule, False)
         send_notification.assert_called_once_with(schedule, "created")
+
+    @patch("task_scheduler.views.send_schedule_notification")
+    @patch(
+        "task_scheduler.airflow.os.makedirs",
+        side_effect=OSError("DAG folder is not writable."),
+    )
+    def test_create_records_filesystem_sync_failure_for_retry(
+        self, make_dag_folder, send_notification
+    ):
+        response = self.client.post(
+            "/api/v1/task-scheduler/schedules/", self.payload, format="json"
+        )
+
+        schedule = Schedule.objects.get(name="Example task")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(schedule.status, Schedule.Status.FAILED)
+        self.assertIn("DAG folder is not writable.", schedule.airflow_sync_error)
+        self.assertEqual(response.data["id"], schedule.pk)
+
+    @patch("task_scheduler.views.airflow.remove_dag_file_by_id")
+    @patch("task_scheduler.views.airflow.delete_dag_by_id")
+    def test_delete_removes_airflow_resources_before_schedule(
+        self, delete_dag, remove_dag_file
+    ):
+        schedule = Schedule.objects.create(
+            id="s-delete",
+            name="Delete task",
+            owner="Example owner",
+            owner_email=self.user.email,
+            owner_user=self.user,
+            code="print('ok')",
+        )
+
+        response = self.client.delete(
+            f"/api/v1/task-scheduler/schedules/{schedule.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Schedule.objects.filter(pk=schedule.pk).exists())
+        delete_dag.assert_called_once_with(schedule.airflow_dag_id)
+        remove_dag_file.assert_called_once_with(schedule.airflow_dag_id)
+
+    @patch(
+        "task_scheduler.views.airflow.remove_dag_file_by_id"
+    )
+    @patch(
+        "task_scheduler.views.airflow.delete_dag_by_id",
+        side_effect=AirflowError("Airflow is unavailable.", 503),
+    )
+    def test_delete_keeps_schedule_when_airflow_cleanup_fails(
+        self, delete_dag, remove_dag_file
+    ):
+        schedule = Schedule.objects.create(
+            id="s-delete-retry",
+            name="Delete retry task",
+            owner="Example owner",
+            owner_email=self.user.email,
+            owner_user=self.user,
+            code="print('ok')",
+        )
+
+        response = self.client.delete(
+            f"/api/v1/task-scheduler/schedules/{schedule.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(Schedule.objects.filter(pk=schedule.pk).exists())
+        remove_dag_file.assert_not_called()
+
+    @patch(
+        "task_scheduler.airflow.airflow_request",
+        side_effect=AirflowError("DAG not found.", 404),
+    )
+    def test_delete_treats_missing_airflow_dag_as_already_deleted(self, airflow_request):
+        delete_dag_by_id("ui_schedule_missing")
+
+        airflow_request.assert_called_once_with(
+            "DELETE", "dags/ui_schedule_missing"
+        )
 
     def test_task_scheduler_requires_authentication(self):
         client = APIClient()

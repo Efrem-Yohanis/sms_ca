@@ -114,12 +114,30 @@ export const actions = {
     return saved;
   },
   async remove(ids: string[]) {
-    await Promise.all(ids.map((id) => schedulerApi.deleteSchedule(id)));
-    update((current) => ({
-      ...current,
-      schedules: current.schedules.filter((schedule) => !ids.includes(schedule.id)),
-      runs: current.runs.filter((run) => !ids.includes(run.scheduleId)),
-    }));
+    const results = await Promise.allSettled(
+      ids.map((id) => schedulerApi.deleteSchedule(id)),
+    );
+    const deletedIds = ids.filter((_, index) => results[index].status === "fulfilled");
+    if (deletedIds.length) {
+      update((current) => ({
+        ...current,
+        schedules: current.schedules.filter(
+          (schedule) => !deletedIds.includes(schedule.id),
+        ),
+        runs: current.runs.filter((run) => !deletedIds.includes(run.scheduleId)),
+      }));
+    }
+
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") {
+      const detail =
+        failure.reason instanceof Error ? failure.reason.message : "Schedule deletion failed";
+      throw new Error(
+        deletedIds.length
+          ? `${deletedIds.length} schedule${deletedIds.length === 1 ? "" : "s"} deleted; some deletions failed. ${detail}`
+          : detail,
+      );
+    }
   },
   async setPaused(ids: string[], paused: boolean) {
     const updated = await Promise.all(ids.map((id) => schedulerApi.setPaused(id, paused)));

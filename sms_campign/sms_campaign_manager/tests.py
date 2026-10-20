@@ -57,7 +57,7 @@ from .services.email_reports import build_subscription_report_data, collect_camp
 from .services.message_builder import MessageBuilder
 from .services.smsc_sender import SmsSenderService
 from sms_status_updater.app import process_delivery_batch, process_send_batch
-from .views import CampaignDetailView
+from .views import CampaignDetailView, _schedule_window_is_open
 
 
 class AuthenticationContractTests(TestCase):
@@ -1075,9 +1075,29 @@ class CampaignManualDispatchTests(TestCase):
             name='Manual dispatch campaign',
             sender_id=sender.sender_id,
             channels_id=[channel.id],
-            status='stopped',
-            is_ready_to_execute=True,
+            status='active',
         )
+        language = Language.objects.get(code='en')
+        MessageContent.objects.create(
+            campaign=campaign,
+            en='Hello',
+            default_language=language,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='251700000001',
+            language=language,
+            sequence_number=1,
+        )
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='once',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+        )
+        campaign.refresh_from_db()
+        self.assertTrue(campaign.is_ready_to_execute)
         MessageObject.objects.create(
             campaign=campaign,
             message_id='manual-dispatch-message',
@@ -1085,6 +1105,7 @@ class CampaignManualDispatchTests(TestCase):
             sender_id=sender.sender_id,
             message_content='Hello',
         )
+        Campaign.objects.filter(pk=campaign.pk).update(is_ready_to_execute=False)
         sender_response = Mock(status_code=202)
         sender_response.json.return_value = {
             'success': True,
@@ -1092,15 +1113,17 @@ class CampaignManualDispatchTests(TestCase):
         }
         mock_post.return_value = sender_response
 
-        response = self.client.post(
-            f'/api/v1/campaigns/{campaign.id}/send-now/',
-            {},
-            format='json',
-        )
+        with self.settings(INTERNAL_SERVICE_API_TOKEN='test-internal-token'):
+            response = self.client.post(
+                f'/api/v1/campaigns/{campaign.id}/send-now/',
+                {},
+                format='json',
+                HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+            )
 
         self.assertEqual(response.status_code, 202, response.content)
         self.assertTrue(response.json()['success'])
-        self.assertEqual(Campaign.objects.get(pk=campaign.pk).status, 'active')
+        self.assertEqual(Campaign.objects.get(pk=campaign.pk).status, 'in_progress')
         mock_post.assert_called_once_with(
             'http://sms_sender_app:8001/sender/start',
             json={'campaign_id': campaign.id, 'round_number': 1},
@@ -1214,6 +1237,7 @@ class CampaignWorkflowStepTests(TestCase):
         self.assertEqual(progress['progress']['progress_percent'], 50)
         self.assertEqual(progress['batches']['total_batches'], 1)
         self.assertEqual(progress['batches']['in_progress_batches'], 1)
+        self.assertNotIn('recent_batches', progress)
         batch = batches_response.json()['results'][0]
         self.assertEqual(batch['batch_id'], 'progress-batch-1')
         self.assertEqual(batch['total_messages'], 2)
@@ -1592,11 +1616,13 @@ class CampaignWorkflowStepTests(TestCase):
             time_windows=[{'start': '09:00', 'end': '17:00'}],
         )
 
-        response = self.client.post(
-            f'/api/v1/campaigns/{campaign.id}/activate/',
-            {},
-            format='json',
-        )
+        with self.settings(INTERNAL_SERVICE_API_TOKEN='test-internal-token'):
+            response = self.client.post(
+                f'/api/v1/campaigns/{campaign.id}/activate/',
+                {},
+                format='json',
+                HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+            )
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()['data']['messages_built'], 1)
@@ -1672,11 +1698,17 @@ class CampaignWorkflowStepTests(TestCase):
         campaign = self.create_campaign()
         actions = CampaignActionsService(campaign)
 
-        self.assertFalse(actions.start_campaign()['success'])
         self.assertFalse(actions.pause_campaign()['success'])
         campaign.status = 'active'
         campaign.is_ready_to_execute = True
         campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='once',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+        )
         MessageObject.objects.create(
             campaign=campaign,
             message_id='msg_start_transition',
@@ -1686,31 +1718,132 @@ class CampaignWorkflowStepTests(TestCase):
             channel=self.channel,
             language=self.language,
         )
-        start_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
-        self.assertEqual(start_response.status_code, 200, start_response.content)
-        campaign.refresh_from_db()
-        self.assertEqual(campaign.status, 'in_progress')
-        retry_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
-        self.assertEqual(retry_response.status_code, 200, retry_response.content)
-        self.assertEqual(retry_response.json()['data']['status'], 'in_progress')
-        self.assertTrue(actions.pause_campaign()['success'])
-        self.assertTrue(actions.resume_campaign()['success'])
-        self.assertTrue(actions.complete_campaign()['success'])
-        self.assertFalse(actions.resume_campaign()['success'])
+        sender_started = Mock(status_code=202)
+        sender_started.json.return_value = {
+            'success': True,
+            'data': {'campaign_id': campaign.id, 'round_number': 1, 'status': 'in_progress'},
+        }
+        sender_already_running = Mock(status_code=409)
+        sender_already_running.json.return_value = {'success': False, 'detail': 'Campaign is already running'}
+        with patch('sms_campaign_manager.views.requests.post', side_effect=[sender_started, sender_already_running]), \
+                patch.object(CampaignActionsService, '_stop_sender', return_value=True):
+            start_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
+            self.assertEqual(start_response.status_code, 202, start_response.content)
+            campaign.refresh_from_db()
+            self.assertEqual(campaign.status, 'in_progress')
+            retry_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
+            self.assertEqual(retry_response.status_code, 200, retry_response.content)
+            self.assertEqual(retry_response.json()['data']['status'], 'in_progress')
+            campaign.refresh_from_db()
+            self.assertTrue(actions.pause_campaign()['success'])
+            self.assertTrue(actions.resume_campaign()['success'])
+            self.assertTrue(actions.complete_campaign()['success'])
+            self.assertFalse(actions.resume_campaign()['success'])
 
         cancelled = self.create_campaign()
         cancelled.status = 'active'
         cancelled.save(update_fields=['status', 'updated_at'])
-        cancel_result = CampaignActionsService(cancelled).cancel_campaign()
+        with patch.object(CampaignActionsService, '_stop_sender', return_value=True):
+            cancel_result = CampaignActionsService(cancelled).cancel_campaign()
         self.assertTrue(cancel_result['success'])
         self.assertEqual(cancel_result['data']['status'], 'stopped')
 
+        paused = self.create_campaign()
+        paused.status = 'paused'
+        paused.save(update_fields=['status', 'updated_at'])
+        with patch.object(CampaignActionsService, '_stop_sender') as stop_sender:
+            stop_result = CampaignActionsService(paused).cancel_campaign()
+        self.assertTrue(stop_result['success'])
+        self.assertEqual(stop_result['data']['status'], 'stopped')
+        stop_sender.assert_not_called()
+
+    def test_stopped_campaign_can_restart_and_deactivate(self):
+        campaign = self.create_campaign()
+        campaign.status = 'stopped'
+        campaign.is_ready_to_execute = True
+        campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        schedule = Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='daily',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+            is_active=False,
+            schedule_status='stopped',
+        )
+
+        with self.settings(INTERNAL_SERVICE_API_TOKEN='test-internal-token'):
+            restart_response = self.client.post(
+                f'/api/v1/campaigns/{campaign.id}/restart/',
+                {},
+                format='json',
+                HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+            )
+
+        self.assertEqual(restart_response.status_code, 200, restart_response.content)
+        self.assertTrue(restart_response.json()['success'])
+        campaign.refresh_from_db()
+        schedule.refresh_from_db()
+        self.assertEqual(campaign.status, 'active')
+        self.assertTrue(schedule.is_active)
+        self.assertEqual(schedule.schedule_status, 'active')
+
+        with self.settings(INTERNAL_SERVICE_API_TOKEN='test-internal-token'), \
+                patch.object(CampaignActionsService, '_stop_sender', return_value=True):
+            deactivate_response = self.client.post(
+                f'/api/v1/campaigns/{campaign.id}/deactivate/',
+                {},
+                format='json',
+                HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+            )
+
+        self.assertEqual(deactivate_response.status_code, 200, deactivate_response.content)
+        self.assertTrue(deactivate_response.json()['success'])
+        campaign.refresh_from_db()
+        schedule.refresh_from_db()
+        self.assertEqual(campaign.status, 'draft')
+        self.assertFalse(campaign.is_ready_to_execute)
+        self.assertFalse(schedule.is_active)
+        self.assertEqual(schedule.schedule_status, 'paused')
+
+    @patch('sms_campaign_manager.services.campaign_actions.requests.post')
+    @patch('sms_campaign_manager.services.campaign_actions.requests.get')
+    def test_campaign_stop_uses_the_sender_active_round(self, sender_get, sender_post):
+        campaign = self.create_campaign()
+        sender_status = Mock(status_code=200)
+        sender_status.json.return_value = {
+            'success': True,
+            'data': {'campaign_id': campaign.id, 'active': True, 'round_number': 4},
+        }
+        sender_get.return_value = sender_status
+        sender_post.return_value = Mock(status_code=200)
+
+        self.assertTrue(CampaignActionsService(campaign)._stop_sender())
+
+        sender_get.assert_called_once_with(
+            f'http://sms_sender_app:8001/sender/status/{campaign.id}',
+            timeout=5,
+        )
+        sender_post.assert_called_once_with(
+            'http://sms_sender_app:8001/sender/stop',
+            json={'campaign_id': campaign.id, 'round_number': 4},
+            timeout=5,
+        )
+
+    @patch('sms_campaign_manager.views.requests.post')
     @patch('sms_campaign_manager.services.campaign_activation_email.EmailMultiAlternatives')
-    def test_campaign_start_emails_owner_once(self, email_message):
+    def test_campaign_start_emails_owner_once(self, email_message, sender_post):
         campaign = self.create_campaign()
         campaign.status = 'active'
         campaign.is_ready_to_execute = True
         campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='once',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+        )
         MessageObject.objects.create(
             campaign=campaign,
             message_id='msg_start_notification',
@@ -1721,11 +1854,19 @@ class CampaignWorkflowStepTests(TestCase):
             language=self.language,
         )
         email_message.return_value.send.return_value = 1
+        started = Mock(status_code=202)
+        started.json.return_value = {
+            'success': True,
+            'data': {'campaign_id': campaign.id, 'round_number': 1, 'status': 'in_progress'},
+        }
+        already_running = Mock(status_code=409)
+        already_running.json.return_value = {'success': False, 'detail': 'Campaign is already running'}
+        sender_post.side_effect = [started, already_running]
 
         response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
         retry_response = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
 
-        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.status_code, 202, response.content)
         self.assertTrue(response.json()['data']['owner_notification_sent'])
         self.assertEqual(retry_response.status_code, 200, retry_response.content)
         email_message.assert_called_once()
@@ -1765,11 +1906,43 @@ class CampaignWorkflowStepTests(TestCase):
         self.assertEqual(list_response.json()['results'][0]['recipient'], '+251700000001')
         self.assertEqual(stats_response.status_code, 200, stats_response.content)
         self.assertEqual(stats_response.json()['data']['total'], 1)
+        self.assertNotIn('language_breakdown', stats_response.json()['data'])
 
         clear_response = self.client.delete(f'/api/v1/campaigns/{campaign.id}/messages/clear/')
 
         self.assertEqual(clear_response.status_code, 200, clear_response.content)
         self.assertEqual(MessageObject.objects.filter(campaign=campaign).count(), 0)
+
+    def test_message_build_advances_schedule_round(self):
+        campaign = self.create_campaign()
+        schedule = Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='daily',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+        )
+        MessageContent.objects.create(
+            campaign=campaign,
+            en='Hello customer',
+            default_language=self.language,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='+251700000001',
+            language=self.language,
+            sequence_number=1,
+        )
+
+        response = self.client.post(
+            f'/api/v1/campaigns/{campaign.id}/messages/build/',
+            {'round_number': 2},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        schedule.refresh_from_db()
+        self.assertEqual(schedule.current_round, 2)
 
     def test_campaign_activation_is_idempotent_for_sender_start(self):
         campaign = self.create_campaign()
@@ -1858,6 +2031,9 @@ class CampaignWorkflowStepTests(TestCase):
 
     def test_schedule_due_now_returns_scheduler_fields(self):
         campaign = self.create_campaign()
+        campaign.status = 'active'
+        campaign.is_ready_to_execute = True
+        campaign.save(update_fields=['status', 'is_ready_to_execute'])
         config = AudienceConfig.objects.create(
             campaign=campaign,
             default_language=self.language,
@@ -1884,13 +2060,19 @@ class CampaignWorkflowStepTests(TestCase):
             schedule_status='active',
             is_active=True,
         )
+        Campaign.objects.filter(pk=campaign.pk).update(is_ready_to_execute=False)
 
-        response = self.client.get('/api/v1/schedules/due-now/')
+        with self.settings(INTERNAL_SERVICE_API_TOKEN='test-internal-token'):
+            response = self.client.get(
+                '/api/v1/schedules/due-now/',
+                HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+            )
 
         self.assertEqual(response.status_code, 200, response.content)
         row = next(item for item in response.json()['data'] if item['campaign_id'] == campaign.id)
         self.assertEqual(row, {
             'campaign_id': campaign.id,
+            'campaign_status': 'active',
             'round_number': 1,
             'should_run': True,
             'is_ready': True,
@@ -1898,6 +2080,24 @@ class CampaignWorkflowStepTests(TestCase):
             'messages_need_build': True,
             'audience_config_id': config.id,
         })
+
+    def test_schedule_window_includes_start_and_excludes_end_in_schedule_timezone(self):
+        from zoneinfo import ZoneInfo
+
+        campaign = self.create_campaign()
+        schedule = Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='once',
+            start_date=date(2026, 10, 19),
+            time_windows=[{'start': '09:30', 'end': '09:31'}],
+            timezone='Africa/Addis_Ababa',
+        )
+
+        starts_at = datetime(2026, 10, 19, 6, 30, tzinfo=ZoneInfo('UTC'))
+        ends_at = datetime(2026, 10, 19, 6, 31, tzinfo=ZoneInfo('UTC'))
+
+        self.assertEqual(_schedule_window_is_open(schedule, now=starts_at), (True, date(2026, 10, 19)))
+        self.assertEqual(_schedule_window_is_open(schedule, now=ends_at), (False, date(2026, 10, 19)))
 
     def test_schedule_due_now_reuses_existing_audience_for_later_static_round(self):
         campaign = self.create_campaign()
@@ -1934,11 +2134,32 @@ class CampaignWorkflowStepTests(TestCase):
         self.assertTrue(row['messages_need_build'])
         self.assertEqual(row['audience_config_id'], config.id)
 
-    def test_paused_campaign_reactivates_for_a_new_scheduled_round(self):
+    @patch('sms_campaign_manager.views.requests.post')
+    def test_resumed_campaign_starts_latest_scheduled_round(self, sender_post):
         campaign = self.create_campaign()
+        MessageContent.objects.create(
+            campaign=campaign,
+            en='Hello customer',
+            default_language=self.language,
+        )
+        Audience.objects.create(
+            campaign=campaign,
+            msisdn='+251700000006',
+            language=self.language,
+            sequence_number=1,
+        )
         campaign.status = 'paused'
         campaign.is_ready_to_execute = True
         campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        Schedule.objects.create(
+            campaign=campaign,
+            schedule_type='daily',
+            start_date=timezone.localdate(),
+            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            timezone='UTC',
+            schedule_status='paused',
+            is_active=False,
+        )
         MessageObject.objects.create(
             campaign=campaign,
             message_id='paused-round-two-message',
@@ -1951,17 +2172,24 @@ class CampaignWorkflowStepTests(TestCase):
             batch_id=f'campaign-{campaign.id}-round-2',
         )
 
-        activation = self.client.post(
-            f'/api/v1/campaigns/{campaign.id}/activate/',
-            {'build_messages': False},
-            format='json',
-        )
+        resumed = self.client.post(f'/api/v1/campaigns/{campaign.id}/resume/', {}, format='json')
+        sender_response = Mock(status_code=202)
+        sender_response.json.return_value = {
+            'success': True,
+            'data': {'campaign_id': campaign.id, 'round_number': 2, 'status': 'in_progress'},
+        }
+        sender_post.return_value = sender_response
         start = self.client.post(f'/api/v1/campaigns/{campaign.id}/start/', {}, format='json')
 
-        self.assertEqual(activation.status_code, 200, activation.content)
-        self.assertEqual(start.status_code, 200, start.content)
+        self.assertEqual(resumed.status_code, 200, resumed.content)
+        self.assertEqual(start.status_code, 202, start.content)
         campaign.refresh_from_db()
         self.assertEqual(campaign.status, 'in_progress')
+        sender_post.assert_called_once_with(
+            'http://sms_sender_app:8001/sender/start',
+            json={'campaign_id': campaign.id, 'round_number': 2},
+            timeout=30,
+        )
 
     @patch('sms_campaign_manager.services.smsc_sender.requests.post')
     def test_step_5_sender_submits_pending_message(self, post):

@@ -1,5 +1,7 @@
 """DRF serializers for Campaign resources."""
 
+import re
+
 from django.contrib.auth import get_user_model, password_validation
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
@@ -209,6 +211,7 @@ class AudienceConfigSerializer(serializers.ModelSerializer):
             'id', 'campaign', 'source_type', 'source_database', 'source_database_id',
             'source_table', 'source_msisdn_column', 'source_language_column',
             'source_filter_clause', 'manual_msisdns', 'manual_languages',
+            'source_sql',
             'source_file_path', 'source_file_msisdn_column', 'source_file_language_column',
             'mapper_enabled', 'mapper_database', 'mapper_database_id', 'mapper_table',
             'mapper_msisdn_column', 'mapper_language_column', 'mapper_join_type',
@@ -262,6 +265,15 @@ class AudienceConfigSerializer(serializers.ModelSerializer):
         elif 'rebuild_before_each_run' in attrs and 'rebuild_on_each_round' not in attrs:
             attrs['rebuild_on_each_round'] = attrs['rebuild_before_each_run']
         source_type = attrs.get('source_type', getattr(self.instance, 'source_type', 'manual'))
+        source_sql = attrs.get('source_sql', getattr(self.instance, 'source_sql', '')).strip()
+        if source_type == 'sql':
+            normalized_sql = re.sub(r'/\*.*?\*/|--[^\r\n]*', ' ', source_sql, flags=re.DOTALL).strip().rstrip(';').strip()
+            forbidden_sql = re.search(r'\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|execute|exec|call|into)\b', normalized_sql, re.IGNORECASE)
+            if not normalized_sql or not re.match(r'^(select|with)\b', normalized_sql, re.IGNORECASE) or ';' in normalized_sql or forbidden_sql:
+                raise serializers.ValidationError({'source_sql': 'Enter one read-only SELECT query. Return columns named msisdn and optionally language.'})
+            attrs['source_sql'] = normalized_sql
+            if not attrs.get('source_database', getattr(self.instance, 'source_database', None)):
+                raise serializers.ValidationError({'source_database_id': 'Choose a database for this SQL query.'})
         if source_type != 'manual':
             attrs['manual_msisdns'] = []
             attrs['manual_languages'] = []
@@ -378,7 +390,7 @@ class ManualAudienceInputSerializer(serializers.Serializer):
     languages = serializers.ListField(child=serializers.CharField(max_length=10, allow_blank=True), required=False, default=list)
     default_language = serializers.ChoiceField(choices=['en', 'am', 'ti', 'om', 'so'], default='en')
     customer_profile_id = serializers.IntegerField(required=False, allow_null=True)
-    source_type = serializers.ChoiceField(choices=SOURCE_TYPE_CHOICES, default='manual')
+    source_type = serializers.ChoiceField(choices=SOURCE_TYPE_CHOICES[:3], default='manual')
 
     def validate(self, attrs):
         if attrs.get('languages') and len(attrs['languages']) != len(attrs['msisdns']):
@@ -1276,6 +1288,7 @@ class CampaignDetailSerializer(serializers.ModelSerializer):
     message_content = serializers.SerializerMethodField()
     schedule = serializers.SerializerMethodField()
     execution_status_display = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     def get_execution_status_display(self, obj):
         return {
@@ -1354,7 +1367,7 @@ class CampaignDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Campaign
         fields = [
-            'id', 'name', 'sender_id', 'owner_emails', 'channels_id', 'status',
+            'id', 'name', 'sender_id', 'owner_emails', 'channels_id', 'status', 'status_display',
             'execution_status', 'execution_status_display', 'is_ready_to_execute',
             'audience_id', 'audience', 'message_content_id', 'message_content',
             'schedule_id', 'schedule', 'created_at', 'updated_at',
@@ -1541,7 +1554,7 @@ class ScheduleSerializer(serializers.ModelSerializer):
             'id': obj.campaign_id,
             'name': obj.campaign.name,
             'status': obj.campaign.status,
-            'execution_status': obj.campaign.status,
+            'execution_status': obj.campaign.execution_status,
         }
 
     def get_current_window_status_display(self, obj) -> str:

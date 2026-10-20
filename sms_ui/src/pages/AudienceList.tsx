@@ -7,10 +7,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import ListViewToggle, { useListView } from "@/components/ListViewToggle";
-import { Users, Eye, ChevronLeft, ChevronRight, Plus, Pencil, Trash2, Search } from "lucide-react";
+import { Users, Eye, ChevronLeft, ChevronRight, Plus, Trash2, Search } from "lucide-react";
 import { fetchAudiences, fetchAudienceSummary } from "@/lib/api/audiences";
 import type { ApiAudienceListItem, AudienceSummary } from "@/lib/api/audiences";
-import AudienceFormDialog from "@/components/AudienceFormDialog";
 import DeleteAudienceDialog from "@/components/DeleteAudienceDialog";
 
 export default function AudienceList() {
@@ -27,8 +26,6 @@ export default function AudienceList() {
   const [audienceSearch, setAudienceSearch] = useState("");
 
   // Dialogs
-  const [formOpen, setFormOpen] = useState(false);
-  const [editId, setEditId] = useState<number | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; campaignId: number; name: string } | null>(null);
 
@@ -62,16 +59,6 @@ export default function AudienceList() {
     } finally {
       setLoading(false);
     }
-  }
-
-  function openCreate() {
-    setEditId(null);
-    setFormOpen(true);
-  }
-
-  function openEdit(id: number) {
-    setEditId(id);
-    setFormOpen(true);
   }
 
   function openDelete(id: number, campaignId: number, name: string) {
@@ -178,9 +165,9 @@ export default function AudienceList() {
                         <Users className="h-6 w-6 text-muted-foreground" />
                       </div>
                       <p className="text-muted-foreground">No audiences found.</p>
-                      <Button variant="outline" size="sm" onClick={openCreate} className="mt-2">
+                      <Link to="/audiences/create"><Button variant="outline" size="sm" className="mt-2">
                         <Plus className="h-3.5 w-3.5 mr-1" /> Create one
-                      </Button>
+                      </Button></Link>
                     </div>
                   </td>
                 </tr>
@@ -209,9 +196,6 @@ export default function AudienceList() {
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
                       </Link>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(a.id)}>
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -273,7 +257,6 @@ export default function AudienceList() {
               </div>
               <div className="flex justify-end gap-1 border-t pt-2">
                 <Link to={`/audiences/${a.id}`}><Button variant="ghost" size="icon" className="h-8 w-8" title="View Details"><Eye className="h-3.5 w-3.5" /></Button></Link>
-                <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(a.id)}><Pencil className="h-3.5 w-3.5" /></Button>
                 <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" title="Delete" onClick={() => openDelete(a.id, a.campaign, a.campaign_info?.name ?? `Campaign #${a.campaign}`)}><Trash2 className="h-3.5 w-3.5" /></Button>
               </div>
             </Card>
@@ -282,12 +265,6 @@ export default function AudienceList() {
       )}
 
       {/* Dialogs */}
-      <AudienceFormDialog
-        open={formOpen}
-        onOpenChange={setFormOpen}
-        audienceId={editId}
-        onSuccess={handleMutationSuccess}
-      />
       <DeleteAudienceDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}

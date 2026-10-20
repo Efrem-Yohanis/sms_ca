@@ -906,7 +906,7 @@ class Campaign(models.Model):
         choices=CAMPAIGN_STATUS_CHOICES,
         default='draft',
         db_index=True,
-        help_text="draft / active / paused / stopped / completed / cancelled",
+        help_text="draft / active / in_progress / paused / stopped / completed / invalid_schedule / archived",
     )
 
     is_ready_to_execute = models.BooleanField(
@@ -1000,12 +1000,13 @@ class Campaign(models.Model):
             'completed': 'COMPLETED',
             'invalid_schedule': 'FAILED',
             'archived': 'COMPLETED',
+            'cancelled': 'STOPPED',
         }.get(self.status, 'PENDING')
 
     @property
-    def is_ready_for_activation(self) -> bool:
+    def has_execution_prerequisites(self) -> bool:
         return (
-            self.status == 'draft'
+            not self.is_deleted
             and bool(self.channels_id)
             and self.has_audience
             and self.has_schedule
@@ -1013,7 +1014,7 @@ class Campaign(models.Model):
         )
 
     def refresh_readiness_flag(self, save: bool = True):
-        new_value = self.is_ready_for_activation
+        new_value = self.has_execution_prerequisites
         if self.is_ready_to_execute != new_value:
             self.is_ready_to_execute = new_value
             if save:
@@ -2030,6 +2031,7 @@ class AudienceConfig(models.Model):
         default='',
         help_text='Optional SQL WHERE clause without the word WHERE',
     )
+    source_sql = models.TextField(blank=True, default='', help_text='Read-only SELECT query for SQL audience source')
 
     manual_msisdns = models.JSONField(
         default=list,

@@ -810,12 +810,11 @@ async def sender_start(payload: CampaignRequest) -> Any:
     try:
         # Check required provider configuration before marking the campaign active.
         smsc_config = await sender.load_smsc_config()
-        activation_response = await sender.activate_campaign(campaign_id)
-        campaign_response = await sender.start_campaign(campaign_id)
         sender.active_campaigns[campaign_id] = {
             'round_number': payload.round_number,
             'registered_at': iso_now(),
         }
+        campaign_response = await sender.start_campaign(campaign_id)
         sender.ensure_worker()
         global_config = await sender.fetch_active_config('global-tps-config', 'global_tps')
         allocations = allocate_tps(
@@ -829,14 +828,13 @@ async def sender_start(payload: CampaignRequest) -> Any:
             'data': {
                 'campaign_id': campaign_id,
                 'round_number': payload.round_number,
-                'status': 'active',
+                'status': 'in_progress',
                 'execution_status': 'PROCESSING',
                 'allocated_tps': allocations[campaign_id],
                 'total_global_tps': int(global_config['global_tps']),
                 'active_campaigns': len(sender.active_campaigns),
             },
             'campaign_response': campaign_response,
-            'activation_response': activation_response,
         }
     except Exception as exc:
         sender.active_campaigns.pop(campaign_id, None)
@@ -852,7 +850,6 @@ async def sender_stop(payload: CampaignStopRequest) -> Any:
             content={'success': False, 'detail': 'Campaign is not running'},
         )
     try:
-        campaign_response = await sender.pause_campaign(campaign_id)
         active_round = sender.active_campaigns[campaign_id]['round_number']
         sender.active_campaigns.pop(campaign_id, None)
         pending_count = await sender.pending_count(campaign_id, round_number=active_round)
@@ -866,14 +863,13 @@ async def sender_stop(payload: CampaignStopRequest) -> Any:
             'message': 'Campaign stopped',
             'data': {
                 'campaign_id': campaign_id,
-                'round_number': payload.round_number,
-                'status': 'paused',
-                'execution_status': 'PAUSED',
+                'round_number': active_round,
+                'status': 'stopped',
+                'execution_status': 'STOPPED',
                 'sent_count': sent_count,
                 'pending_count': pending_count,
                 'timestamp': iso_now(),
             },
-            'campaign_response': campaign_response,
         }
     except Exception as exc:
         return JSONResponse(status_code=400, content={'success': False, 'detail': str(exc)})

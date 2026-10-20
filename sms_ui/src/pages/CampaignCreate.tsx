@@ -83,9 +83,10 @@ export default function CampaignCreate() {
 
         let audienceRecipients: WizardData["recipients"] = [];
         let databaseConfig: WizardData["audience_database_config"] = null;
+        let sqlConfig: WizardData["audience_sql_config"] = null;
         let audienceSource: WizardData["audience_source"] = "manual";
         if (audienceConfig) {
-          audienceSource = audienceConfig.source_type === "database"
+          audienceSource = audienceConfig.source_type === "sql" ? "sql" : audienceConfig.source_type === "database"
             ? "database"
             : audienceConfig.source_type === "file_import" ? "file" : "manual";
           databaseConfig = audienceConfig.source_type === "database" ? {
@@ -95,13 +96,17 @@ export default function CampaignCreate() {
             source_language_column: audienceConfig.source_language_column,
             source_filter_clause: audienceConfig.source_filter_clause,
           } : null;
+          sqlConfig = audienceConfig.source_type === "sql" && audienceConfig.source_database_id ? {
+            source_database_id: audienceConfig.source_database_id,
+            source_sql: audienceConfig.source_sql ?? "",
+          } : null;
           const manualRecipients = (audienceConfig.manual_msisdns ?? []).map((msisdn, index) => ({
             msisdn,
             lang: (audienceConfig.manual_languages?.[index] || defaultLanguageForValue(audienceConfig.default_language_id) || "en") as Language,
           }));
           audienceRecipients = manualRecipients;
         }
-        if (campaign.audience_id && audienceRecipients.length === 0) {
+        if (campaign.audience_id && !audienceConfig && audienceRecipients.length === 0) {
           const members = await fetchCampaignAudienceMembers(editingCampaignId!, 1000).catch(() => []);
           audienceRecipients = members.map((member) => ({
             msisdn: member.msisdn,
@@ -125,6 +130,7 @@ export default function CampaignCreate() {
           channels: (campaign.channels_id ?? []).map((channelId) => channelCodes.get(channelId)).filter((channel): channel is Channel => Boolean(channel)),
           audience_source: audienceSource,
           audience_database_config: databaseConfig,
+          audience_sql_config: sqlConfig,
           recipients: audienceRecipients,
           default_language: (defaultLanguageForValue(audienceConfig?.default_language_id ?? contentObject?.default_language) || "en") as Language,
           content: {
@@ -179,7 +185,9 @@ export default function CampaignCreate() {
     if (step === 1) {
       if (data.audience_source === "database" && !data.audience_database_config) {
         errs.recipients = "Choose and preview a database source";
-      } else if (data.audience_source !== "database" && data.recipients.length === 0) {
+      } else if (data.audience_source === "sql" && !data.audience_sql_config) {
+        errs.recipients = "Choose a database and enter a SQL query";
+      } else if (data.audience_source !== "database" && data.audience_source !== "sql" && data.recipients.length === 0) {
         errs.recipients = "Add at least one recipient";
       }
       const phonePattern = /^\+?[1-9]\d{1,14}$/;

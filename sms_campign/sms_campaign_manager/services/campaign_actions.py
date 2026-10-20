@@ -1,12 +1,16 @@
 """Campaign lifecycle actions."""
 
 from django.db import transaction
-from ..models import Campaign
+from django.conf import settings
+import logging
+import requests
 from django.utils import timezone
 
 from .campaign_readiness import CampaignReadinessService
-from .campaign_activation_email import send_campaign_activation_email, send_campaign_started_email
+from .campaign_activation_email import send_campaign_activation_email
 from .message_builder import MessageBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class CampaignActionsService:
@@ -16,31 +20,71 @@ class CampaignActionsService:
     def validate_campaign(self):
         return CampaignReadinessService(self.campaign).check()
 
+    def _stop_sender(self):
+        sender_api = getattr(settings, 'SMSC_SENDER_API', '').rstrip('/')
+        if not sender_api:
+            logger.error('SMSC_SENDER_API is not configured; cannot stop campaign_id=%s', self.campaign.pk)
+            return False
+        try:
+            status_response = requests.get(
+                f'{sender_api}/sender/status/{self.campaign.pk}',
+                timeout=5,
+            )
+            if status_response.status_code == 404:
+                return True
+            status_response.raise_for_status()
+            status_body = status_response.json()
+        except requests.RequestException:
+            logger.exception('Could not read sender status for campaign_id=%s', self.campaign.pk)
+            return False
+        except ValueError:
+            logger.error(
+                'Sender status returned invalid JSON for campaign_id=%s: %s',
+                self.campaign.pk, status_response.text[:300],
+            )
+            return False
+
+        if not isinstance(status_body, dict):
+            logger.error('Sender status returned an invalid body for campaign_id=%s', self.campaign.pk)
+            return False
+        sender_data = status_body.get('data')
+        if not isinstance(sender_data, dict):
+            logger.error('Sender status response missing data for campaign_id=%s', self.campaign.pk)
+            return False
+        if not sender_data.get('active'):
+            return True
+        try:
+            round_number = int(sender_data['round_number'])
+        except (KeyError, TypeError, ValueError):
+            logger.error('Sender status missing active round for campaign_id=%s', self.campaign.pk)
+            return False
+        if round_number < 1:
+            logger.error('Sender status returned invalid round for campaign_id=%s', self.campaign.pk)
+            return False
+
+        try:
+            response = requests.post(
+                f'{sender_api}/sender/stop',
+                json={'campaign_id': self.campaign.pk, 'round_number': round_number},
+                timeout=5,
+            )
+        except requests.RequestException:
+            logger.exception('Could not stop sender for campaign_id=%s', self.campaign.pk)
+            return False
+        if response.status_code not in (200, 404):
+            logger.error(
+                'Sender stop returned HTTP %s for campaign_id=%s: %s',
+                response.status_code, self.campaign.pk, response.text[:300],
+            )
+            return False
+        return True
+
     def activate_campaign(self, build_messages=True):
-        if self.campaign.status == 'paused':
-            if not self.campaign.is_ready_to_execute:
-                return {
-                    'success': False,
-                    'message': 'Campaign is not ready for activation.',
-                    'errors': ['Campaign is not ready to execute.'],
-                }
-            if not self.campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
-                return {
-                    'success': False,
-                    'message': 'Campaign has no queued messages for this round.',
-                    'errors': ['No pending messages exist.'],
-                }
-            self.campaign.status = 'active'
-            self.campaign.activated_at = timezone.now()
-            self.campaign.save(update_fields=['status', 'activated_at', 'updated_at'])
+        if self.campaign.status != 'draft':
             return {
-                'success': True,
-                'message': 'Campaign activated successfully.',
-                'data': {
-                    'campaign_id': self.campaign.id,
-                    'status': self.campaign.status,
-                    'messages_built': 0,
-                },
+                'success': False,
+                'message': f"Cannot activate campaign in '{self.campaign.status}' status.",
+                'errors': [f"Activation requires draft status; current status is '{self.campaign.status}'."],
             }
         report = self.validate_campaign()
         if not report['is_ready']:
@@ -91,11 +135,12 @@ class CampaignActionsService:
         }
 
     def deactivate_campaign(self):
-        if self.campaign.status != 'active':
+        if self.campaign.status not in {'active', 'stopped'}:
             return {'success': False, 'message': f"Cannot deactivate campaign in '{self.campaign.status}' status."}
+        if self.campaign.status == 'active' and not self._stop_sender():
+            return {'success': False, 'message': 'Could not stop the campaign sender; campaign was not deactivated.'}
         self.campaign.status = 'draft'
-        self.campaign.is_ready_to_execute = False
-        self.campaign.save(update_fields=['status', 'is_ready_to_execute', 'updated_at'])
+        self.campaign.save(update_fields=['status', 'updated_at'])
         schedule = getattr(self.campaign, 'schedule', None)
         if schedule:
             schedule.is_active = False
@@ -103,67 +148,88 @@ class CampaignActionsService:
             schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
         return {'success': True, 'message': 'Campaign deactivated successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
 
+    def restart_campaign(self):
+        if self.campaign.status != 'stopped':
+            return {'success': False, 'message': f"Cannot restart campaign in '{self.campaign.status}' status."}
+        schedule = getattr(self.campaign, 'schedule', None)
+        if schedule is None:
+            return {'success': False, 'message': 'Cannot restart campaign without a schedule.'}
+        if not self.campaign.refresh_readiness_flag():
+            return {'success': False, 'message': 'Campaign is not ready to execute; deactivate it and activate it again.'}
+
+        with transaction.atomic():
+            self.campaign.status = 'active'
+            self.campaign.save(update_fields=['status', 'updated_at'])
+            schedule.is_active = True
+            schedule.schedule_status = 'active'
+            schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
+        return {
+            'success': True,
+            'message': 'Campaign restarted and its schedule reactivated.',
+            'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status},
+        }
+
     def pause_campaign(self):
         if self.campaign.status != 'in_progress':
             return {'success': False, 'message': f"Cannot pause campaign in '{self.campaign.status}' status."}
+        if not self._stop_sender():
+            return {'success': False, 'message': 'Could not stop the campaign sender; campaign remains in progress.'}
         self.campaign.status = 'paused'
-        self.campaign.save(update_fields=['status', 'updated_at'])
+        self.campaign.paused_at = timezone.now()
+        self.campaign.save(update_fields=['status', 'paused_at', 'updated_at'])
+        schedule = getattr(self.campaign, 'schedule', None)
+        if schedule:
+            schedule.is_active = False
+            schedule.schedule_status = 'paused'
+            schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
         return {'success': True, 'message': 'Campaign paused successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
-
-    def start_campaign(self, start_method='manual'):
-        if self.campaign.status == 'in_progress':
-            return {
-                'success': True,
-                'message': 'Campaign sending is already in progress.',
-                'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status},
-            }
-        if self.campaign.status != 'active':
-            return {'success': False, 'message': f"Cannot start campaign in '{self.campaign.status}' status."}
-        if not self.campaign.is_ready_to_execute:
-            return {'success': False, 'message': 'Campaign is not ready to execute.'}
-        if not self.campaign.messages.filter(sent_status__in=['PENDING', 'FAILED']).exists():
-            return {'success': False, 'message': 'Campaign has no queued messages to send.'}
-        changed = Campaign.objects.filter(pk=self.campaign.pk, status='active').update(
-            status='in_progress', updated_at=timezone.now(),
-        )
-        if not changed:
-            self.campaign.refresh_from_db(fields=['status'])
-            return {
-                'success': self.campaign.status == 'in_progress',
-                'message': 'Campaign sending is already in progress.' if self.campaign.status == 'in_progress' else f"Cannot start campaign in '{self.campaign.status}' status.",
-                'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status},
-            }
-        self.campaign.status = 'in_progress'
-        owner_notification_sent = send_campaign_started_email(self.campaign, start_method=start_method)
-        return {
-            'success': True,
-            'message': 'Campaign sending started.',
-            'data': {
-                'campaign_id': self.campaign.id,
-                'status': self.campaign.status,
-                'owner_notification_sent': owner_notification_sent,
-            },
-        }
 
     def resume_campaign(self):
         if self.campaign.status != 'paused':
             return {'success': False, 'message': f"Cannot resume campaign in '{self.campaign.status}' status."}
-        self.campaign.status = 'in_progress'
-        self.campaign.save(update_fields=['status', 'updated_at'])
-        return {'success': True, 'message': 'Campaign resumed successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
+        self.campaign.status = 'active'
+        self.campaign.resumed_at = timezone.now()
+        self.campaign.save(update_fields=['status', 'resumed_at', 'updated_at'])
+        schedule = getattr(self.campaign, 'schedule', None)
+        if schedule:
+            schedule.is_active = True
+            schedule.schedule_status = 'active'
+            schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
+        return {'success': True, 'message': 'Campaign resumed and will run in its next scheduled window.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
 
     def complete_campaign(self):
         if self.campaign.status not in {'active', 'in_progress', 'paused'}:
             return {'success': False, 'message': f"Cannot complete campaign in '{self.campaign.status}' status."}
+        if not self._stop_sender():
+            return {'success': False, 'message': 'Could not stop the campaign sender; campaign was not completed.'}
         self.campaign.status = 'completed'
         self.campaign.completed_at = timezone.now()
         self.campaign.save(update_fields=['status', 'completed_at', 'updated_at'])
+        schedule = getattr(self.campaign, 'schedule', None)
+        if schedule:
+            schedule.is_active = False
+            schedule.schedule_status = 'completed'
+            schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
         return {'success': True, 'message': 'Campaign completed successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
 
     def cancel_campaign(self):
         if self.campaign.status not in ('active', 'in_progress', 'paused'):
             return {'success': False, 'message': f"Cannot cancel campaign in '{self.campaign.status}' status."}
+        if self.campaign.status in {'active', 'in_progress'} and not self._stop_sender():
+            return {'success': False, 'message': 'Could not stop the campaign sender; campaign was not stopped.'}
         self.campaign.status = 'stopped'
         self.campaign.stopped_at = timezone.now()
         self.campaign.save(update_fields=['status', 'stopped_at', 'updated_at'])
-        return {'success': True, 'message': 'Campaign cancelled successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
+        schedule = getattr(self.campaign, 'schedule', None)
+        if schedule:
+            schedule.is_active = False
+            schedule.schedule_status = 'stopped'
+            schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
+        return {'success': True, 'message': 'Campaign stopped successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}
+
+    def archive_campaign(self):
+        if self.campaign.status != 'completed':
+            return {'success': False, 'message': f"Cannot archive campaign in '{self.campaign.status}' status."}
+        self.campaign.status = 'archived'
+        self.campaign.save(update_fields=['status', 'updated_at'])
+        return {'success': True, 'message': 'Campaign archived successfully.', 'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status}}

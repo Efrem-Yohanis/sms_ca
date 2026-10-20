@@ -5,7 +5,6 @@ from datetime import datetime, timezone as datetime_timezone
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
-from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -360,21 +359,21 @@ def schedule_detail(request, schedule_id):
 
         return Response(ScheduleSerializer(item).data)
 
-    # DELETE — remove from DB first, then best-effort cleanup of Airflow.
+    # Keep the row until both Airflow and the generated source file are cleaned
+    # up so a failed deletion remains visible and can be retried.
     dag_id = item.airflow_dag_id
     schedule_id_value = item.pk
-    item.delete()
     try:
         airflow.delete_dag_by_id(dag_id)
         airflow.remove_dag_file_by_id(dag_id)
     except AirflowError as exc:
         logger.warning(
-            "Post-delete Airflow cleanup failed for %s: %s", schedule_id_value, exc
+            "Airflow cleanup failed while deleting schedule %s: %s",
+            schedule_id_value,
+            exc,
         )
-        # Row is gone; nothing to return. Accept the 204 with a header note.
-        response = HttpResponse(status=status.HTTP_204_NO_CONTENT)
-        response["X-Airflow-Cleanup-Warning"] = str(exc)[:200]
-        return response
+        return airflow_error_response(exc, context="delete")
+    item.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 

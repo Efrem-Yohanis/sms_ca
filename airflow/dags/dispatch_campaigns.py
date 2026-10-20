@@ -94,16 +94,8 @@ def _start_campaign(campaign):
             raise RuntimeError(f'Message build failed HTTP {status_code}: {response_text[:300]}')
 
     status_code, body, response_text = _post_json(
-        f'{DJANGO_API}/campaigns/{campaign_id}/activate/',
-        {'build_messages': False},
-        timeout=60,
-    )
-    if status_code not in (200, 201) or body.get('success') is False:
-        raise RuntimeError(f'Campaign activation failed HTTP {status_code}: {response_text[:300]}')
-
-    status_code, body, response_text = _post_json(
         f'{DJANGO_API}/campaigns/{campaign_id}/send-now/',
-        {'round_number': round_number},
+        {'round_number': round_number, 'start_method': 'scheduled'},
         timeout=60,
     )
     if status_code not in (200, 202) or body.get('success') is False:
@@ -171,6 +163,11 @@ def dispatch(**context):
         )
         if status_code in (200, 404):
             stopped.append({'campaign_id': campaign_id, 'round_number': round_number})
+            _post_json(
+                f'{DJANGO_API}/campaigns/{campaign_id}/scheduled-window-closed/',
+                {},
+                timeout=30,
+            )
         else:
             log.error('Sender stop failed campaign_id=%s status=%s body=%s', campaign_id, status_code, response_text[:300])
             errors.append({'campaign_id': campaign_id, 'stage': 'stop', 'status': status_code, 'body': body})

@@ -4,31 +4,36 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { ArrowLeft, Users, Keyboard, Upload, Database } from "lucide-react";
+import { ArrowLeft, Users, Keyboard, Upload, Database, Code2 } from "lucide-react";
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { AudienceBuildProgress } from "@/lib/api/audiences";
 import { fetchCampaigns, saveCampaignAudience, type ApiCampaign } from "@/lib/api";
 import type { AudienceRecord, AudienceSourceType } from "@/types/audience";
 import type { AudienceDatabaseSelection } from "@/types/campaign";
+import type { Language } from "@/types/campaign";
 import ManualInsertTab from "@/components/audience-create/ManualInsertTab";
 import CsvUploadTab from "@/components/audience-create/CsvUploadTab";
 import DatabaseTab from "@/components/audience-create/DatabaseTab";
+import SqlQueryTab from "@/components/audience-create/SqlQueryTab";
 import { isValidMsisdn } from "@/types/audience";
 
 const SOURCES: { value: AudienceSourceType; label: string; desc: string; icon: typeof Keyboard }[] = [
   { value: "manual", label: "Manual Entry", desc: "Type MSISDNs one by one", icon: Keyboard },
   { value: "file", label: "Import from File", desc: "Upload CSV or Excel", icon: Upload },
   { value: "database", label: "Database Source", desc: "Query an existing table", icon: Database },
+  { value: "sql", label: "SQL Query", desc: "Write a SELECT query", icon: Code2 },
 ];
 
 export default function AudienceCreate() {
   const navigate = useNavigate();
   const [campaignId, setCampaignId] = useState("");
   const [source, setSource] = useState<AudienceSourceType>("manual");
+  const [defaultLanguage, setDefaultLanguage] = useState<Language>("en");
   const [records, setRecords] = useState<AudienceRecord[]>([]);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [databaseConfig, setDatabaseConfig] = useState<AudienceDatabaseSelection | null>(null);
+  const [sqlConfig, setSqlConfig] = useState<{ source_database_id: number; source_sql: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [buildProgress, setBuildProgress] = useState<AudienceBuildProgress | null>(null);
   const [campaigns, setCampaigns] = useState<ApiCampaign[]>([]);
@@ -77,7 +82,7 @@ export default function AudienceCreate() {
   const campaignIdNum = parseInt(campaignId, 10);
   const validRecords = records.filter((r) => isValidMsisdn(r.msisdn));
   const isValid = !isNaN(campaignIdNum) && campaignIdNum > 0 && (
-    source === "database" ? databaseConfig !== null : validRecords.length > 0 && (source !== "file" || sourceFile !== null)
+    source === "database" ? databaseConfig !== null : source === "sql" ? sqlConfig !== null : validRecords.length > 0 && (source !== "file" || sourceFile !== null)
   );
   const withLang = validRecords.filter((r) => !!r.lang).length;
 
@@ -85,6 +90,7 @@ export default function AudienceCreate() {
     setSource(v);
     setRecords([]);
     setDatabaseConfig(null);
+    setSqlConfig(null);
     setSourceFile(null);
   }
 
@@ -95,10 +101,11 @@ export default function AudienceCreate() {
     try {
       const result = await saveCampaignAudience(campaignIdNum, {
         recipients: validRecords.map((r) => ({ msisdn: r.msisdn, lang: r.lang || "" })),
-        default_language: "en",
+        default_language: defaultLanguage,
         source_type: source,
         database_config: databaseConfig,
         source_file: sourceFile,
+        sql_config: sqlConfig,
       }, (progress) => setBuildProgress(progress));
       toast.success(`Audience built: ${result.valid_count} valid, ${result.invalid_count} invalid`);
       navigate(`/campaigns/${campaignIdNum}`);
@@ -110,7 +117,7 @@ export default function AudienceCreate() {
   }
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
+    <div className="w-full space-y-6">
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="icon" onClick={() => navigate("/audiences")}>
           <ArrowLeft className="h-4 w-4" />
@@ -154,7 +161,7 @@ export default function AudienceCreate() {
         <RadioGroup
           value={source}
           onValueChange={(v) => switchSource(v as AudienceSourceType)}
-          className="grid gap-3 sm:grid-cols-3"
+          className="grid gap-3 sm:grid-cols-4"
         >
           {SOURCES.map((s) => (
             <label
@@ -194,6 +201,7 @@ export default function AudienceCreate() {
             onConfigChange={setDatabaseConfig}
           />
         )}
+        {source === "sql" && <SqlQueryTab onConfigChange={setSqlConfig} defaultLanguage={defaultLanguage} onDefaultLanguageChange={setDefaultLanguage} />}
       </Card>
 
       {/* Summary & Submit */}
@@ -207,6 +215,7 @@ export default function AudienceCreate() {
               <p className="font-medium">
                 {source === "database"
                   ? databaseConfig ? "Database audience ready to build" : "Select a database, table, and MSISDN column"
+                  : source === "sql" ? sqlConfig ? "SQL audience ready to build" : "Choose a database and enter a query"
                   : isValid ? `${validRecords.length.toLocaleString()} MSISDNs ready` : "Add valid recipients to continue"}
               </p>
               <p className="text-xs text-muted-foreground">
@@ -216,16 +225,17 @@ export default function AudienceCreate() {
                       ? `${records.length.toLocaleString()} preview rows · Build reads the complete selected source table`
                       : "Build reads the complete selected source table and saves recipients to this campaign"
                     : "Choose the source details above to enable the build"
+                  : source === "sql" ? "Query results are read during the build; language can be returned as `language` or defaulted."
                   : `${withLang.toLocaleString()} with language · ${(validRecords.length - withLang).toLocaleString()} without (kept) · Source: ${source}`}
               </p>
             </div>
           </div>
           <div className="flex gap-2">
-            {source !== "database" && (
+            {source !== "database" && source !== "sql" && (
               <Button variant="outline" onClick={() => setRecords([])} disabled={records.length === 0}>Clear All</Button>
             )}
             <Button onClick={handleSubmit} disabled={!isValid || submitting}>
-              {submitting ? "Building audience..." : source === "database" ? "Save & Build Audience" : "Save Audience"}
+              {submitting ? "Building audience..." : source === "database" || source === "sql" ? "Save & Build Audience" : "Save Audience"}
             </Button>
           </div>
         </div>

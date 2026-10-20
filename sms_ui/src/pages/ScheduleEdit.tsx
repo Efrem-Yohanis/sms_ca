@@ -80,10 +80,10 @@ export default function ScheduleEdit() {
     }
   }
 
-  if (loading || !form) return <div className="max-w-3xl space-y-4"><Skeleton className="h-8 w-48" /><Skeleton className="h-96" /></div>;
+  if (loading || !form) return <div className="w-full space-y-4"><Skeleton className="h-8 w-48" /><Skeleton className="h-96" /></div>;
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="w-full space-y-6">
       <div>
         <button onClick={() => navigate(`/schedules/${id}`)} className="mb-1 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="h-3.5 w-3.5" /> Back to Schedule

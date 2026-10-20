@@ -185,14 +185,14 @@ class SenderEndpointTests(unittest.TestCase):
         self.assertEqual(started.json()['data'], {
             'campaign_id': 5,
             'round_number': 2,
-            'status': 'active',
+            'status': 'in_progress',
             'execution_status': 'PROCESSING',
             'allocated_tps': 4000,
             'total_global_tps': 4000,
             'active_campaigns': 1,
         })
         self.assertIn('campaign_response', started.json())
-        self.assertIn('activation_response', started.json())
+        self.assertNotIn('activation_response', started.json())
         self.assertEqual(duplicate.status_code, 409)
         self.assertEqual(status_response.status_code, 200)
         self.assertEqual(status_response.json()['data']['active_campaigns'], [{
@@ -204,7 +204,7 @@ class SenderEndpointTests(unittest.TestCase):
         self.assertEqual(individual_status.status_code, 200)
         self.assertEqual(stopped.status_code, 200)
         self.assertEqual(stopped.json()['data']['round_number'], 2)
-        self.assertEqual(stopped.json()['data']['execution_status'], 'PAUSED')
+        self.assertEqual(stopped.json()['data']['execution_status'], 'STOPPED')
         self.assertEqual(missing.status_code, 404)
 
     def test_invalid_campaign_request_returns_400(self):

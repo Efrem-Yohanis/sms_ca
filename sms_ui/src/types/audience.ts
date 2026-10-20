@@ -1,4 +1,4 @@
-export type AudienceSourceType = "manual" | "file" | "database";
+export type AudienceSourceType = "manual" | "file" | "database" | "sql";
 
 export type JoinType = "LEFT JOIN" | "INNER JOIN";
 

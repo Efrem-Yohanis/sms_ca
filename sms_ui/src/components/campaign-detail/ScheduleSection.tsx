@@ -6,13 +6,12 @@ import {
   SCHEDULE_TYPE_LABELS,
   DAY_LABELS,
   SCHEDULE_STATUS_LABELS,
-  WINDOW_STATUS_LABELS,
 } from "@/types/campaign";
 
 const SCHEDULE_STATUS_COLORS: Record<string, string> = {
-  pending: "bg-muted text-muted-foreground",
-  running: "bg-green-100 text-green-800",
-  stop: "bg-yellow-100 text-yellow-800",
+  active: "bg-green-100 text-green-800",
+  paused: "bg-yellow-100 text-yellow-800",
+  stopped: "bg-muted text-muted-foreground",
   completed: "bg-blue-100 text-blue-800",
 };
 
@@ -51,7 +50,7 @@ export function ScheduleSection({ schedule }: { schedule: Schedule }) {
           {s.end_date && (
             <Field label="End Date" value={s.end_date} />
           )}
-          <Field label="Timezone" value="Ethiopian time" />
+          <Field label="Timezone" value={s.timezone} />
         </div>
 
         {/* Recurring details */}
@@ -90,19 +89,13 @@ export function ScheduleSection({ schedule }: { schedule: Schedule }) {
                 <span className="font-medium">{tw.start}</span>
                 <span className="text-muted-foreground">→</span>
                 <span className="font-medium">{tw.end}</span>
-                <Badge
-                  variant="outline"
-                  className="ml-auto text-xs"
-                >
-                  {WINDOW_STATUS_LABELS[s.status === "running" ? "active" : s.status === "completed" ? "completed" : "pending"]}
-                </Badge>
               </div>
             ))}
           </div>
         </div>
 
         {/* Next Run Info */}
-        {s.status !== "completed" && (
+        {s.status === "active" && (
           <div className="bg-primary/5 border border-primary/20 rounded-sm px-4 py-3">
             <span className="text-xs text-muted-foreground">
               {isOneTime ? "Scheduled Execution" : "Next Scheduled Run"}

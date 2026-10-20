@@ -120,6 +120,23 @@ export function SchedulesPage() {
     } catch (error) {
       console.error("Schedule action failed", error);
       toast.error(error instanceof Error ? error.message : "Schedule action failed");
+      if (pending.kind !== "run") {
+        const currentSchedules = await actions.refreshSchedules();
+        const remaining = pending.items.filter((item) =>
+          currentSchedules.some((schedule) => schedule.id === item.id),
+        );
+        setSel((selected) =>
+          selected.filter((id) => currentSchedules.some((schedule) => schedule.id === id)),
+        );
+        setPending(
+          remaining.length
+            ? {
+                kind: remaining.length === 1 ? "delete" : "bulkDelete",
+                items: remaining,
+              }
+            : null,
+        );
+      }
     }
   };
 
