@@ -152,6 +152,7 @@ export default function DashboardHome() {
     value: data.status_distribution[key] ?? 0,
     fill: STATUS_COLORS[key],
   }));
+  const visibleStatusData = statusData.filter((item) => item.value > 0);
   const statusTotal = statusData.reduce((total, item) => total + item.value, 0);
   const activityData = [
     { name: "Success Sent", count: data.sent_vs_delivery.success_sent, fill: "#15803d" },
@@ -221,9 +222,9 @@ export default function DashboardHome() {
       </p>
 
       {activityData.every((item) => item.count === 0) ? (
-        <div className="flex h-[260px] flex-col items-center justify-center gap-3 rounded-xl bg-muted/20 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-            <Activity className="h-5 w-5 text-muted-foreground" />
+        <div className="flex h-[180px] flex-col items-center justify-center gap-2 rounded-xl bg-muted/20 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+            <Activity className="h-4 w-4 text-muted-foreground" />
           </div>
           <p className="text-sm font-medium">No activity to display</p>
           <p className="text-xs text-muted-foreground">
@@ -236,7 +237,7 @@ export default function DashboardHome() {
           aria-label="Sent and delivery successes and failures"
           className="min-w-0"
         >
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={190}>
             <BarChart
               data={activityData}
               margin={{ top: 24, right: 12, left: 0, bottom: 12 }}
@@ -328,9 +329,9 @@ export default function DashboardHome() {
       </p>
 
       {statusTotal === 0 ? (
-        <div className="flex h-[260px] flex-col items-center justify-center gap-3 rounded-xl bg-muted/20 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-            <ClipboardList className="h-5 w-5 text-muted-foreground" />
+        <div className="flex h-[180px] flex-col items-center justify-center gap-2 rounded-xl bg-muted/20 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+            <ClipboardList className="h-4 w-4 text-muted-foreground" />
           </div>
           <p className="text-sm font-medium">No campaigns yet</p>
           <p className="text-xs text-muted-foreground">
@@ -340,23 +341,23 @@ export default function DashboardHome() {
       ) : (
         <div className="grid items-center gap-4 sm:grid-cols-[minmax(150px,0.9fr)_minmax(160px,1.1fr)]">
           <div
-            className="relative mx-auto h-[230px] w-full max-w-[280px]"
+            className="relative mx-auto h-[180px] w-full max-w-[220px]"
             role="img"
             aria-label="Campaigns by current status"
           >
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
-                  data={statusData}
+                  data={visibleStatusData}
                   dataKey="value"
                   nameKey="name"
-                  innerRadius={62}
-                  outerRadius={88}
+                  innerRadius={46}
+                  outerRadius={68}
                   paddingAngle={3}
                   strokeWidth={0}
                   cornerRadius={4}
                 >
-                  {statusData.map((item) => (
+                  {visibleStatusData.map((item) => (
                     <Cell key={item.key} fill={item.fill} />
                   ))}
                 </Pie>
@@ -383,7 +384,7 @@ export default function DashboardHome() {
             </ResponsiveContainer>
 
             <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-3xl font-bold tracking-tight tabular-nums">
+              <span className="text-2xl font-bold tracking-tight tabular-nums">
                 {statusTotal.toLocaleString()}
               </span>
               <span className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
@@ -392,15 +393,15 @@ export default function DashboardHome() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            {statusData.map((item) => (
+          <div className="space-y-1">
+            {visibleStatusData.map((item) => (
               <div
                 key={item.key}
-                className="flex min-w-0 items-center justify-between gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-colors hover:border-border/70 hover:bg-muted/30"
+                className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-transparent px-2 py-1.5 transition-colors hover:border-border/70 hover:bg-muted/30"
               >
                 <span className="flex min-w-0 items-center gap-2.5">
                   <span
-                    className="h-3 w-3 shrink-0 rounded-full ring-4 ring-muted/40"
+                    className="h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-muted/40"
                     style={{ backgroundColor: item.fill }}
                   />
                   <span className="truncate text-xs font-medium">
@@ -409,10 +410,10 @@ export default function DashboardHome() {
                 </span>
 
                 <span className="shrink-0 text-right">
-                  <span className="block text-sm font-semibold tabular-nums">
+                  <span className="block text-xs font-semibold tabular-nums">
                     {item.value.toLocaleString()}
                   </span>
-                  <span className="text-[10px] text-muted-foreground">
+                  <span className="text-[9px] text-muted-foreground">
                     {Math.round((item.value / statusTotal) * 100)}% of total
                   </span>
                 </span>

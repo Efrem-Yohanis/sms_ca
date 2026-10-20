@@ -60,6 +60,17 @@ activation, and send-now operations. Valid state transitions and readiness
 requirements are enforced by the backend; a successful UI request alone does
 not guarantee that a campaign is ready to send.
 
+Activation builds messages from the audience rows already stored for the
+campaign. Scheduled dispatch can rebuild an audience for a new round when the
+audience configuration requests it; Airflow waits for that asynchronous build
+to finish before building the round's messages and starting the sender. Manual
+send-now skips the schedule-window check but does not build audience or message
+rows: it only starts queued `PENDING` or `FAILED` messages for the selected
+round. Pause stops the sender and disables the schedule; resume re-enables the
+schedule and dispatch continues in a later open window. Stop/cancel disables
+the schedule; restart re-enables it and reuses remaining queued messages,
+leaving any required next-round builds to scheduled dispatch.
+
 ## Delivery receipt (DLR) flow
 
 In the standard Docker Compose deployment, delivery receipts use a separate

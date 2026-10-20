@@ -1823,15 +1823,16 @@ class CampaignSendNowView(APIView):
 				{'success': False, 'message': 'Campaign is not ready to execute.'},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
-		start_method = request.data.get('start_method', 'scheduled')
+		start_method = request.data.get('start_method', 'manual')
 		if start_method not in {'manual', 'scheduled'}:
 			return Response({'success': False, 'message': 'start_method must be manual or scheduled.'}, status=status.HTTP_400_BAD_REQUEST)
 		schedule = getattr(campaign, 'schedule', None)
 		if not schedule:
 			return Response({'success': False, 'message': 'Campaign has no schedule.'}, status=status.HTTP_400_BAD_REQUEST)
-		in_window, _ = _schedule_window_is_open(schedule)
-		if not in_window:
-			return Response({'success': False, 'message': 'Campaign is outside its scheduled execution window.'}, status=status.HTTP_409_CONFLICT)
+		if start_method == 'scheduled':
+			in_window, _ = _schedule_window_is_open(schedule)
+			if not in_window:
+				return Response({'success': False, 'message': 'Campaign is outside its scheduled execution window.'}, status=status.HTTP_409_CONFLICT)
 
 		round_number_value = request.data.get('round_number')
 		if round_number_value in (None, ''):

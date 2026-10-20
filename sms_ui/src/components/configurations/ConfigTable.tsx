@@ -83,7 +83,7 @@ export default function ConfigTable<T extends { id: number; is_active: boolean }
       </div>
 
       <div className="border border-border rounded-lg overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="border-b border-border bg-muted/50">
               {columns.map((c, i) => (

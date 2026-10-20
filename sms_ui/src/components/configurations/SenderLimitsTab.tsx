@@ -89,22 +89,39 @@ export default function SenderLimitsTab() {
         readOnly
         onView={(item) => setSelectedTps(item)}
       />
-      <ConfigTable
-        title="Assigned N-address Request Limits"
-        columns={requestLimitColumns}
-        data={assigned.n_address_configs}
-        loading={loading}
-        readOnly
-        onView={(item) => setSelectedRequestLimit(item)}
-      />
-      <ConfigTable
-        title="Assigned N-Addresses"
-        columns={addressColumns}
-        data={assigned.n_addresses}
-        loading={loading}
-        readOnly
-        onView={(item) => setSelectedAddress(item)}
-      />
+      <div className="space-y-1">
+        <h2 className="text-lg font-semibold text-foreground">Assigned N-address settings</h2>
+        <p className="text-sm text-muted-foreground">
+          Request limits control how many addresses are processed per request. Assigned N-addresses
+          provide the sender addresses used for campaign traffic. These settings are read-only.
+        </p>
+      </div>
+      {assigned.n_address_configs.length > 0 && (
+        <ConfigTable
+          title="Assigned N-address Request Limits"
+          columns={requestLimitColumns}
+          data={assigned.n_address_configs}
+          loading={loading}
+          readOnly
+          onView={(item) => setSelectedRequestLimit(item)}
+        />
+      )}
+      {assigned.n_addresses.length > 0 && (
+        <ConfigTable
+          title="Assigned N-Addresses"
+          columns={addressColumns}
+          data={assigned.n_addresses}
+          loading={loading}
+          readOnly
+          onView={(item) => setSelectedAddress(item)}
+        />
+      )}
+      {!loading && assigned.n_address_configs.length === 0 && assigned.n_addresses.length === 0 && (
+        <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
+          No N-address settings are assigned to your account. Contact your administrator if your
+          campaigns need these settings.
+        </p>
+      )}
 
       <ConfigFormModal
         open={selectedTps !== null}

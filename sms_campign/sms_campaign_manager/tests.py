@@ -1068,7 +1068,7 @@ class EmailConfigAndReportTests(TestCase):
 
 class CampaignManualDispatchTests(TestCase):
     @patch('sms_campaign_manager.views.requests.post')
-    def test_send_now_dispatches_active_queued_campaign_to_sender(self, mock_post):
+    def test_campaign_start_dispatches_outside_schedule_window(self, mock_post):
         channel = Channel.objects.create(code='sms', name='SMS')
         sender = SenderID.objects.create(sender_id='SMSINFO', name='SMS Info', is_active=True)
         campaign = Campaign.objects.create(
@@ -1092,8 +1092,8 @@ class CampaignManualDispatchTests(TestCase):
         Schedule.objects.create(
             campaign=campaign,
             schedule_type='once',
-            start_date=timezone.localdate(),
-            time_windows=[{'start': '00:00', 'end': '23:59'}],
+            start_date=timezone.localdate() + timedelta(days=1),
+            time_windows=[{'start': '09:00', 'end': '09:01'}],
             timezone='UTC',
         )
         campaign.refresh_from_db()
@@ -1114,8 +1114,17 @@ class CampaignManualDispatchTests(TestCase):
         mock_post.return_value = sender_response
 
         with self.settings(INTERNAL_SERVICE_API_TOKEN='test-internal-token'):
-            response = self.client.post(
+            scheduled_response = self.client.post(
                 f'/api/v1/campaigns/{campaign.id}/send-now/',
+                {'start_method': 'scheduled'},
+                format='json',
+                HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
+            )
+            self.assertEqual(scheduled_response.status_code, 409, scheduled_response.content)
+            mock_post.assert_not_called()
+
+            response = self.client.post(
+                f'/api/v1/campaigns/{campaign.id}/start/',
                 {},
                 format='json',
                 HTTP_X_INTERNAL_SERVICE_TOKEN='test-internal-token',
