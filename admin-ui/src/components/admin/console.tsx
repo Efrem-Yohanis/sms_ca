@@ -374,6 +374,54 @@ function UserCampaigns({ profileId }: { profileId: number }) {
     return <DetailSection title="Campaigns"><p className="text-sm text-muted-foreground">This user has not created any campaigns.</p></DetailSection>;
   }
 
+  if (selectedCampaign) {
+    return (
+      <div className="grid gap-5">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-3 w-fit text-muted-foreground"
+          onClick={() => setSelectedCampaignId(null)}
+        >
+          <ArrowLeft /> Back to campaigns
+        </Button>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="mb-2 flex flex-wrap items-center gap-3">
+              <h2 className="font-display text-2xl font-bold">{selectedCampaign.name}</h2>
+              <Status value={selectedCampaign.is_deleted ? "Deleted" : selectedCampaign.status} />
+            </div>
+            <p className="text-xs text-muted-foreground">Campaign #{selectedCampaign.id}</p>
+          </div>
+        </div>
+        <div className="grid gap-5 lg:grid-cols-2">
+          <DetailSection title="Campaign information">
+            <dl className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+              {[
+                ["Campaign name", selectedCampaign.name],
+                ["Status", selectedCampaign.is_deleted ? "Deleted" : selectedCampaign.status],
+                ["Sender ID", selectedCampaign.sender_id],
+                ["Channels", selectedCampaign.channel_names.join(", ") || "None"],
+                ["Ready to execute", selectedCampaign.is_ready_to_execute ? "Yes" : "No"],
+                ["Created", new Date(selectedCampaign.created_at).toLocaleString()],
+                ["Last updated", new Date(selectedCampaign.updated_at).toLocaleString()],
+                ["Notification emails", selectedCampaign.owner_emails.join(", ") || "None"],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <dt className="text-[11px] text-muted-foreground">{label}</dt>
+                  <dd className="mt-1 break-words text-sm font-medium">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          </DetailSection>
+          <DetailSection title="Delivery channels">
+            <p className="text-sm">{selectedCampaign.channel_names.join(", ") || "No channels assigned."}</p>
+          </DetailSection>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="grid gap-5">
       <DetailSection title={`Campaigns created (${campaigns.length})`}>
@@ -382,8 +430,7 @@ function UserCampaigns({ profileId }: { profileId: number }) {
             <button
               key={campaign.id}
               type="button"
-              aria-expanded={selectedCampaignId === campaign.id}
-              onClick={() => setSelectedCampaignId((current) => current === campaign.id ? null : campaign.id)}
+              onClick={() => setSelectedCampaignId(campaign.id)}
               className="flex w-full items-center justify-between gap-4 py-3 text-left hover:bg-surface"
             >
               <span className="min-w-0">
@@ -392,33 +439,12 @@ function UserCampaigns({ profileId }: { profileId: number }) {
               </span>
               <span className="flex shrink-0 items-center gap-2">
                 <Status value={campaign.is_deleted ? "Deleted" : campaign.status} />
-                <ChevronDown className={`size-4 transition-transform ${selectedCampaignId === campaign.id ? "rotate-180" : ""}`} />
+                <ArrowRight className="size-4" />
               </span>
             </button>
           ))}
         </div>
       </DetailSection>
-      {selectedCampaign && (
-        <DetailSection title={`Campaign details · #${selectedCampaign.id}`}>
-          <dl className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
-            {[
-              ["Campaign name", selectedCampaign.name],
-              ["Status", selectedCampaign.is_deleted ? "Deleted" : selectedCampaign.status],
-              ["Sender ID", selectedCampaign.sender_id],
-              ["Channels", selectedCampaign.channel_names.join(", ") || "None"],
-              ["Ready to execute", selectedCampaign.is_ready_to_execute ? "Yes" : "No"],
-              ["Created", new Date(selectedCampaign.created_at).toLocaleString()],
-              ["Last updated", new Date(selectedCampaign.updated_at).toLocaleString()],
-              ["Notification emails", selectedCampaign.owner_emails.join(", ") || "None"],
-            ].map(([label, value]) => (
-              <div key={label}>
-                <dt className="text-[11px] text-muted-foreground">{label}</dt>
-                <dd className="mt-1 break-words text-sm font-medium">{value}</dd>
-              </div>
-            ))}
-          </dl>
-        </DetailSection>
-      )}
     </div>
   );
 }

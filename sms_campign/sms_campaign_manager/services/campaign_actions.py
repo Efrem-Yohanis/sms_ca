@@ -157,6 +157,27 @@ class CampaignActionsService:
         if not self.campaign.refresh_readiness_flag():
             return {'success': False, 'message': 'Campaign is not ready to execute; deactivate it and activate it again.'}
 
+        # Rebuild this scheduled round before reactivating so the sender has a
+        # fresh PENDING queue. Reuse a stable batch ID so retrying a restart
+        # replaces the previous restart build for this round.
+        round_number = max(schedule.current_round, 1)
+        batch_id = f'campaign-{self.campaign.pk}-round-{round_number}'
+        try:
+            build_result = MessageBuilder(
+                campaign=self.campaign,
+                round_number=round_number,
+                batch_id=batch_id,
+            ).build()
+            if build_result['built'] < 1:
+                raise ValueError('No messages were built for this campaign.')
+        except Exception as exc:
+            logger.exception('Could not rebuild messages for restarted campaign_id=%s', self.campaign.pk)
+            return {
+                'success': False,
+                'message': 'Campaign could not be restarted because messages could not be rebuilt.',
+                'errors': [str(exc)],
+            }
+
         with transaction.atomic():
             self.campaign.status = 'active'
             self.campaign.save(update_fields=['status', 'updated_at'])
@@ -165,8 +186,13 @@ class CampaignActionsService:
             schedule.save(update_fields=['is_active', 'schedule_status', 'updated_at'])
         return {
             'success': True,
-            'message': 'Campaign restarted and its schedule reactivated.',
-            'data': {'campaign_id': self.campaign.id, 'status': self.campaign.status},
+            'message': 'Campaign messages rebuilt as pending and its schedule reactivated.',
+            'data': {
+                'campaign_id': self.campaign.id,
+                'status': self.campaign.status,
+                'round_number': round_number,
+                'messages_built': build_result['built'],
+            },
         }
 
     def pause_campaign(self):
