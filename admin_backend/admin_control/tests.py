@@ -1,7 +1,7 @@
 from django.utils import timezone
 from django.contrib.auth.models import User
 from django.db import connection
-from django.test import TransactionTestCase
+from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from unittest.mock import patch
@@ -11,6 +11,7 @@ from .models import (
     Channel,
     GlobalTPSConfig,
     AdminEmailConfig,
+    AudioCallConfig,
     NAddress,
     NAddressesConfig,
     PasswordResetChallenge,
@@ -20,24 +21,24 @@ from .models import (
 )
 
 
-class AdminBackendApiTests(TransactionTestCase):
+class AdminBackendApiTests(TestCase):
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         cls.created_shared_tables = []
         with connection.schema_editor() as editor:
             for model in (
-                SMSCConfig, SenderID, Channel, GlobalTPSConfig, NAddressesConfig, Campaign
+                SMSCConfig, AudioCallConfig, SenderID, Channel, GlobalTPSConfig, NAddressesConfig, Campaign
             ):
                 editor.create_model(model)
                 cls.created_shared_tables.append(model)
+        super().setUpClass()
 
     @classmethod
     def tearDownClass(cls):
+        super().tearDownClass()
         with connection.schema_editor() as editor:
             for model in reversed(cls.created_shared_tables):
                 editor.delete_model(model)
-        super().tearDownClass()
 
     def setUp(self):
         email_sender_patcher = patch("admin_control.views.send_admin_email")
@@ -324,6 +325,50 @@ class AdminBackendApiTests(TransactionTestCase):
         assigned = self.client.get("/api/v1/configurations/assigned/")
         self.assertEqual(assigned.status_code, 200)
         self.assertEqual([item["id"] for item in assigned.data["n_addresses"]], [address.pk])
+
+    def test_audio_call_config_crud_and_user_scoped_assignment(self):
+        self.client.force_authenticate(self.admin)
+        payload = {
+            "name": "Primary voice API",
+            "base_url": "https://voice.example.test",
+            "call_endpoint": "/v1/calls",
+            "http_method": "POST",
+            "auth_type": "none",
+            "calling_number": "+251911000000",
+            "request_field_mapping": {
+                "msisdn": "customer_msisdn",
+                "audio_recording": "recording_url",
+                "calling_number": "from",
+                "language": "lang",
+                "call_id": "call_id",
+            },
+            "rate_limit_per_second": 8,
+            "rate_limit_per_minute": 300,
+            "assigned_user_ids": [self.manager.pk],
+        }
+        created = self.client.post(
+            "/api/v1/admin/audio-call-configs/", payload, format="json"
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["calling_number"], "+251911000000")
+        self.assertEqual(created.data["assigned_user_ids"], [self.manager.pk])
+        self.assertNotIn("api_key", created.data)
+
+        self.client.force_authenticate(self.manager)
+        assigned = self.client.get("/api/v1/configurations/assigned/")
+        self.assertEqual(assigned.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in assigned.data["audio_call"]],
+            [created.data["id"]],
+        )
+
+        self.client.force_authenticate(self.admin)
+        bad_mapping = self.client.post(
+            "/api/v1/admin/audio-call-configs/",
+            {**payload, "name": "Invalid voice API", "request_field_mapping": {"msisdn": "to"}},
+            format="json",
+        )
+        self.assertEqual(bad_mapping.status_code, 400)
 
     def test_admin_can_view_campaigns_created_by_user(self):
         now = timezone.now()

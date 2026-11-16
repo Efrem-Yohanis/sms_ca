@@ -44,6 +44,7 @@ export type UserRecord = {
   lastLoginAt?: string;
   requirePasswordChange?: boolean;
   assignedSmscs: number[];
+  assignedAudioCallConfigs: number[];
   assignedSenderIds: number[];
   assignedChannels: number[];
   assignedTpsConfigs: number[];
@@ -53,6 +54,7 @@ export type UserRecord = {
 
 export type UserAssignmentOptions = {
   smscs: { id: number; label: string }[];
+  audioCallConfigs: { id: number; label: string }[];
   senderIds: { id: number; label: string }[];
   channels: { id: number; label: string }[];
   tpsConfigs: { id: number; label: string }[];
@@ -73,6 +75,7 @@ export type UserSaveInput = {
   notes: string;
   tpsLimit: number | null;
   assignedSmscs: number[];
+  assignedAudioCallConfigs: number[];
   assignedSenderIds: number[];
   assignedChannels: number[];
   assignedTpsConfigs: number[];
@@ -237,6 +240,7 @@ function UserFormDialog({
           login: "Never",
           tone: "mint",
           assignedSmscs: [],
+          assignedAudioCallConfigs: [],
           assignedSenderIds: [],
           assignedChannels: [],
           assignedTpsConfigs: [],
@@ -260,6 +264,7 @@ function UserFormDialog({
         notes: form.notes,
         tps: user?.tps ?? 0,
         assignedSmscs: user?.assignedSmscs ?? [],
+        assignedAudioCallConfigs: user?.assignedAudioCallConfigs ?? [],
         assignedSenderIds: user?.assignedSenderIds ?? [],
         assignedChannels: user?.assignedChannels ?? [],
         assignedTpsConfigs: user?.assignedTpsConfigs ?? [],
@@ -282,6 +287,7 @@ function UserFormDialog({
         notes: form.notes,
         tpsLimit: user?.tps ?? null,
         assignedSmscs: user?.assignedSmscs ?? [],
+        assignedAudioCallConfigs: user?.assignedAudioCallConfigs ?? [],
         assignedSenderIds: user?.assignedSenderIds ?? [],
         assignedChannels: user?.assignedChannels ?? [],
         assignedTpsConfigs: user?.assignedTpsConfigs ?? [],

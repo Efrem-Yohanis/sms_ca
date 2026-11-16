@@ -91,6 +91,7 @@ refresh tokens; send the access token as `Authorization: Bearer <token>`.
 | `PATCH/DELETE /admin/email-services/<id>/` | Update or delete an Admin email service |
 | `POST /admin/email-services/<id>/test/` | Test a saved Admin email service |
 | `/admin/smsc-configs/` | Existing SMSC API configurations |
+| `/admin/audio-call-configs/` | Outbound audio-call API endpoints, credentials, request-field mapping, calling number, TPS limits, and Campaign Manager assignments |
 | `/admin/sender-ids/` | Existing Sender IDs |
 | `/admin/channels/` | Existing Channels |
 | `/admin/tps-configs/` | Existing global TPS configurations |
@@ -109,8 +110,11 @@ assignments can be submitted from the user detail API or the corresponding
 config API. Create Sender IDs with `smsc_ids`; Sender IDs also expose
 `sender_type`, `country`, and optional `tps_limit`. Create Channels with one or
 more `smsc_bindings` entries (`smsc`, optional `allowed_sender_ids`,
-`default_tps`, and `priority`). SMSC secrets are write-only and audit values
-redact credentials.
+`default_tps`, and `priority`). SMSC and audio-call API credentials are
+write-only and audit values redact credentials. Audio-call credentials are
+encrypted using the shared `FIELD_ENCRYPTION_KEY`. Audio-call configurations
+are assigned to Campaign Managers like SMSC configurations and are exposed
+through `GET /configurations/assigned/` under `audio_call`.
 
 The The admin console creates accounts with no configuration assignments. It sends
 the supplied temporary password and a role-specific login link using the active

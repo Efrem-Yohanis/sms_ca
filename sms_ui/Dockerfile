@@ -3,9 +3,7 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-# RUN npm ci --no-audit --no-fund --verbose
-ARG NPM_REGISTRY=http://registry.safaricomet.net
-RUN npm ci --no-audit --no-fund --verbose --registry="${NPM_REGISTRY}"
+RUN npm ci --no-audit --no-fund --verbose --registry=http://registry.safaricomet.net
 
 COPY . ./
 ARG VITE_API_BASE_URL=

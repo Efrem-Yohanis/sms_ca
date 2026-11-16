@@ -25,6 +25,7 @@ export type ApiUser = {
   notes: string;
   tps_limit: number | null;
   assigned_smscs: number[];
+  assigned_audio_call_configs: number[];
   assigned_sender_ids: number[];
   assigned_channels: number[];
   assigned_tps_configs: number[];
@@ -32,6 +33,7 @@ export type ApiUser = {
   assigned_n_addresses: number[];
   assigned_config_counts: {
     smsc: number;
+    audio_calls: number;
     sender_ids: number;
     channels: number;
     tps: number;
@@ -120,6 +122,7 @@ export type UserInput = {
   notes: string;
   tps_limit: number | null;
   assigned_smscs: number[];
+  assigned_audio_call_configs: number[];
   assigned_sender_ids: number[];
   assigned_channels: number[];
   assigned_tps_configs: number[];
@@ -225,7 +228,7 @@ export async function adminRequest<T>(
     }
   }
   const invalidatesWorkspace =
-    /^\/admin\/(users|smsc-configs|sender-ids|channels|tps-configs|n-address-configs|n-addresses)(?:\/|$)/.test(
+    /^\/admin\/(users|smsc-configs|audio-call-configs|sender-ids|channels|tps-configs|n-address-configs|n-addresses)(?:\/|$)/.test(
       path,
     );
   if (response.ok && (init.method ?? "GET").toUpperCase() !== "GET" && invalidatesWorkspace) {

@@ -12,6 +12,7 @@ import type { UserRecord } from "@/components/admin/users-management";
 
 export type BackendConfigPage =
   | "SMSC Accounts"
+  | "Audio Call APIs"
   | "Sender IDs"
   | "Channels"
   | "TPS"
@@ -28,6 +29,11 @@ const pageConfigs: Record<BackendConfigPage, EndpointConfig> = {
     endpoint: "smsc-configs",
     name: "SMSC connection",
     columns: ["Name", "Base URL", "Authentication", "TPS", "Assigned users"],
+  },
+  "Audio Call APIs": {
+    endpoint: "audio-call-configs",
+    name: "Audio-call API",
+    columns: ["Name", "Base URL", "Endpoint", "Authentication", "TPS", "Assigned users"],
   },
   "Sender IDs": {
     endpoint: "sender-ids",
@@ -76,6 +82,38 @@ const defaultValues = (page: BackendConfigPage): Record<string, unknown> => {
         max_retries: 3,
         retry_backoff_seconds: 5,
         max_addresses_per_request: 1000,
+        request_timeout_seconds: 30,
+        connect_timeout_seconds: 10,
+        is_default: false,
+        is_active: true,
+        extra_headers: {},
+        extra_params: {},
+        assigned_user_ids: [],
+      };
+    case "Audio Call APIs":
+      return {
+        name: "",
+        description: "",
+        base_url: "",
+        call_endpoint: "/api/call",
+        http_method: "POST",
+        auth_type: "none",
+        api_key: "",
+        api_secret: "",
+        username: "",
+        password: "",
+        calling_number: "",
+        request_field_mapping: {
+          msisdn: "msisdn",
+          audio_recording: "audio_recording",
+          calling_number: "calling_number",
+          language: "language",
+          call_id: "call_id",
+        },
+        rate_limit_per_second: 10,
+        rate_limit_per_minute: 600,
+        max_retries: 3,
+        retry_backoff_seconds: 5,
         request_timeout_seconds: 30,
         connect_timeout_seconds: 10,
         is_default: false,
@@ -186,6 +224,15 @@ function getRows(page: BackendConfigPage, configs: ApiConfig[], related: Related
           config.rate_limit_per_second,
           assignedUserIds(config).length,
         ].map(formatValue);
+      case "Audio Call APIs":
+        return [
+          config.name,
+          config.base_url,
+          config.call_endpoint,
+          config.auth_type,
+          config.rate_limit_per_second,
+          assignedUserIds(config).length,
+        ].map(formatValue);
       case "Sender IDs":
         return [
           config.sender_id,
@@ -255,6 +302,21 @@ function configPayload(
         max_retries: number("max_retries", 3),
         retry_backoff_seconds: number("retry_backoff_seconds", 5),
         max_addresses_per_request: number("max_addresses_per_request", 1000),
+        request_timeout_seconds: number("request_timeout_seconds", 30),
+        connect_timeout_seconds: number("connect_timeout_seconds", 10),
+        is_default: bool("is_default"),
+        is_active: bool("is_active"),
+        assigned_user_ids: assignments,
+      };
+    case "Audio Call APIs":
+      return {
+        ...values,
+        calling_number: String(values.calling_number ?? ""),
+        request_field_mapping: values.request_field_mapping,
+        rate_limit_per_second: number("rate_limit_per_second", 10),
+        rate_limit_per_minute: number("rate_limit_per_minute", 600),
+        max_retries: number("max_retries", 3),
+        retry_backoff_seconds: number("retry_backoff_seconds", 5),
         request_timeout_seconds: number("request_timeout_seconds", 30),
         connect_timeout_seconds: number("connect_timeout_seconds", 10),
         is_default: bool("is_default"),
@@ -439,6 +501,29 @@ function ConfigEditor({
       </div>
     </fieldset>
   );
+  const mappedField = (field: string, label: string) => {
+    const mapping = values.request_field_mapping;
+    const mappedValue =
+      mapping && typeof mapping === "object"
+        ? String((mapping as Record<string, unknown>)[field] ?? "")
+        : "";
+    return (
+      <label key={field} className="block text-xs font-semibold">
+        Provider field for {label}
+        <Input
+          required
+          value={mappedValue}
+          onChange={(event) =>
+            setValue("request_field_mapping", {
+              ...(values.request_field_mapping as Record<string, unknown>),
+              [field]: event.target.value,
+            })
+          }
+          className="mt-1.5 bg-background"
+        />
+      </label>
+    );
+  };
 
   const fields = () => {
     const managerOptions = users
@@ -475,6 +560,33 @@ function ConfigEditor({
           textField("connect_timeout_seconds", "Connection timeout (seconds)", "number", true),
           checkboxList("assigned_user_ids", "Assigned Campaign Managers", managerOptions),
           toggleLabel("is_default", "Default SMSC", Boolean(values.is_default)),
+          toggleLabel("is_active", "Enabled", Boolean(values.is_active)),
+        ];
+      case "Audio Call APIs":
+        return [
+          textField("name", "Configuration name", "text", true),
+          textField("base_url", "Base URL", "url", true),
+          textField("call_endpoint", "Call endpoint", "text", true),
+          selectField("http_method", "HTTP method", ["POST", "PUT", "GET"]),
+          selectField("auth_type", "Authentication", ["none", "api_key", "bearer", "basic"]),
+          textField("api_key", "API key", "password", false, true),
+          textField("api_secret", "API secret", "password", false, true),
+          textField("username", "Username"),
+          textField("password", "Password", "password", false, true),
+          textField("calling_number", "Calling number", "text", true),
+          mappedField("msisdn", "customer MSISDN"),
+          mappedField("audio_recording", "audio recording"),
+          mappedField("calling_number", "calling number"),
+          mappedField("language", "language"),
+          mappedField("call_id", "call ID"),
+          textField("rate_limit_per_second", "Calls per second (TPS)", "number", true),
+          textField("rate_limit_per_minute", "Calls per minute", "number", true),
+          textField("max_retries", "Maximum retries", "number", true),
+          textField("retry_backoff_seconds", "Retry backoff (seconds)", "number", true),
+          textField("request_timeout_seconds", "Request timeout (seconds)", "number", true),
+          textField("connect_timeout_seconds", "Connection timeout (seconds)", "number", true),
+          checkboxList("assigned_user_ids", "Assigned Campaign Managers", managerOptions),
+          toggleLabel("is_default", "Default audio-call API", Boolean(values.is_default)),
           toggleLabel("is_active", "Enabled", Boolean(values.is_active)),
         ];
       case "Sender IDs":

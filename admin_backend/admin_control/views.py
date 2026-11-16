@@ -24,6 +24,7 @@ from .audit import audit, snapshot
 from .models import (
     AdminAuditLog,
     AdminEmailConfig,
+    AudioCallConfig,
     Campaign,
     CampaignAudienceRow,
     CampaignFailedSentRow,
@@ -46,6 +47,8 @@ from .permissions import IsCampaignManager, IsPlatformAdmin
 from .serializers import (
     AdminAuditLogSerializer,
     AdminEmailConfigSerializer,
+    AudioCallConfigSerializer,
+    AudioCallConfigWriteSerializer,
     ChannelSerializer,
     ChannelSMSCBindingSerializer,
     GlobalTPSConfigSerializer,
@@ -127,7 +130,7 @@ class UserListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = UserProfile.objects.select_related("user").prefetch_related(
-            "sms_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"
+            "sms_configs", "audio_call_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"
         )
         role = self.request.query_params.get("role")
         department = self.request.query_params.get("department")
@@ -150,6 +153,7 @@ class UserListCreateView(generics.ListCreateAPIView):
         if assigned == "true":
             queryset = queryset.filter(
                 Q(sms_configs__isnull=False)
+                | Q(audio_call_configs__isnull=False)
                 | Q(sender_ids__isnull=False)
                 | Q(channels__isnull=False)
                 | Q(tps_configs__isnull=False)
@@ -159,6 +163,7 @@ class UserListCreateView(generics.ListCreateAPIView):
         elif assigned == "false":
             queryset = queryset.filter(
                 sms_configs__isnull=True,
+                audio_call_configs__isnull=True,
                 sender_ids__isnull=True,
                 channels__isnull=True,
                 tps_configs__isnull=True,
@@ -731,6 +736,60 @@ class SMSCConfigDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance.delete()
 
 
+class AudioCallConfigListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsPlatformAdmin]
+    queryset = AudioCallConfig.objects.all().prefetch_related("assigned_profiles")
+    serializer_class = AudioCallConfigSerializer
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        serializer = AudioCallConfigWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        item = serializer.save(created_at=timezone.now(), updated_at=timezone.now())
+        self._apply_default(item)
+        audit(request, "create", item, f"Created audio-call configuration {item.name}.", new_values=snapshot(item))
+        return Response(AudioCallConfigSerializer(item).data, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _apply_default(item):
+        if item.is_default:
+            AudioCallConfig.objects.exclude(pk=item.pk).filter(is_default=True).update(is_default=False)
+
+
+class AudioCallConfigDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsPlatformAdmin]
+    queryset = AudioCallConfig.objects.all().prefetch_related("assigned_profiles")
+    serializer_class = AudioCallConfigSerializer
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        old_values = snapshot(instance)
+        serializer = AudioCallConfigWriteSerializer(
+            instance, data=request.data, partial=kwargs.pop("partial", False)
+        )
+        serializer.is_valid(raise_exception=True)
+        updated = serializer.save(updated_at=timezone.now())
+        AudioCallConfigListCreateView._apply_default(updated)
+        audit(
+            request,
+            "update",
+            updated,
+            f"Updated audio-call configuration {updated.name}.",
+            old_values=old_values,
+            new_values=snapshot(updated),
+        )
+        return Response(AudioCallConfigSerializer(updated).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
+    def perform_destroy(self, instance):
+        audit(self.request, "delete", instance, f"Deleted audio-call configuration {instance.name}.")
+        instance.delete()
+
+
 class ConfigCRUDMixin:
     permission_classes = [IsPlatformAdmin]
 
@@ -764,6 +823,8 @@ class ConfigCRUDMixin:
                 NAddressesConfig.objects.exclude(pk=item.pk).filter(is_default=True).update(is_default=False)
             if item.is_active:
                 NAddressesConfig.objects.exclude(pk=item.pk).filter(is_active=True).update(is_active=False)
+        elif isinstance(item, AudioCallConfig) and item.is_default:
+            AudioCallConfig.objects.exclude(pk=item.pk).filter(is_default=True).update(is_default=False)
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -882,6 +943,9 @@ class AssignedConfigurationsView(APIView):
         if profile.role == UserProfile.Role.ADMIN:
             return Response({
                 "smsc": SMSCConfigSerializer(SMSCConfig.objects.filter(is_active=True), many=True).data,
+                "audio_call": AudioCallConfigSerializer(
+                    AudioCallConfig.objects.filter(is_active=True), many=True
+                ).data,
                 "sender_ids": SenderIDSerializer(SenderID.objects.filter(is_active=True), many=True).data,
                 "channels": ChannelSerializer(Channel.objects.filter(is_active=True), many=True).data,
                 "tps_configs": GlobalTPSConfigSerializer(GlobalTPSConfig.objects.filter(is_active=True), many=True).data,
@@ -892,6 +956,10 @@ class AssignedConfigurationsView(APIView):
         return Response({
             "smsc": _serialize_manager_configs(
                 SMSCConfigSerializer, profile.sms_configs.filter(is_active=True)
+            ),
+            "audio_call": _serialize_manager_configs(
+                AudioCallConfigSerializer,
+                profile.audio_call_configs.filter(is_active=True),
             ),
             "sender_ids": _serialize_manager_configs(
                 SenderIDSerializer, profile.sender_ids.filter(is_active=True)

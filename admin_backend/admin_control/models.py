@@ -116,6 +116,42 @@ class SMSCConfig(SharedConfigModel):
         return self.name
 
 
+class AudioCallConfig(SharedConfigModel):
+    name = models.CharField(max_length=150, unique=True)
+    description = models.TextField(blank=True, default="")
+    base_url = models.URLField(max_length=500)
+    call_endpoint = models.CharField(max_length=255, default="/api/call")
+    http_method = models.CharField(max_length=10, default="POST")
+    auth_type = models.CharField(max_length=20, default="api_key")
+    api_key = SharedEncryptedCharField(max_length=500, blank=True, default="")
+    api_secret = SharedEncryptedCharField(max_length=500, blank=True, default="")
+    username = models.CharField(max_length=255, blank=True, default="")
+    password = SharedEncryptedCharField(max_length=500, blank=True, default="")
+    calling_number = models.CharField(max_length=30)
+    request_field_mapping = models.JSONField(default=dict)
+    extra_headers = models.JSONField(default=dict, blank=True)
+    extra_params = models.JSONField(default=dict, blank=True)
+    rate_limit_per_second = models.PositiveIntegerField(default=10)
+    rate_limit_per_minute = models.PositiveIntegerField(default=600)
+    max_retries = models.PositiveSmallIntegerField(default=3)
+    retry_backoff_seconds = models.PositiveIntegerField(default=5)
+    request_timeout_seconds = models.PositiveIntegerField(default=30)
+    connect_timeout_seconds = models.PositiveIntegerField(default=10)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    last_test_status = models.CharField(max_length=20, blank=True, default="")
+    last_test_message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta(SharedConfigModel.Meta):
+        db_table = "sms_campaign_manager_audiocallconfig"
+
+    def __str__(self):
+        return self.name
+
+
 class GlobalTPSConfig(SharedConfigModel):
     name = models.CharField(max_length=150)
     description = models.TextField(blank=True, default="")
@@ -223,6 +259,9 @@ class UserProfile(models.Model):
     require_password_change = models.BooleanField(default=False)
     tps_limit = models.PositiveIntegerField(null=True, blank=True)
     sms_configs = models.ManyToManyField(SMSCConfig, blank=True, related_name="assigned_profiles")
+    audio_call_configs = models.ManyToManyField(
+        AudioCallConfig, blank=True, related_name="assigned_profiles"
+    )
     sender_ids = models.ManyToManyField(SenderID, blank=True, related_name="assigned_profiles")
     channels = models.ManyToManyField(Channel, blank=True, related_name="assigned_profiles")
     tps_configs = models.ManyToManyField(

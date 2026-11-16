@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Languages, Radio, Database, Send, Mail, UserCog, Gauge } from "lucide-react";
+import { Languages, Radio, Database, Send, Mail, UserCog, Gauge, PhoneCall } from "lucide-react";
 import { cn } from "@/lib/utils";
 import LanguagesTab from "@/components/configurations/LanguagesTab";
 import ChannelsTab from "@/components/configurations/ChannelsTab";
@@ -9,6 +9,7 @@ import EmailServicesTab from "@/components/configurations/EmailServicesTab";
 import CustomerProfileConfigsTab from "@/components/configurations/CustomerProfileConfigsTab";
 import SMSCConfigsTab from "@/components/configurations/SMSCConfigsTab";
 import SenderLimitsTab from "@/components/configurations/SenderLimitsTab";
+import AudioCallConfigsTab from "@/components/configurations/AudioCallConfigsTab";
 
 const TABS = [
   { key: "languages", label: "Languages", icon: Languages },
@@ -18,6 +19,7 @@ const TABS = [
   { key: "email", label: "Email Services", icon: Mail },
   { key: "profile", label: "Customer Profile", icon: UserCog },
   { key: "smsc", label: "SMSC Config", icon: Radio },
+  { key: "audio-call", label: "Audio Call API", icon: PhoneCall },
   { key: "limits", label: "Sender Limits", icon: Gauge },
 ] as const;
 
@@ -57,6 +59,7 @@ export default function Configurations() {
       {tab === "email" && <EmailServicesTab />}
       {tab === "profile" && <CustomerProfileConfigsTab />}
       {tab === "smsc" && <SMSCConfigsTab />}
+      {tab === "audio-call" && <AudioCallConfigsTab />}
       {tab === "limits" && <SenderLimitsTab />}
     </div>
   );

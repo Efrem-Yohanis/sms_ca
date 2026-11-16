@@ -362,6 +362,115 @@ class SMSCConfig(models.Model):
         super().save(*args, **kwargs)
 
 
+class AudioCallConfig(models.Model):
+    """Authenticated outbound audio-call API and its per-call rate limits."""
+
+    AUTH_TYPE_CHOICES = SMSCConfig.AUTH_TYPE_CHOICES
+    HTTP_METHOD_CHOICES = SMSCConfig.HTTP_METHOD_CHOICES
+
+    id = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150, unique=True)
+    description = models.TextField(blank=True, default='')
+    base_url = models.URLField(max_length=500)
+    call_endpoint = models.CharField(max_length=255, default='/api/call')
+    http_method = models.CharField(max_length=10, choices=HTTP_METHOD_CHOICES, default='POST')
+    auth_type = models.CharField(max_length=20, choices=AUTH_TYPE_CHOICES, default='api_key')
+    api_key = EncryptedCharField(max_length=500, blank=True, default='')
+    api_secret = EncryptedCharField(max_length=500, blank=True, default='')
+    username = models.CharField(max_length=255, blank=True, default='')
+    password = EncryptedCharField(max_length=500, blank=True, default='')
+    calling_number = models.CharField(max_length=30)
+    request_field_mapping = models.JSONField(
+        default=dict,
+        help_text='Maps msisdn, audio_recording, calling_number, language, and call_id to provider field names.',
+    )
+    extra_headers = models.JSONField(default=dict, blank=True)
+    extra_params = models.JSONField(default=dict, blank=True)
+    rate_limit_per_second = models.PositiveIntegerField(default=10)
+    rate_limit_per_minute = models.PositiveIntegerField(default=600)
+    max_retries = models.PositiveSmallIntegerField(default=3)
+    retry_backoff_seconds = models.PositiveIntegerField(default=5)
+    request_timeout_seconds = models.PositiveIntegerField(default=30)
+    connect_timeout_seconds = models.PositiveIntegerField(default=10)
+    is_default = models.BooleanField(default=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    last_test_status = models.CharField(max_length=20, blank=True, default='')
+    last_test_message = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_audio_call_configs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', 'name']
+        indexes = [
+            models.Index(fields=['is_active'], name='sms_campaign_audio_active_idx'),
+            models.Index(fields=['is_default'], name='sms_campaign_audio_default_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.base_url})'
+
+    def get_full_call_url(self):
+        base = (self.base_url or '').rstrip('/')
+        endpoint = (self.call_endpoint or '').strip()
+        if not endpoint.startswith('/'):
+            endpoint = '/' + endpoint
+        return f'{base}{endpoint}'
+
+    def get_headers(self):
+        headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+        if self.auth_type == 'api_key' and self.api_key:
+            headers['X-API-Key'] = self.api_key
+        elif self.auth_type == 'bearer' and self.api_key:
+            headers['Authorization'] = f'Bearer {self.api_key}'
+        elif self.auth_type == 'basic':
+            encoded = base64.b64encode(f'{self.username}:{self.password}'.encode()).decode()
+            headers['Authorization'] = f'Basic {encoded}'
+        headers.update(self.extra_headers or {})
+        return headers
+
+    def clean(self):
+        errors = {}
+        if not self.name or not self.name.strip():
+            errors['name'] = 'Name is required.'
+        if not self.base_url or not self.base_url.strip():
+            errors['base_url'] = 'Base URL is required.'
+        if not (self.calling_number or '').strip():
+            errors['calling_number'] = 'Calling number is required.'
+        if self.auth_type in ('api_key', 'bearer') and not (self.api_key or '').strip():
+            errors['api_key'] = f"API key is required when auth_type is '{self.auth_type}'."
+        elif self.auth_type == 'basic' and not (self.username or '').strip():
+            errors['username'] = "Username is required when auth_type is 'basic'."
+        elif self.auth_type == 'basic' and not (self.password or '').strip():
+            errors['password'] = "Password is required when auth_type is 'basic'."
+        for field in ('rate_limit_per_second', 'rate_limit_per_minute', 'request_timeout_seconds', 'connect_timeout_seconds'):
+            if getattr(self, field) < 1:
+                errors[field] = 'Must be greater than 0.'
+        required_fields = {'msisdn', 'audio_recording', 'calling_number', 'language', 'call_id'}
+        if not isinstance(self.request_field_mapping, dict) or not required_fields.issubset(self.request_field_mapping):
+            errors['request_field_mapping'] = (
+                'Map msisdn, audio_recording, calling_number, language, and call_id to provider field names.'
+            )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or '').strip()
+        self.base_url = (self.base_url or '').strip()
+        self.calling_number = (self.calling_number or '').strip()
+        if self.is_default:
+            AudioCallConfig.objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
+        self.full_clean(validate_unique=False)
+        super().save(*args, **kwargs)
+
+
 class TestMessage(models.Model):
     """An isolated SMSC test submission, separate from campaign messages."""
 

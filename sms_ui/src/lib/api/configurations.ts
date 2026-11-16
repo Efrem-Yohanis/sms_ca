@@ -102,6 +102,32 @@ export interface SMSCConfig {
   last_test_message?: string;
 }
 
+export interface AudioCallConfig {
+  id: number;
+  name: string;
+  description?: string;
+  base_url: string;
+  call_endpoint: string;
+  http_method: "GET" | "POST" | "PUT";
+  auth_type: "none" | "api_key" | "bearer" | "basic";
+  calling_number: string;
+  request_field_mapping: Record<
+    "msisdn" | "audio_recording" | "calling_number" | "language" | "call_id",
+    string
+  >;
+  rate_limit_per_second: number;
+  rate_limit_per_minute: number;
+  max_retries: number;
+  retry_backoff_seconds: number;
+  request_timeout_seconds: number;
+  connect_timeout_seconds: number;
+  is_default: boolean;
+  is_active: boolean;
+  last_tested_at?: string | null;
+  last_test_status?: string;
+  last_test_message?: string;
+}
+
 export interface GlobalTPSConfig {
   id: number;
   name: string;
@@ -140,6 +166,7 @@ export interface NAddress {
 
 export interface AssignedConfigurations {
   smsc: SMSCConfig[];
+  audio_call: AudioCallConfig[];
   sender_ids: SenderIdConfig[];
   channels: SupportedChannel[];
   tps_configs: GlobalTPSConfig[];

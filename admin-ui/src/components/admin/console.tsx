@@ -43,7 +43,7 @@ import {
   type UserInput,
 } from "@/lib/admin-api";
 
-export type Page = "Overview" | "Users" | "Campaigns" | "SMSC Accounts" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses" | "TPS & N-Addresses" | "Email Config" | "System Logs" | "Kafka Monitor";
+export type Page = "Overview" | "Users" | "Campaigns" | "SMSC Accounts" | "Audio Call APIs" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses" | "TPS & N-Addresses" | "Email Config" | "System Logs" | "Kafka Monitor";
 type User = UserRecord;
 type WorkspaceCache = {
   users: User[];
@@ -58,6 +58,7 @@ const getFreshWorkspaceCache = () =>
   workspaceCache && workspaceCache.expiresAt > Date.now() ? workspaceCache : null;
 type UserAssignmentField =
   | "assignedSmscs"
+  | "assignedAudioCallConfigs"
   | "assignedSenderIds"
   | "assignedChannels"
   | "assignedTpsConfigs"
@@ -98,6 +99,7 @@ const navItems: { name: Page; icon: LucideIcon }[] = [
   { name: "Users", icon: Users },
   { name: "Campaigns", icon: Send },
   { name: "SMSC Accounts", icon: Radio },
+  { name: "Audio Call APIs", icon: Radio },
   { name: "Sender IDs", icon: Hash },
   { name: "Channels", icon: Layers3 },
   { name: "TPS", icon: Gauge },
@@ -132,6 +134,7 @@ function fromApiUser(user: ApiUser): User {
     tone: "mint",
     notes: user.notes,
     assignedSmscs: user.assigned_smscs,
+    assignedAudioCallConfigs: user.assigned_audio_call_configs,
     assignedSenderIds: user.assigned_sender_ids,
     assignedChannels: user.assigned_channels,
     assignedTpsConfigs: user.assigned_tps_configs,
@@ -243,12 +246,13 @@ function AssignedResources({
   onUpdate,
 }: {
   user: User;
-  page: "SMSC Accounts" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses";
+  page: "SMSC Accounts" | "Audio Call APIs" | "Sender IDs" | "Channels" | "TPS" | "N-Addresses";
   options: UserAssignmentOptions;
   onUpdate: (field: UserAssignmentField, ids: number[]) => Promise<void>;
 }) {
   const fields: Record<typeof page, { label: string; key: UserAssignmentField; options: { id: number; label: string }[] }[]> = {
     "SMSC Accounts": [{ label: "SMSC connections", key: "assignedSmscs", options: options.smscs }],
+    "Audio Call APIs": [{ label: "Audio-call APIs", key: "assignedAudioCallConfigs", options: options.audioCallConfigs }],
     "Sender IDs": [{ label: "Sender IDs", key: "assignedSenderIds", options: options.senderIds }],
     Channels: [{ label: "Channels", key: "assignedChannels", options: options.channels }],
     TPS: [{ label: "TPS configurations", key: "assignedTpsConfigs", options: options.tpsConfigs }],
@@ -456,6 +460,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
   const [users, setUsers] = useState<User[]>(() => getFreshWorkspaceCache()?.users ?? []);
   const [assignmentOptions, setAssignmentOptions] = useState<UserAssignmentOptions>(() => getFreshWorkspaceCache()?.assignmentOptions ?? {
     smscs: [],
+    audioCallConfigs: [],
     senderIds: [],
     channels: [],
     tpsConfigs: [],
@@ -569,20 +574,10 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     void (async () => {
       let coreWorkspaceLoaded = false;
       try {
-        const [me, apiUsers] = await Promise.all([getCurrentAdmin(), listUsers()]);
-        if (!active) return;
-        const mappedUsers = apiUsers.map(fromApiUser);
-        const currentAdminName = me.full_name || me.username;
-        setUsers(mappedUsers);
-        setCurrentAdmin(currentAdminName);
-        setReady(true);
-        coreWorkspaceLoaded = true;
-
-        // Configuration lists are only needed for configuration pages and user
-        // assignment forms. Load them after the main Users workspace is visible.
-        const [smscs, senderIds, channels, tpsConfigs, nAddressConfigs, nAddresses] =
+        const [me, apiUsers, smscs, senderIds, channels, tpsConfigs, nAddressConfigs, nAddresses] =
           await Promise.all([
             listConfig("smsc-configs"),
+            listConfig("audio-call-configs"),
             listConfig("sender-ids"),
             listConfig("channels"),
             listConfig("tps-configs"),
@@ -592,6 +587,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
         if (!active) return;
         const options: UserAssignmentOptions = {
           smscs: smscs.map((item) => ({ id: item.id, label: `${String(item.name ?? item.id)} (${String(item.base_url ?? "")})` })),
+          audioCallConfigs: audioCallConfigs.map((item) => ({ id: item.id, label: `${String(item.name ?? item.id)} (${String(item.base_url ?? "")})` })),
           senderIds: senderIds.map((item) => ({ id: item.id, label: `${String(item.sender_id ?? "")} — ${String(item.name ?? "")}` })),
           channels: channels.map((item) => ({ id: item.id, label: `${String(item.name ?? "")} (${String(item.code ?? "")})` })),
           tpsConfigs: tpsConfigs.map((item) => ({ id: item.id, label: `${String(item.name ?? "")} — ${String(item.global_tps ?? "")} TPS` })),
@@ -635,7 +631,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     };
   }, [navigate]);
 
-  const pagePaths: Record<Page, string> = { Overview: "/", Users: "/users", Campaigns: "/campaigns", "SMSC Accounts": "/smsc-accounts", "Sender IDs": "/sender-ids", Channels: "/channels", TPS: "/tps", "N-Addresses": "/n-addresses", "TPS & N-Addresses": "/tps-n-addresses", "Email Config": "/smtp", "System Logs": "/system-logs", "Kafka Monitor": "/kafka-monitor" };
+  const pagePaths: Record<Page, string> = { Overview: "/", Users: "/users", Campaigns: "/campaigns", "SMSC Accounts": "/smsc-accounts", "Audio Call APIs": "/audio-call-apis", "Sender IDs": "/sender-ids", Channels: "/channels", TPS: "/tps", "N-Addresses": "/n-addresses", "TPS & N-Addresses": "/tps-n-addresses", "Email Config": "/smtp", "System Logs": "/system-logs", "Kafka Monitor": "/kafka-monitor" };
   const go = (next: Page) => { setSelectedUser(null); setSelectedCampaign(null); setQuery(""); setFilter("All statuses"); setMenuOpen(false); if (next !== page) void navigate({ to: pagePaths[next] }); };
   const flash = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 3800); };
   const viewUser = (user: User) => { setSelectedUser(user); setDetailTab("Profile"); if (page !== "Users") void navigate({ to: "/users" }); };
@@ -653,6 +649,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
     notes: payload.notes,
     tps_limit: payload.tpsLimit,
     assigned_smscs: payload.assignedSmscs,
+    assigned_audio_call_configs: payload.assignedAudioCallConfigs,
     assigned_sender_ids: payload.assignedSenderIds,
     assigned_channels: payload.assignedChannels,
     assigned_tps_configs: payload.assignedTpsConfigs,
@@ -689,6 +686,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
       notes: user.notes ?? "",
       tpsLimit: user.tps || null,
       assignedSmscs: user.assignedSmscs,
+      assignedAudioCallConfigs: user.assignedAudioCallConfigs,
       assignedSenderIds: user.assignedSenderIds,
       assignedChannels: user.assignedChannels,
       assignedTpsConfigs: user.assignedTpsConfigs,
@@ -723,6 +721,7 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
       notes: user.notes ?? "",
       tpsLimit: user.tps || null,
       assignedSmscs: user.assignedSmscs,
+      assignedAudioCallConfigs: user.assignedAudioCallConfigs,
       assignedSenderIds: user.assignedSenderIds,
       assignedChannels: user.assignedChannels,
       assignedTpsConfigs: user.assignedTpsConfigs,
@@ -803,9 +802,9 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
           />
         )}
 
-        {page === "Users" && selectedUser && <><Button variant="ghost" size="sm" className="mb-5 -ml-3 text-muted-foreground" onClick={() => setSelectedUser(null)}><ArrowLeft /> Back to users</Button><div className="mb-7 flex flex-wrap items-center gap-4"><Avatar name={selectedUser.name} tone={selectedUser.tone} size="lg" /><div><div className="flex items-center gap-3"><h1 className="font-display text-[28px] font-bold">{selectedUser.name}</h1><Status value={selectedUser.status} /></div><p className="text-sm text-muted-foreground">{selectedUser.email} · {selectedUser.company}</p></div><div className="ml-auto flex gap-2"><Button onClick={() => openUserForm(selectedUser)}>Edit user</Button></div></div><div className="admin-scroll mb-6 flex gap-5 overflow-x-auto border-b border-border">{["Profile", "SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses", "Campaigns"].map(tab => <Button key={tab} variant="ghost" onClick={() => setDetailTab(tab)} className={`h-10 shrink-0 rounded-none border-b-2 px-0 text-xs shadow-none hover:bg-transparent ${detailTab === tab ? "border-primary text-primary" : "border-transparent text-muted-foreground"}`}>{tab}</Button>)}</div>
+        {page === "Users" && selectedUser && <><Button variant="ghost" size="sm" className="mb-5 -ml-3 text-muted-foreground" onClick={() => setSelectedUser(null)}><ArrowLeft /> Back to users</Button><div className="mb-7 flex flex-wrap items-center gap-4"><Avatar name={selectedUser.name} tone={selectedUser.tone} size="lg" /><div><div className="flex items-center gap-3"><h1 className="font-display text-[28px] font-bold">{selectedUser.name}</h1><Status value={selectedUser.status} /></div><p className="text-sm text-muted-foreground">{selectedUser.email} · {selectedUser.company}</p></div><div className="ml-auto flex gap-2"><Button onClick={() => openUserForm(selectedUser)}>Edit user</Button></div></div><div className="admin-scroll mb-6 flex gap-5 overflow-x-auto border-b border-border">{["Profile", "SMSC Accounts", "Audio Call APIs", "Sender IDs", "Channels", "TPS", "N-Addresses", "Campaigns"].map(tab => <Button key={tab} variant="ghost" onClick={() => setDetailTab(tab)} className={`h-10 shrink-0 rounded-none border-b-2 px-0 text-xs shadow-none hover:bg-transparent ${detailTab === tab ? "border-primary text-primary" : "border-transparent text-muted-foreground"}`}>{tab}</Button>)}</div>
           {detailTab === "Profile" && <div className="grid gap-5"><div className="rounded-md border border-border bg-card p-6"><SectionHeading title="Profile information" /><div className="grid gap-y-6 sm:grid-cols-2">{[["Display name", selectedUser.name], ["Email address", selectedUser.email], ["Department", selectedUser.department ?? selectedUser.company], ["Role", selectedUser.role ?? "Campaign Manager"], ["Username", selectedUser.username ?? selectedUser.email.split("@")[0]], ["Last login", selectedUser.login]].map(([key, val]) => <div key={key}><div className="text-[11px] text-muted-foreground">{key}</div><div className="mt-1 text-sm font-medium">{val}</div></div>)}</div><div className="mt-6 border-t border-border pt-5"><div className="text-[11px] text-muted-foreground">Notes</div><p className="mt-1 text-sm">{selectedUser.notes || "No notes added."}</p></div></div></div>}
-          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(detailTab) && <AssignedResources page={detailTab as BackendConfigPage} user={selectedUser} options={assignmentOptions} onUpdate={(field, ids) => updateUserAssignment(selectedUser, field, ids)} />}
+          {["SMSC Accounts", "Audio Call APIs", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(detailTab) && <AssignedResources page={detailTab as BackendConfigPage} user={selectedUser} options={assignmentOptions} onUpdate={(field, ids) => updateUserAssignment(selectedUser, field, ids)} />}
           {detailTab === "Campaigns" && <UserCampaigns key={selectedUser.profileId} profileId={selectedUser.profileId} />}
         </>}
 
@@ -858,8 +857,8 @@ export function AdminConsole({ initialPage }: { initialPage: Page }) {
         </>}
 
         {!["Overview", "Users", "Campaigns"].includes(page) && <><PageTitle title={page} subtitle={pageSubtitle(page)} action={["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses", "Email Config", "System Logs", "Kafka Monitor"].includes(page) ? undefined : <Button onClick={() => openResource(page)}><Plus /> Add configuration</Button>} />
-          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(page) && (!configsLoaded ? <p role="status" className="rounded-md border border-border bg-card p-5 text-sm text-muted-foreground">Loading configuration…</p> : configurationLoadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-card p-5 text-sm text-destructive">{configurationLoadError}</p> : <BackendConfiguration page={page as BackendConfigPage} users={users} onNotice={flash} />)}
-          {page === "TPS & N-Addresses" && (!configsLoaded ? <p role="status" className="rounded-md border border-border bg-card p-5 text-sm text-muted-foreground">Loading configuration…</p> : configurationLoadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-card p-5 text-sm text-destructive">{configurationLoadError}</p> : <div className="grid gap-8"><section><h2 className="mb-4 font-display text-lg font-bold">TPS limits</h2><BackendConfiguration page="TPS" users={users} onNotice={flash} /></section><section><h2 className="mb-4 font-display text-lg font-bold">N-addresses</h2><BackendConfiguration page="N-Addresses" users={users} onNotice={flash} /></section></div>)}
+          {["SMSC Accounts", "Sender IDs", "Channels", "TPS", "N-Addresses"].includes(page) && <BackendConfiguration page={page as BackendConfigPage} users={users} onNotice={flash} />}
+          {page === "TPS & N-Addresses" && <div className="grid gap-8"><section><h2 className="mb-4 font-display text-lg font-bold">TPS limits</h2><BackendConfiguration page="TPS" users={users} onNotice={flash} /></section><section><h2 className="mb-4 font-display text-lg font-bold">N-addresses</h2><BackendConfiguration page="N-Addresses" users={users} onNotice={flash} /></section></div>}
           {page === "Email Config" && <AdminEmailSettings />}
           {page === "System Logs" && <><div className="mb-4 flex flex-wrap gap-2"><div className="relative min-w-[220px] flex-1 sm:max-w-[330px]"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search events..." className="bg-card pl-9" value={query} onChange={e => setQuery(e.target.value)} /></div><select aria-label="Filter log type" className="h-9 rounded-md border border-input bg-card px-3 text-xs" value={filter} onChange={e => setFilter(e.target.value)}><option>All statuses</option><option>Campaign</option><option>SMSC</option><option>System</option></select><select aria-label="Filter log user" className="h-9 rounded-md border border-input bg-card px-3 text-xs" onChange={e => setQuery(e.target.value)}><option value="">All users</option>{[...users.map(u => u.name), "Alex Morgan"].map(n => <option key={n}>{n}</option>)}</select><Input type="date" aria-label="Log date" className="w-[145px] bg-card text-xs" /></div><LogList query={query} category={filter} /></>}
           {page === "Kafka Monitor" && <><div className="mb-5 grid gap-3 sm:grid-cols-3">{[["Topics monitored", "2", Radio], ["Events this hour", "42,861", Zap], ["Consumer health", "Healthy", CheckCircle2]].map(([l,v,Icon]) => { const I = Icon as LucideIcon; return <div key={l as string} className="rounded-md border border-border bg-card p-5"><div className="flex justify-between text-xs text-muted-foreground">{l as string}<I className="size-4 text-primary" /></div><div className="mt-2 font-display text-2xl font-bold">{v as string}</div></div>; })}</div><div className="rounded-md border border-border bg-card"><div className="border-b border-border p-5 font-display text-sm font-bold">Consumer groups</div><div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left text-xs"><thead className="bg-surface text-muted-foreground"><tr>{["TOPIC", "CONSUMER GROUP", "CURRENT LAG", "EVENTS / HOUR", "STATUS"].map(h => <th key={h} className="px-5 py-3">{h}</th>)}</tr></thead><tbody>{[["sent-response", "status-updater", "12", "27,480"], ["delivery-report", "dlr-processor", "4", "15,381"]].map(([t,g,l,e]) => <tr key={t} className="border-t border-border"><td className="px-5 py-4 font-mono font-semibold">{t}</td><td className="px-5 py-4">{g}</td><td className="px-5 py-4">{l}</td><td className="px-5 py-4">{e}</td><td className="px-5 py-4"><Status value="Connected" /></td></tr>)}</tbody></table></div></div><div className="mt-5 rounded-md border border-border bg-card p-5"><SectionHeading title="Events per hour" detail="Last 12 hours across both topics" /><div className="flex h-44 items-end gap-2">{[31,28,35,40,38,44,52,47,41,45,49,43].map((v, i) => <div key={i} className="flex flex-1 flex-col items-center gap-2"><div className="w-full rounded-t bg-primary/80" style={{ height: `${v * 2.6}px` }} title={`${v}k events`} /><span className="text-[10px] text-muted-foreground">{String((i + 23) % 24).padStart(2, "0")}h</span></div>)}</div></div></>}

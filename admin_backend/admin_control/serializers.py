@@ -10,6 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import (
     AdminAuditLog,
     AdminEmailConfig,
+    AudioCallConfig,
     Campaign,
     Channel,
     ChannelSMSCBinding,
@@ -118,6 +119,95 @@ class SMSCConfigWriteSerializer(serializers.ModelSerializer):
             value = attrs.get(field)
             if value is not None and not isinstance(value, dict):
                 raise serializers.ValidationError({field: "Must be a JSON object."})
+        return attrs
+
+
+class AudioCallConfigSerializer(serializers.ModelSerializer):
+    assigned_user_ids = AssignedUserIdField(
+        source="assigned_profiles",
+        many=True,
+        queryset=UserProfile.objects.all(),
+        required=False,
+    )
+    has_api_key = serializers.SerializerMethodField()
+    has_api_secret = serializers.SerializerMethodField()
+    has_password = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AudioCallConfig
+        exclude = ("created_at", "updated_at", "api_key", "api_secret", "password")
+        read_only_fields = ("id", "last_tested_at", "last_test_status", "last_test_message")
+
+    def get_has_api_key(self, obj):
+        return bool(obj.api_key)
+
+    def get_has_api_secret(self, obj):
+        return bool(obj.api_secret)
+
+    def get_has_password(self, obj):
+        return bool(obj.password)
+
+
+class AudioCallConfigWriteSerializer(serializers.ModelSerializer):
+    assigned_user_ids = AssignedUserIdField(
+        source="assigned_profiles",
+        many=True,
+        queryset=UserProfile.objects.all(),
+        required=False,
+    )
+    AUTH_TYPES = {"none", "api_key", "bearer", "basic"}
+    HTTP_METHODS = {"GET", "POST", "PUT"}
+    REQUIRED_FIELDS = {"msisdn", "audio_recording", "calling_number", "language", "call_id"}
+
+    class Meta:
+        model = AudioCallConfig
+        exclude = ("created_at", "updated_at", "last_tested_at", "last_test_status", "last_test_message")
+        read_only_fields = ("id",)
+        extra_kwargs = {
+            "api_key": {"write_only": True, "required": False, "allow_blank": True},
+            "api_secret": {"write_only": True, "required": False, "allow_blank": True},
+            "password": {"write_only": True, "required": False, "allow_blank": True},
+        }
+
+    def update(self, instance, validated_data):
+        for field in ("api_key", "api_secret", "password"):
+            if validated_data.get(field) == "":
+                validated_data.pop(field)
+        return super().update(instance, validated_data)
+
+    def validate(self, attrs):
+        get_value = lambda field, default=None: attrs.get(field, getattr(self.instance, field, default))
+        auth_type = get_value("auth_type", "api_key")
+        api_key = get_value("api_key", "")
+        password = get_value("password", "")
+        if self.instance and api_key == "":
+            api_key = self.instance.api_key
+        if self.instance and password == "":
+            password = self.instance.password
+        if auth_type not in self.AUTH_TYPES:
+            raise serializers.ValidationError({"auth_type": "Choose none, api_key, bearer, or basic."})
+        if auth_type in {"api_key", "bearer"} and not api_key:
+            raise serializers.ValidationError({"api_key": "This authentication type requires an API key."})
+        if auth_type == "basic" and (not get_value("username", "") or not password):
+            raise serializers.ValidationError({"username": "Basic authentication requires a username and password."})
+        if get_value("http_method", "POST") not in self.HTTP_METHODS:
+            raise serializers.ValidationError({"http_method": "Choose GET, POST, or PUT."})
+        if not str(get_value("calling_number", "")).strip():
+            raise serializers.ValidationError({"calling_number": "Calling number is required."})
+        for field in ("rate_limit_per_second", "rate_limit_per_minute", "request_timeout_seconds", "connect_timeout_seconds"):
+            if get_value(field, 1) < 1:
+                raise serializers.ValidationError({field: "Must be at least 1."})
+        for field in ("extra_headers", "extra_params"):
+            value = attrs.get(field)
+            if value is not None and not isinstance(value, dict):
+                raise serializers.ValidationError({field: "Must be a JSON object."})
+        mapping = get_value("request_field_mapping", {})
+        if not isinstance(mapping, dict) or not self.REQUIRED_FIELDS.issubset(mapping):
+            raise serializers.ValidationError({
+                "request_field_mapping": "Map msisdn, audio_recording, calling_number, language, and call_id."
+            })
+        if any(not isinstance(mapping[key], str) or not mapping[key].strip() for key in self.REQUIRED_FIELDS):
+            raise serializers.ValidationError({"request_field_mapping": "Mapped field names must be non-empty strings."})
         return attrs
 
 
@@ -597,6 +687,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
     assigned_smscs = serializers.PrimaryKeyRelatedField(
         source="sms_configs", many=True, queryset=SMSCConfig.objects.all(), required=False
     )
+    assigned_audio_call_configs = serializers.PrimaryKeyRelatedField(
+        source="audio_call_configs",
+        many=True,
+        queryset=AudioCallConfig.objects.all(),
+        required=False,
+    )
     assigned_sender_ids = serializers.PrimaryKeyRelatedField(
         source="sender_ids", many=True, queryset=SenderID.objects.all(), required=False
     )
@@ -624,7 +720,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "id", "user_id", "username", "email", "first_name", "last_name", "full_name",
             "department", "role", "is_active", "is_locked", "last_login", "notes",
             "require_password_change",
-            "tps_limit", "assigned_smscs", "assigned_sender_ids", "assigned_channels",
+            "tps_limit", "assigned_smscs", "assigned_audio_call_configs",
+            "assigned_sender_ids", "assigned_channels",
             "assigned_tps_configs", "assigned_n_address_configs", "assigned_n_addresses",
             "assigned_config_counts",
             "password", "created_at", "updated_at",
@@ -637,6 +734,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def get_assigned_config_counts(self, profile):
         return {
             "smsc": profile.sms_configs.count(),
+            "audio_calls": profile.audio_call_configs.count(),
             "sender_ids": profile.sender_ids.count(),
             "channels": profile.channels.count(),
             "tps": profile.tps_configs.count(),
@@ -704,7 +802,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         profile_data = {
             key: validated_data.pop(key)
             for key in list(validated_data)
-            if key in {"sms_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"}
+            if key in {"sms_configs", "audio_call_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"}
         }
         profile = UserProfile.objects.get(user=user)
         profile.require_password_change = True
@@ -726,7 +824,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             validate_password(password, user=instance.user)
             instance.user.set_password(password)
         instance.user.save()
-        assignment_fields = {"sms_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"}
+        assignment_fields = {"sms_configs", "audio_call_configs", "sender_ids", "channels", "tps_configs", "n_address_configs"}
         assignment_data = {key: validated_data.pop(key) for key in list(validated_data) if key in assignment_fields}
         for key, value in validated_data.items():
             setattr(instance, key, value)
